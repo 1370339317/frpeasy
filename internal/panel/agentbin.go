@@ -231,7 +231,20 @@ func (p *Panel) agentUpdateFor(r *http.Request, ag *shared.Agent) *shared.AgentU
 	bin := p.agentBinFor(path)
 	target := bin.Version
 	if target == "" {
-		// 无法确认目标版本的来源（比如文件损坏、架构不匹配跑不起来），
+		// 跨平台时本机根本执行不了这份二进制（Linux 上放 .exe、amd64 上放 arm64），
+		// 于是 probeAgentVersion 必然失败、Version 为空 —— 原来这里直接 return nil，
+		// 结果就是「Windows 客户端的自动升级从来没生效过」，而且完全无声：
+		// 面板上一切正常，客户端永远停在旧版本。
+		//
+		// 退路是用 manifest 里登记的发布版本：agent 与面板同版本发布，
+		// 那份二进制的版本就是清单的 version。哈希和大小仍取自实际文件，
+		// 客户端下载后还会自己跑 --version 复核，版本对不上会回滚。
+		if m, _ := p.currentManifest(false); m != nil {
+			target = m.Version
+		}
+	}
+	if target == "" {
+		// 无法确认目标版本的来源（文件损坏、且清单也取不到），
 		// 这时候必须**不升级**：不能用一个自己都没验证过的版本号去指挥客户端。
 		return nil
 	}
