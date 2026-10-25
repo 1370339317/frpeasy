@@ -1,53 +1,67 @@
 # frpeasy
 
-把 frp 配置白痴化的单二进制面板 —— 浏览器里点几下就能把内网服务映射到公网，
+把 frp 配置白痴化的单二进制面板。浏览器里点几下，把内网服务映射到公网 ——
 不用手写 TOML，不用记端口，不用碰命令行。
 
-## 它是什么
+零外部依赖：不需要 Nginx / Docker / Redis，数据全在一个 SQLite 文件里。
 
-一个 Go 二进制内嵌 React 面板，零外部依赖（不需要 Redis / Nginx / Docker）：
+- **面板**内置 frps，运行时拉官方 frp 二进制（默认 GitHub，可一键切国内镜像）。
+- **客户端 Agent** 一条命令装上，自动探测那台机器在监听什么服务，保活 frpc、上报状态。
+- **三层自更新**：面板自身、agent、frp 本体各自独立升级；客户端只从面板取二进制，
+  永不直连 GitHub，所以内网机器也能升级。
 
-- **面板**内置 frps，运行时按需拉官方 frp 二进制（默认 GitHub，可一键切国内镜像）。
-  在你点「新建隧道」之后，frps 才真正对外提供端口。
-- **客户端 Agent** 一条命令装上，自动探测本机正在监听的服务，
-  把「哪台机器 → 哪个端口」替你填好；装完保活 frpc、周期上报状态。
-- **三层版本自更新**：面板自身、客户端 agent、frp 本体各自独立升级。
-  客户端**永不直连 GitHub**，只从面板取二进制 —— 内网无外网也能升级。
-- 数据全在一个 SQLite 文件里，备份就是拷一个文件。
+---
 
-支持 Linux（amd64 / arm64 / armv7 / 386）、Windows（amd64 / arm64）、
-Android（arm64-v8a / armeabi-v7a，复用 linux 静态产物）。
+## 装完以后：开哪几个端口，访问什么地址
 
-## 快速开始
+这是最容易卡住的一步，先给结论。
 
-完整步骤见 [QUICKSTART.md](QUICKSTART.md)（本地体验 → 实机部署 → 客户端安装与升级）。
+| 端口 | 干什么用的 | 要放开吗 |
+|---|---|---|
+| **8080** | 你浏览器打开面板用的 | **必须** |
+| **7000** | 客户端 agent 连服务器用的（frps 入口） | **必须** |
+| **10000–20000** | 每条隧道从这里分走一个，这就是你服务的公网端口 | **必须**（不用全开，见下） |
+| 7500 | frps 内部 dashboard，只监听 127.0.0.1 | 不用 |
 
-### 方式一：一条命令装到服务器（Alpine / Debian / Ubuntu / 群晖）
+然后浏览器打开：
+
+```
+http://你的服务器公网IP:8080
+```
+
+默认账号 `admin` / `admin` —— **登录后第一件事是改口令**，页面顶部会有红条提醒你。
+
+> 云服务器要**两处**都放行：云厂商控制台的「安全组」+ 机器里的防火墙。
+> 少放一处就是访问超时。
+>
+> 端口池 10000–20000 有上万个，**不用全开**。每建一条隧道，面板会明确告诉你
+> 这条分到了哪个端口；左侧「端口 / 防火墙」页把它们列全，并给你可直接粘的
+> ufw / firewalld / nftables / iptables 放行命令，还带外网回访检测确认真的通了。
+
+---
+
+## 安装（三种方式，任选其一）
+
+### 方式一：一条命令（推荐）
+
+Alpine / Debian / Ubuntu / 群晖都行：
 
 ```bash
 curl -fsSL https://github.com/1370339317/frpeasy/releases/latest/download/deploy.sh | sudo bash
 ```
 
-它会拉最新版、校验 sha256、装到 `/opt/frpeasy`、注册 systemd 并启动，
-同时把更新源写进服务环境变量 —— 之后在面板里点「更新」就能自动升级。
+它会：拉清单 → 选本机平台的产物 → 下载 → 校验 sha256 → 预检二进制能否执行 →
+停旧实例 → 装到 `/opt/frpeasy` → 注册 systemd 并启动 → 轮询 healthz 确认起来了。
 
-改端口或目录：
+**重复执行就是升级**，`data` 目录原样保留。改端口：
 
 ```bash
-curl -fsSL .../deploy.sh | sudo PORT=9000 bash
-curl -fsSLO .../deploy.sh && sudo bash deploy.sh --port 9000 --prefix /srv/frpeasy
+curl -fsSL https://github.com/1370339317/frpeasy/releases/latest/download/deploy.sh | sudo PORT=9000 bash
 ```
 
-### 方式二：下载绿色包手动跑
+### 方式二：绿色包（想自己控制进程）
 
-在 [Releases](https://github.com/1370339317/frpeasy/releases) 里按平台下载
-`frpeasy-panel-<版本>-linux-<架构>.tar.gz`，解压得到三样东西：
-
-```
-frpeasy-panel     静态编译的可执行文件，不依赖运行库
-frpeasy.service   systemd unit（已填好 /opt/frpeasy 和 :8080）
-README.txt        怎么跑、端口要开哪些
-```
+在 [Releases](https://github.com/1370339317/frpeasy/releases) 下对应的 `tar.gz`，解压后：
 
 ```bash
 tar xzf frpeasy-panel-*-linux-amd64.tar.gz
@@ -55,85 +69,62 @@ chmod +x frpeasy-panel
 ./frpeasy-panel --data ./data --listen :8080
 ```
 
-Windows 直接下 `frpeasy-panel-windows-amd64.exe`，双击就跑。
+包里还有 `frpeasy.service`（可直接用的 systemd unit）和 `README.txt`。
+
+Windows 下 `frpeasy-panel-windows-amd64.exe` 双击就跑，配置落在旁边的 `data/`。
 
 ### 方式三：从源码构建
 
 ```bash
 cd web && npm ci && npm run build && cd ..   # 前端产物不入库，首次必须构建
-make build                                    # 编译面板与客户端，并把本机 agent 放进 bin/
+make build
 ./frpeasy-panel --data ./data --listen :8080
 ```
 
-浏览器打开 <http://127.0.0.1:8080>，用 `admin` / `admin` 登录，
-**登录后第一件事是改口令**（页面顶部会红条提醒）。
+---
 
-## 目录结构
+## 用起来是什么流程
 
-```
-cmd/
-  panel/          面板入口（含 --handoff 交接模式，用于自我更新）
-  agent/          客户端入口（--version / --selftest / --reexec-wait）
-  genmanifest/    生成自更新清单 manifest.json 与 sha256
-internal/
-  panel/          面板：HTTP 接口、SQLite 仓储、frps 管理、自更新
-    scripts/      下发给客户端的一键安装脚本（install.sh / install.ps1）
-  agent/          客户端：注册、心跳、服务探测、frpc 守护、自更新
-  shared/         面板与客户端共用：数据模型、协议常量、版本比较、清单、镜像
-  webui/          go:embed 前端产物（dist 由 Vite 生成，不入库）
-web/              前端子项目：React 19 + TypeScript + Tailwind v4 + Vite 7
-tools/            开发辅助脚本（按函数切分源文件、粗粒度死代码检查）
-```
+1. 浏览器登录面板（**改口令**）。
+2. 左侧「客户端」页复制一条安装命令，到**要被暴露的那台机器**上执行。
+   agent 会自己探测那台机器正在监听什么服务，把「哪台机器 → 哪个端口」替你填好。
+3. 「新建隧道」选机器、选服务、填个名字，保存。
+4. 面板告诉你分到了哪个公网端口，浏览器访问 `http://服务器IP:那个端口` 就是你的服务。
 
-## 测试
+客户端覆盖 Linux（amd64 / arm64 / armv7 / 386）、Windows（amd64 / arm64）、
+Android（arm64-v8a / armeabi-v7a）。
+
+agent 进程**本身不需要 root 运行**；装到系统目录时会自动用 `sudo`（没有 sudo 就装不动
+默认路径，可以用 `--data` 指到可写目录）。装完注册自启、保活 frpc、周期上报状态。
+各平台的具体命令和自启方式见 [QUICKSTART 第三节](QUICKSTART.md#三客户端平台与安装升级)。
+
+## 升级
+
+面板自己、客户端 agent、frp 本体，三层各自独立升级。
+
+- **面板**：设置页点「检查更新」→「更新」，自动下载新版、交接替换、起不来则回滚。
+- **客户端**：面板「客户端」页点更新，或在那台机器上重跑一次安装命令（幂等）。
+- **frp**：设置页锁版本，面板负责拉取。
+
+客户端**永不直连 GitHub**，只从面板取二进制 —— 面板能上网，内网机器就不用。
+
+---
+
+## 文档
+
+| 文件 | 内容 |
+|---|---|
+| [QUICKSTART.md](QUICKSTART.md) | 本地体验、实机部署细节、客户端各平台命令、端口页说明、已知坑 |
+| [docs/CONVENTIONS.md](docs/CONVENTIONS.md) | **改代码前必读**：踩过坑之后定下来的硬约束（自更新、端口解析、TOML 语法、发布流程） |
+
+测试脚本：
 
 ```bash
-go test ./...                # 单元测试（含跨平台编译守卫）
-bash it.sh                   # 59 条 API 断言
-bash e2e.sh                  # 11 条真实穿透断言（真拉 frps + frpc）
-bash selfupdate-e2e.sh       # 19 条面板自更新断言（含崩溃回滚）
-bash agent-update-e2e.sh     # 17 条客户端自更新断言
+go test ./...             # 单元测试
+bash it.sh                # 59 条 API 断言
+bash e2e.sh               # 11 条真实穿透断言（真拉 frps + frpc）
+bash selfupdate-e2e.sh    # 19 条面板自更新断言（含崩溃回滚）
+bash agent-update-e2e.sh  # 17 条客户端自更新断言
 ```
 
-四个脚本都会自主启动独立端口与数据目录，可反复执行不互相污染。
-
-## 改代码前必须知道的约定
-
-这些不是风格偏好，是踩过坑之后定下来的硬约束：
-
-1. **面板是唯一的版本源。** 客户端只从 `/api/agent/bin/{os}/{arch}` 取二进制，
-   不直连 GitHub。所以「面板自带哪一版」才是权威，清单里的 agent 资产只用于提示。
-2. **二进制查找顺序固定**：面板同级 → 同级 `bin/` → `<data>/bin`。
-   改这里会导致「装的时候能下、升级时 404」。
-3. **面板对外地址一律走 `resolvePanelBase(r)` / `resolveFRPSAddr(r, port)`**，
-   禁止直接读 `public_addr`。该值默认为空，直接用会生成 `<你的服务器IP>` 这种
-   复制到终端就报错的占位符。
-4. **frp ≥ 0.52 的 TOML 必须是新版顶层驼峰键**（`bindPort` / `serverAddr` /
-   `[[proxies]]`），不能沿用旧 INI（`[common]` / `server_addr`）。有测试守着。
-5. **前端产物不入库，但必须 embed。** `web/src` → Vite → `internal/webui/dist` →
-   `go:embed`。`vite.config.ts` 里的 `base: './'` 不能改成 `/`（面板可能挂在反代子路径下）。
-6. **`internal/panel/scripts/*.sh|*.ps1` 的换行符必须是 LF**，由 `.gitattributes`
-   钉死。它们经 HTTP 原样下发：CRLF 会让 `curl | sh` 报 bad interpreter，
-   而 `install.ps1` 还必须保持纯 ASCII（PowerShell 5.1 在中文系统按 GBK 解码会破坏引号）。
-7. **面板自我替换不能自己重启自己。** 旧进程先把自己复制成 handoff 副本，
-   由副本等旧 PID 退出、换文件、拉起、再比对版本号确认成功，失败则回滚 `.prev`。
-   健康检查必须比对 `version` 字段，只判 HTTP 200 会把「旧进程还没退干净」当成功。
-8. **发布前必须 `make check-manifest`。** 清单里的 sha256 一旦与产物不符，
-   客户端会校验失败拒装，表现是「升级一直失败」而面板侧完全正常
-   （清单版本比客户端新，于是不停下发）。`make build` 里的 `stage-local`
-   就会覆盖 `bin/` 里同平台的 agent 而不更新清单——这是最常见的失配来源。
-   所有 `go build` 都带 `-trimpath`，保证同一源码在不同目录构建出字节相同的产物。
-9. **更新源的初始值来自 `FRPEASY_UPDATE_BASE`，但只在数据库里该值为空时生效。**
-   `update_base` 为空串的语义是「不检查更新」，所以一键部署脚本靠这个环境变量
-   把面板接到 Release 上；而用户在设置页手改过之后，DB 里有值，重启不再覆盖他。
-   这条链断了不会报错，只会表现为「点检查更新什么都不发生」。
-10. **systemd 托管时，交接器必须用 `systemctl` 启停，不能自己 spawn。**
-    配套的 unit 必须是 `Restart=on-failure` + `KillMode=process`：
-    - `on-failure`：面板交接时 exit 0 主动退出，systemd 不重启，
-      给交接器一段干净的时间换文件；用 `always` 会和交接器抢端口，
-      更坏的情况是旧版抢先占端口，导致升级被误判失败而永远回滚。
-    - `process`：交接器是面板的子进程、同一 cgroup，默认策略会在服务停止时
-      把它一起清掉——正好在「面板已退出、交接器要换文件」这个最脆弱的时刻。
-    - 反过来，交接器若自己 `spawn`，起来的进程不在 unit 的 cgroup 里，
-      `systemctl status/stop` 管不到，下次重启就两份进程抢端口。
-   `startTarget`/`stopTarget` 与三个测试守着这条。
+四个脚本各自用独立端口与数据目录，可反复跑、互不污染。

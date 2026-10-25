@@ -1,6 +1,11 @@
 # frpeasy 上手说明
 
-两条路：**先在本地体验**（零成本，验证交互和穿透是否通），再**装到实机**。
+只想尽快装上用起来 → 直接看[第二节](#二装到服务器的三种方式速查)。
+第一次接触、想先摸清楚它怎么跑 → 从[第一节](#一本地体验10-分钟推荐先做这个)的本地体验开始,
+零成本,不需要公网 IP 和域名。
+
+**部署后要开哪些端口、浏览器访问什么地址,见
+[README 的端口表](README.md#装完以后开哪几个端口访问什么地址)。**
 
 ---
 
@@ -62,68 +67,48 @@ go build -o frpeasy-agent.exe  ./cmd/agent
 
 ---
 
-## 二、装到实机（Alpine + 公网服务器）
+## 二、装到服务器的三种方式（速查）
 
-### 前置清单（少一条就跑不通）
+详细命令和注意事项见 [README 的安装一节](README.md#安装三种方式任选其一)，这里只列差异。
 
-| 项 | 说明 |
-|---|---|
-| 公网 IP | 云服务器需要有公网 IP，且不是 NAT 后面 |
-| 安全组/防火墙 | 放行 **面板端口**（如 8080）、**frps 绑定端口**（默认 7000）、以及每条隧道分到的**公网端口** —— TCP。具体是哪几个、开没开，看面板左侧「端口 / 防火墙」页，它会列全并给出可直接复制的放行命令 |
-| Alpine 版本 | 任意。产物是静态链接（无 PT_INTERP），musl 直接跑 |
-| 拉取通路 | 服务器要能拉到 GitHub；拉不动就在面板设置里填镜像前缀（如 `https://ghfast.top/`） |
+| 方式 | 一句话 | 更新源 |
+|---|---|---|
+| **A 一键脚本** | `curl -fsSL .../deploy.sh \| sudo bash` | 自动写进 systemd 环境变量 |
+| **B 绿色包** | 下 `tar.gz`，解压跑二进制 | 要自己带 `FRPEASY_UPDATE_BASE` |
+| **C 源码** | 自己编 → [第六节](#六自己编译然后放上去开发者路线)，用 `scripts/frpeasy.service` 装服务 | 模板里已填好 |
 
-### 构建
+A 和 B 的完整命令在 [README 的安装一节](README.md#安装三种方式任选其一)，这里只补差异部分。
 
-```bash
-# 前端只需构建一次（与目标平台无关，纯静态资源）
-cd web && npm ci && npm run build && cd ..
-
-# 再按目标平台交叉编译
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o bin/frpeasy-panel-linux-amd64 ./cmd/panel
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o bin/frpeasy-agent-linux-amd64  ./cmd/agent
-```
-
-（arm64 同理换 `GOARCH=arm64`。根目录 `make build-alpine` 会把所有平台一次编完。）
-
-### 部署
+一键脚本的可调项：
 
 ```bash
-# 面板放上去
-scp bin/frpeasy-panel-linux-amd64 root@你的服务器:/usr/local/bin/frpeasy-panel
-ssh root@你的服务器
-chmod +x /usr/local/bin/frpeasy-panel
-mkdir -p /var/lib/frpeasy
+# 换端口
+curl -fsSL .../deploy.sh | sudo PORT=9000 bash
 
-# 想用一条 systemd 管着就跑这个
-cat > /etc/systemd/system/frpeasy-panel.service <<'EOF'
-[Unit]
-Description=frpeasy panel
-After=network.target
+# 换目录 + 换端口（先落盘再执行，参数写法更顺）
+curl -fsSLO .../deploy.sh && sudo bash deploy.sh --port 9000 --prefix /srv/frpeasy
 
-[Service]
-ExecStart=/usr/local/bin/frpeasy-panel --data /var/lib/frpeasy --listen :8080
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload && systemctl enable --now frpeasy-panel
+# 不注册 systemd，只放二进制
+curl -fsSL .../deploy.sh | sudo NO_SERVICE=1 bash
 ```
 
-浏览器打开 `http://你的服务器IP:8080`，`admin`/`admin` 登录 → **先改口令** → 设置里填：
+**重复执行就是升级**：二进制换掉，`data` 目录（含数据库）原样保留，
+旧二进制备份成 `frpeasy-panel.prev`，新版起不来可以立刻换回去。
 
-- **公网地址**：你的服务器公网 IP（或域名）。填了它，安装命令和 agent 连 frps 都用它。
-- **镜像前缀**：国内建议 `https://ghfast.top/`（实测约 483KB/s，直连 GitHub 约 20KB/s）
+### 装完之后：更新源是怎么自动配好的
 
-然后把 agent 二进制放到**面板可执行文件同级目录**，命名 `frpeasy-agent-linux-amd64`，
-否则客户端跑一键命令会 404：
+方式 A 会把仓库的 Release 地址写进 unit 的 `Environment=FRPEASY_UPDATE_BASE=...`。
+面板启动时读取它 —— **仅当数据库里该值为空时生效**，所以你在设置页手改过之后，
+重启不会把你的改动冲掉。
+
+裸跑（方式 B）时自己带上即可：
 
 ```bash
-cp bin/frpeasy-agent-linux-amd64 /usr/local/bin/frpeasy-agent-linux-amd64
+FRPEASY_UPDATE_BASE='https://github.com/1370339317/frpeasy/releases/latest/download' \
+  ./frpeasy-panel --data ./data --listen :8080
 ```
 
-之后就是在面板里建隧道 → 复制「Linux 一键命令」→ 到要被暴露的那台机器上执行。
+没配也能用，只是「检查更新」会显示「未配置更新源」—— 那不是故障，只是没告诉它去哪找。
 
 ---
 
@@ -131,16 +116,28 @@ cp bin/frpeasy-agent-linux-amd64 /usr/local/bin/frpeasy-agent-linux-amd64
 
 面板「客户端」页有四个页签，复制哪条都行，脚本都是**幂等**的。
 
-| 平台 | 命令形式 | 自启方式 | 安装位置 |
+| 平台 | 命令形式 | 装完的自启行为 | 安装位置 |
 |---|---|---|---|
-| Linux | `curl -sSL <面板>/install \| sh -s -- --server ... --token ...` | systemd / OpenRC；都没有则用自带看护脚本 | `/usr/local/bin/frpeasy-agent`，数据 `/var/lib/frpeasy-agent` |
+| Linux | `curl -sSL <面板>/install \| sh -s -- --server ... --token ...` | systemd / OpenRC 注册开机自启；两者都没有则挂看护循环（开机自启需手动） | `/usr/local/bin/frpeasy-agent`，数据 `/var/lib/frpeasy-agent` |
 | Windows | `powershell -ExecutionPolicy Bypass -Command "iwr .../install.ps1 ..."` | 计划任务（SYSTEM 身份，开机即启） | `%ProgramData%\frpeasy-agent` |
-| Android（adb，免 root） | `adb shell "curl ... \|\| toybox wget ...; sh /data/local/tmp/frpeasy-install.sh ..."` | 看护脚本 `run.sh supervise` | `/data/local/tmp/frpeasy-agent` |
-| Android（root） | 同上，外面套 `su -c '...'` | 额外挂 `/data/adb/service.d`（Magisk 开机自启） | 同上 |
+| Android（adb，免 root） | `adb shell "curl ... \|\| toybox wget ...; sh /data/local/tmp/frpeasy-install.sh ..."` | **只启动一次，不注册自启、不挂看护** | `/data/local/tmp/frpeasy-agent` |
+| Android（root） | 同上，外面套 `su -c '...'` 或加 `--elevate` | **同上，只启动一次** | 同上 |
 
-Android 说明：Go 没有 `GOOS=android` 的可执行构建，Android 上的 agent 就是
-**linux 静态二进制**（arm64-v8a → `linux/arm64`，armeabi-v7a → `linux/arm`），
-frp 官方对 Android 也是这么发的。面板侧 `/api/agent/bin/android/{arch}` 会自动映射。
+**Android 有意不注册任何自启。** 原因是不猜 `su` 的实现：Magisk / KernelSU / APatch /
+adbsu 的自启目录各不相同，系统版本差异又大，写错位置轻则静默无效，重则在系统升级后
+留下一份失效脚本 —— 猜错的代价远大于收益。所以 Android 上安装器只做「正常启动一次」，
+之后启停完全归你：
+
+```bash
+sh <数据目录>/run.sh start|stop|restart|status|log
+```
+
+（旧版本可能留下过自启文件，安装器会主动清掉 `$MAGISK_BOOT` 和
+`~/.termux/boot/frpeasy-agent.sh` 这两个位置的残留。）
+
+Android 上的 agent 是**linux 静态二进制**（Go 没有 `GOOS=android` 的可执行构建；
+arm64-v8a → `linux/arm64`，armeabi-v7a → `linux/arm`，frp 官方也是这么发的）。
+面板侧 `/api/agent/bin/android/{arch}` 会自动映射。
 
 ### 重跑就是升级 / 修复
 
@@ -149,7 +146,7 @@ frp 官方对 Android 也是这么发的。面板侧 `/api/agent/bin/android/{ar
 1. 先把新二进制下到临时文件，跑 `--version` 校验（能跑才算数：截断、404 页面、
    架构不对都会被拦下）；
 2. 校验通过后才停旧服务、清掉陈旧 unit / pidfile / 残留进程；
-3. 原子替换，重新注册自启并启动；
+3. 原子替换，重新注册自启（Android 除外）并启动；
 4. 等进程真的起来才算成功，否则如实报错。
 
 下载失败时**旧安装原样保留、继续运行**。Windows 额外多做一步：替换前把旧 exe
@@ -160,6 +157,9 @@ frp 官方对 Android 也是这么发的。面板侧 `/api/agent/bin/android/{ar
 ---
 
 ## 四、端口 / 防火墙页
+
+**要开哪些端口、默认值是多少,先看
+[README 的端口表](README.md#装完以后开哪几个端口访问什么地址)。** 这一页是帮你去开它们的。
 
 左侧「端口 / 防火墙」是给云服务器部署用的：
 
@@ -173,15 +173,21 @@ frp 官方对 Android 也是这么发的。面板侧 `/api/agent/bin/android/{ar
     同时验证云安全组。它按来源 IP 限流，被限流时会明确标为「探测不可用」，
     **不会**误报成端口关闭。
 
+> 注意云服务器是**两层**防火墙：控制台的「安全组」和机器里的 ufw/iptables。
+> 只开一层照样访问超时,这是最常见的「明明放行了还是连不上」。
+
 ---
 
 ## 五、已知坑（会踩的）
 
 1. **忘记改默认口令**：面板暴露公网 + `admin/admin`，等于把内网送人。页面有红条提醒，别忽略。
-2. **端口池没放行**：隧道建好了但访问超时，99% 是安全组/防火墙没开那个端口。
+2. **端口没放开**：隧道建好了但访问超时，99% 是安全组/防火墙没开那个端口（面板端口、
+   frps 的 7000、隧道分到的公网端口，三个里少一个都连不通）。见
+   [README 端口表](README.md#装完以后开哪几个端口访问什么地址)。
 3. **没填公网地址又用内网 IP 访问面板**：面板会用你访问的地址（如 192.168.x.x）生成安装命令，客户端在公网侧连不上。公网部署请显式填公网地址。
 4. **国内拉 frps/frpc 慢**：面板设置里配镜像，别硬等。
-5. **流量统计暂时恒为 0**：还没接 frpc 的 admin API，这一项是已知未实现。
+5. **流量数字看着不对**：显示的是 **今日累计**（来自 frps dashboard），不是历史总量，
+   每天归零。dashboard 不可用时该项回退为 0，同时隧道在线状态改用端口探测判定。
 6. **改了前端却没重新构建**（最容易踩）：前端是独立子项目（`web/`），产物由 Vite 构建到 `internal/webui/dist`，再由 `go:embed` 在**编译期**打进二进制。少跑一步就会打开旧页面，看起来像"新功能没做"。
    - 正确姿势：根目录 `make build`（先建前端再编 Go），或手动 `cd web && npm run build && cd .. && go build ./cmd/panel`；
    - 换掉旧进程再启动新二进制（`taskkill /F /IM frpeasy-panel.exe`，或先 Ctrl+C）；
@@ -191,7 +197,69 @@ frp 官方对 Android 也是这么发的。面板侧 `/api/agent/bin/android/{ar
 
 ---
 
-## 六、项目结构（前端是独立子项目）
+## 六、自己编译然后放上去（开发者路线）
+
+> 只是想装到服务器上,用一键脚本就够了,看 [README](README.md#安装三种方式任选其一)。
+> 这一节是「我要改代码 / 我要自己编」的路径。
+
+### 前置（少一条就跑不通）
+
+| 项 | 说明 |
+|---|---|
+| 公网 IP | 云服务器需要公网 IP,且不是 NAT 后面 |
+| 端口 | 要放开哪几个,见 [README 的端口表](README.md#装完以后开哪几个端口访问什么地址) —— 简言之 8080(面板)、7000(agent 接入)、隧道分到的公网端口 |
+| Alpine 版本 | 任意。产物静态链接(无 PT_INTERP),musl 直接跑 |
+| 拉取通路 | 服务器要能拉到 GitHub;拉不动就在面板设置里填镜像前缀(如 `https://ghfast.top/`) |
+
+### 构建
+
+```bash
+# 前端只需构建一次（与目标平台无关，纯静态资源）
+cd web && npm ci && npm run build && cd ..
+
+# 再按目标平台交叉编译
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/frpeasy-panel-linux-amd64 ./cmd/panel
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/frpeasy-agent-linux-amd64  ./cmd/agent
+```
+
+（arm64 同理换 `GOARCH=arm64`。根目录 `make build-alpine` 会把所有平台一次编完。）
+
+### 部署
+
+```bash
+scp bin/frpeasy-panel-linux-amd64 root@你的服务器:/opt/frpeasy/frpeasy-panel
+```
+
+然后在服务器上装成服务。**直接渲染仓库里的 unit 模板,不要手写** ——
+模板里的 `Restart=on-failure` 和 `KillMode=process` 是面板自更新的前提,
+手写成 `Restart=always` 会让「点更新」永远回滚(原因见
+[docs/CONVENTIONS.md](docs/CONVENTIONS.md#b2-systemd-托管时交接器必须用-systemctl-启停不能自己-spawn) 的 B2):
+
+```bash
+# 在仓库根目录执行，把 unit 渲染好推到服务器
+sed -e 's|@@PREFIX@@|/opt/frpeasy|g' \
+    -e 's|@@LISTEN@@|:8080|g' \
+    -e 's|@@UPDATE_BASE@@|https://github.com/1370339317/frpeasy/releases/latest/download|g' \
+    scripts/frpeasy.service | ssh root@你的服务器 'cat > /etc/systemd/system/frpeasy.service && systemctl daemon-reload && systemctl enable --now frpeasy'
+```
+
+浏览器打开 `http://你的服务器IP:8080`，`admin`/`admin` 登录 → **先改口令** → 设置里填：
+
+- **公网地址**：你的服务器公网 IP（或域名）。填了它，安装命令和 agent 连 frps 都用它。
+- **镜像前缀**：国内建议 `https://ghfast.top/`（实测约 483KB/s，直连 GitHub 约 20KB/s）
+
+手动部署还要多做一步:把 agent 二进制放到**面板可执行文件同级目录**,命名
+`frpeasy-agent-linux-amd64`,否则客户端跑一键命令会 404:
+
+```bash
+scp bin/frpeasy-agent-linux-amd64 root@你的服务器:/opt/frpeasy/
+```
+
+之后就是在面板里建隧道 → 复制「Linux 一键命令」→ 到要被暴露的那台机器上执行。
+
+---
+
+## 七、项目结构（前端是独立子项目）
 
 ```
 frpeasy/
@@ -227,7 +295,7 @@ make web-dev
 
 ---
 
-## 七、自检脚本
+## 八、自检脚本
 
 仓库里几个脚本可直接跑，不需要额外参数：
 
@@ -243,80 +311,6 @@ bash agent-update-e2e.sh     # 17 条客户端自更新断言：下载校验替�
 
 注意：所有脚本开头都会**用当前源码重新构建**被测二进制到独立文件名，
 避免跑到根目录里过期的 exe 上得出错误结论。
-
----
-
-## 八、装到服务器（三种方式，任选其一）
-
-### 方式 A：一条命令（推荐）
-
-Alpine / Debian / Ubuntu / 群晖都能用：
-
-```bash
-curl -fsSL https://github.com/1370339317/frpeasy/releases/latest/download/deploy.sh | sudo bash
-```
-
-它依次做：拉最新版的 `manifest.json` → 挑出本机平台的面板产物 → 下载 →
-**校验 sha256 与文件大小** → 跑一次 `--build` 预检确认这份二进制真能执行 →
-停掉旧实例 → 装到 `/opt/frpeasy` → 写 systemd unit 并启动 → 轮询
-`/api/healthz` 确认真的起来了。
-
-默认可改（环境变量或命令行都行）：
-
-```bash
-# 换端口
-curl -fsSL .../deploy.sh | sudo PORT=9000 bash
-
-# 换目录 + 换端口（先落盘再执行，参数写法更顺）
-curl -fsSLO https://github.com/1370339317/frpeasy/releases/latest/download/deploy.sh
-sudo bash deploy.sh --port 9000 --prefix /srv/frpeasy
-
-# 不注册 systemd，只放二进制
-curl -fsSL .../deploy.sh | sudo NO_SERVICE=1 bash
-```
-
-**重复执行就是升级**：二进制换掉，`data` 目录（含数据库）原样保留，
-旧二进制备份成 `frpeasy-panel.prev`，新版起不来可以立刻换回去。
-
-### 方式 B：绿色包（不想跑脚本 / 想自己控制进程）
-
-在 Releases 页按平台下载 `frpeasy-panel-<版本>-linux-<架构>.tar.gz`，解压得到：
-
-```
-frpeasy-panel     静态编译，不依赖运行库
-frpeasy.service   systemd unit（已填好 /opt/frpeasy 和 :8080）
-README.txt        怎么跑、要开哪些端口
-```
-
-```bash
-tar xzf frpeasy-panel-*-linux-amd64.tar.gz
-chmod +x frpeasy-panel
-./frpeasy-panel --data ./data --listen :8080     # 直接前台跑
-```
-
-要开机自启就把 `frpeasy.service` 拷到 `/etc/systemd/system/` 后
-`systemctl enable --now frpeasy`。
-
-Windows 下 `frpeasy-panel-windows-amd64.exe` 双击即可（单文件，配置落在旁边的 `data/`）。
-
-### 方式 C：源码构建
-
-见本文第一、二节。
-
-### 装完之后：更新源是自动配好的
-
-方式 A 会把仓库的 Release 地址写进 systemd unit 的
-`Environment=FRPEASY_UPDATE_BASE=...`。面板启动时读取它 —— **仅当数据库里
-该值为空时生效**，所以你在设置页手改过之后，重启不会把你的改动冲掉。
-
-如果用的是方式 B 裸跑，启动时带上这个变量即可：
-
-```bash
-FRPEASY_UPDATE_BASE='https://github.com/1370339317/frpeasy/releases/latest/download'   ./frpeasy-panel --data ./data --listen :8080
-```
-
-没配也能用，只是「检查更新」会显示「未配置更新源」——那不是故障，
-只是没告诉它去哪找。
 
 ---
 

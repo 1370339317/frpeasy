@@ -36,7 +36,10 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
 #     哈希只对「我这台机器这一次构建」成立。
 BUILD_FLAGS := -trimpath
 
-.PHONY: all build stage-local web web-install web-dev dev-ui build-alpine build-alpine-amd64 build-alpine-arm64 build-arm build-386 build-windows build-android stage-agent manifest check-manifest bundle dist run tidy clean
+# 文档自检脚本用 Python 跑（不引入额外依赖，Linux/macOS/Windows 都有）。
+PYTHON ?= python3
+
+.PHONY: all build stage-local web web-install web-dev dev-ui build-alpine build-alpine-amd64 build-alpine-arm64 build-arm build-386 build-windows build-android stage-agent manifest check-manifest check-docs bundle dist run tidy clean
 
 all: build
 
@@ -160,6 +163,12 @@ manifest:
 # 用 `nothing` 代替默认的"先重算再校验"：重算完必然一致，那样校验就是假绿。
 check-manifest:
 	go run ./cmd/genmanifest -dir $(BIN_DIR) -verify
+
+# 文档链接与锚点自检。改完 README/QUICKSTART 后跑一下：
+# 中文标题锚点、跨文件相对路径、章节重排之后最容易悄悄失效，
+# 而这些断链不会有任何报错，只是读者点过去 404。
+check-docs:
+	@$(PYTHON) tools/check_docs_links.py
 
 # 绿色包：每个 linux 面板产物打一个 tar.gz（二进制 + systemd unit + 使用说明）。
 # 人手动下载时用这个；裸二进制留给一键脚本和自更新。

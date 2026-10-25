@@ -32,6 +32,9 @@ jobs:
       - name: 单元测试
         run: go test ./... -count=1
 
+      - name: 文档链接与锚点
+        run: make check-docs
+
       - name: 构建发布产物 + 清单 + 绿色包
         run: make dist VERSION=0.0.0-ci NOTES="CI 构建（非发布）"
 
