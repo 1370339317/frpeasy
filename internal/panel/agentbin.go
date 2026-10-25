@@ -80,19 +80,21 @@ func (p *Panel) ensureAgentBin(osName, arch string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("os / arch 参数无效（%s/%s）", osName, arch)
 	}
-	if path := p.findAgentBin(osName, arch); path != "" {
+	// 面板自带（构建产物 / 运维手工放的）优先：这份文件由发布流程保证版本，
+	// 不需要也不应该被自动下载覆盖。
+	if path := p.builtinAgentBin(osName, arch); path != "" {
 		return path, nil
 	}
 
 	agentFetchMu.Lock()
 	defer agentFetchMu.Unlock()
-	// 等锁期间别的请求可能已经下好了，拿到锁必须再查一次
-	if path := p.findAgentBin(osName, arch); path != "" {
-		return path, nil
-	}
 
 	base := strings.TrimSpace(p.db.GetSetting("update_base"))
 	if base == "" {
+		// 没配更新源时退回「有缓存就用」，否则连已经能用的离线面板都会被打断
+		if path := p.cachedAgentBin(osName, arch); path != "" {
+			return path, nil
+		}
 		return "", fmt.Errorf("面板上没有 %s，且未配置「更新源」，无法自动拉取。"+
 			"到面板「设置 → 版本与更新」填上更新源（如本仓库的 releases/latest/download），"+
 			"或手工把该文件放进 %s", name, p.dataDir+"/bin")
@@ -100,10 +102,30 @@ func (p *Panel) ensureAgentBin(osName, arch string) (string, error) {
 
 	m, err := shared.FetchManifest(base, p.db.GetSetting("mirror_base"))
 	if err != nil {
+		// 清单拉不到（断网、镜像挂了）时同样退回缓存：
+		// 缓存里的旧版本至少能用，比直接 502 让客户端装不上强。
+		if path := p.cachedAgentBin(osName, arch); path != "" {
+			return path, nil
+		}
 		return "", fmt.Errorf("面板上没有 %s，从更新源拉清单也失败：%v", name, err)
 	}
-	asset, err := m.SelectAsset("agent", osName, arch)
+
+	// 缓存命中判定要带版本。
+	//
+	// 原来只判断「文件在不在」：一旦某次拉取把 0.5.5 落到 data/bin，
+	// 之后面板升级到 0.5.10，这份缓存永远不会刷新 —— 面板用清单里的新版本号
+	// 指挥客户端升级，客户端下到的却是旧文件，--version 对不上目标版本，
+	// 失败后进入 30 分钟冷却。表现就是「自动升级永远不生效」，而且无声无息。
+	cached := p.cachedAgentBin(osName, arch)
+	if cached != "" && p.cacheStampMatches(cached, m.Version) {
+		return cached, nil
+	}
+
+	asset, err := m.SelectAsset(shared.AssetAgent, osName, arch)
 	if err != nil {
+		if cached != "" {
+			return cached, nil
+		}
 		return "", fmt.Errorf("面板上没有 %s，而且 %v", name, err)
 	}
 
@@ -136,9 +158,58 @@ func (p *Panel) ensureAgentBin(osName, arch string) (string, error) {
 	if err := os.Rename(tmp, dst); err != nil {
 		return "", fmt.Errorf("保存 %s 失败：%v", dst, err)
 	}
+	// 记录这份缓存来自哪次发布。下次请求据此判断要不要刷新 ——
+	// 只判断「文件在不在」会让缓存永远停在第一次下载的版本上。
+	_ = os.WriteFile(dst+cacheStampSuffix, []byte(m.Version), 0o644)
 	// 客户端安装脚本自己也会 chmod，但 Linux 上直接执行时先给权限更省事
 	_ = os.Chmod(dst, 0o755)
 	return dst, nil
+}
+
+// cacheStampSuffix 缓存版本戳的后缀，与二进制同目录（<name>.fromver）。
+const cacheStampSuffix = ".fromver"
+
+// builtinAgentBin 只查「面板自带」的两处：可执行文件同级目录、同级 bin/。
+// 这两处是构建产物（make build-alpine）或运维手工放置的，版本由发布流程保证，
+// 不参与自动刷新 —— 否则会把人手工更新过的文件又覆盖回去。
+func (p *Panel) builtinAgentBin(osName, arch string) string {
+	name := shared.AgentBinFileName(osName, arch)
+	if name == "" {
+		return ""
+	}
+	var dirs []string
+	if p.binDir != "" {
+		dirs = append(dirs, p.binDir, filepath.Join(p.binDir, "bin"))
+	}
+	for _, d := range dirs {
+		if c := filepath.Join(d, name); fileExists(c) {
+			return c
+		}
+	}
+	return ""
+}
+
+// cachedAgentBin 只查 panels 自己的按需拉取缓存（<data>/bin）。
+func (p *Panel) cachedAgentBin(osName, arch string) string {
+	name := shared.AgentBinFileName(osName, arch)
+	if name == "" || p.dataDir == "" {
+		return ""
+	}
+	c := filepath.Join(p.dataDir, "bin", name)
+	if fileExists(c) {
+		return c
+	}
+	return ""
+}
+
+// cacheStampMatches 判断缓存文件是否来自指定发布版本。
+// 没有版本戳（老缓存 / 手工放置）一律视为不匹配，交由调用方决定是否重下。
+func (p *Panel) cacheStampMatches(path, version string) bool {
+	b, err := os.ReadFile(path + cacheStampSuffix)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(b)) == strings.TrimSpace(version)
 }
 
 
@@ -230,17 +301,26 @@ func (p *Panel) agentUpdateFor(r *http.Request, ag *shared.Agent) *shared.AgentU
 	// 云服务器上没有 windows 二进制可执行，取本机版本会让升级永远不触发。
 	bin := p.agentBinFor(path)
 	target := bin.Version
+	sha, size := bin.SHA256, bin.Size
 	if target == "" {
 		// 跨平台时本机根本执行不了这份二进制（Linux 上放 .exe、amd64 上放 arm64），
 		// 于是 probeAgentVersion 必然失败、Version 为空 —— 原来这里直接 return nil，
 		// 结果就是「Windows 客户端的自动升级从来没生效过」，而且完全无声：
 		// 面板上一切正常，客户端永远停在旧版本。
 		//
-		// 退路是用 manifest 里登记的发布版本：agent 与面板同版本发布，
-		// 那份二进制的版本就是清单的 version。哈希和大小仍取自实际文件，
-		// 客户端下载后还会自己跑 --version 复核，版本对不上会回滚。
+		// 退路是用 manifest 里登记的发布版本与资产指纹：agent 与面板同版本发布，
+		// 版本号、sha256、大小都以清单为准（本地缓存可能是旧版本，不能拿它的哈希
+		// 去指挥客户端 —— 那会让客户端下到旧文件、校验「通过」、然后版本对不上）。
 		if m, _ := p.currentManifest(false); m != nil {
 			target = m.Version
+			if a, err := m.SelectAsset(shared.AssetAgent, ag.Os, ag.Arch); err == nil {
+				if a.SHA256 != "" {
+					sha = a.SHA256
+				}
+				if a.Size > 0 {
+					size = a.Size
+				}
+			}
 		}
 	}
 	if target == "" {
@@ -254,7 +334,7 @@ func (p *Panel) agentUpdateFor(r *http.Request, ag *shared.Agent) *shared.AgentU
 	return &shared.AgentUpdate{
 		Version: target,
 		URL:     p.resolvePanelBase(r) + "/api/agent/bin/" + ag.Os + "/" + ag.Arch,
-		SHA256:  bin.SHA256,
-		Size:    bin.Size,
+		SHA256:  sha,
+		Size:    size,
 	}
 }

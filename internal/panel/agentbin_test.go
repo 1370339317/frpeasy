@@ -18,6 +18,13 @@ import (
 // 返回服务地址和二进制内容。
 func fakeAgentRelease(t *testing.T, goos, goarch string, body []byte, declareSHA string) string {
 	t.Helper()
+	return fakeAgentReleaseVersion(t, goos, goarch, "9.9.9", body, declareSHA)
+}
+
+// fakeAgentReleaseVersion 与 fakeAgentRelease 相同，但可以指定发布版本。
+// 用于验证「缓存按版本刷新」——那是「自动升级无声失效」的根因之一。
+func fakeAgentReleaseVersion(t *testing.T, goos, goarch, version string, body []byte, declareSHA string) string {
+	t.Helper()
 	name := shared.AgentBinFileName(goos, goarch)
 	if name == "" {
 		t.Fatalf("平台 %s/%s 没有对应文件名", goos, goarch)
@@ -28,7 +35,7 @@ func fakeAgentRelease(t *testing.T, goos, goarch string, body []byte, declareSHA
 		declareSHA = realSHA
 	}
 	m := shared.Manifest{
-		Version: "9.9.9",
+		Version: version,
 		Assets: []shared.Asset{{
 			Kind: "agent", OS: goos, Arch: goarch,
 			File: name, SHA256: declareSHA, Size: int64(len(body)),
