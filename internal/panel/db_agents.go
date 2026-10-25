@@ -56,7 +56,7 @@ func (db *DB) FindAgentToReuse(name, osName, arch string, ips []string) (*shared
 func (db *DB) ReattachAgent(a *shared.Agent) error {
 	ipsB, _ := json.Marshal(a.IPs)
 	_, err := db.Exec(
-		"UPDATE agents SET os=?, arch=?, install_token=?, agent_token=?, online=1, last_seen=CURRENT_TIMESTAMP, ips=?, frp_version=?, agent_version=? WHERE id=?",
+		"UPDATE agents SET os=?, arch=?, install_token=?, agent_token=?, online=1, last_seen=CURRENT_TIMESTAMP, ips=?, frp_version=?, agent_version=?, uninstall_requested=0, uninstall_sent_at=NULL WHERE id=?",
 		a.Os, a.Arch, a.InstallToken, a.AgentToken, string(ipsB), a.FRPVersion, a.AgentVersion, a.ID,
 	)
 	return err
@@ -121,17 +121,46 @@ func parseStringList(s string) []string {
 	return out
 }
 
-func (db *DB) GetAgent(id string) (*shared.Agent, error) {
-	a := &shared.Agent{}
-	var svc, ips, ver, aver string
-	var online int
-	var lastSeen, createdAt sql.NullTime
-	err := db.QueryRow("SELECT id,name,os,arch,install_token,agent_token,online,last_seen,created_at,services,ips,frp_version,agent_version FROM agents WHERE id=?",
-		id).Scan(&a.ID, &a.Name, &a.Os, &a.Arch, &a.InstallToken, &a.AgentToken, &online, &lastSeen, &createdAt, &svc, &ips, &ver, &aver)
-	if err != nil {
-		return nil, err
+// agentColsTail 是所有 agents 查询共用的尾部列，顺序即扫描顺序。
+//
+// 列名和扫描参数必须严格一一对应，而 GetAgent / ListAgents 各写一遍的话，
+// 加一列忘一处就会「某个接口整张表读不出来」，编译期毫无提示 —— 历史上踩过。
+// 所以列名只在这里出现一次，扫描参数按同一份定义动态拼。
+const agentColsTail = "online,last_seen,created_at,services,ips,frp_version,agent_version,uninstall_requested,uninstall_sent_at"
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func agentColumns(withTokens bool) string {
+	head := "id,name,os,arch"
+	if withTokens {
+		// 令牌只在服务端内部用（鉴权、下发命令），ListAgents 不带它是故意的：
+		// 那个返回值会直接进浏览器。
+		head += ",install_token,agent_token"
 	}
+	return head + "," + agentColsTail
+}
+
+func scanAgentRow(s rowScanner, a *shared.Agent, withTokens bool) error {
+	var svc, ips, ver, aver string
+	var online, uninstallReq int
+	var lastSeen, createdAt, sentAt sql.NullTime
+	dest := []any{&a.ID, &a.Name, &a.Os, &a.Arch}
+	if withTokens {
+		dest = append(dest, &a.InstallToken, &a.AgentToken)
+	}
+	dest = append(dest, &online, &lastSeen, &createdAt, &svc, &ips, &ver, &aver, &uninstallReq, &sentAt)
+	if err := s.Scan(dest...); err != nil {
+		return err
+	}
+	// modernc sqlite 不允许把 INTEGER 直接扫进 bool，必须经 int 中转
 	a.Online = online == 1
+	a.UninstallRequested = uninstallReq == 1
+	if sentAt.Valid {
+		t := sentAt.Time
+		a.UninstallSentAt = &t
+	}
 	if lastSeen.Valid {
 		a.LastSeen = lastSeen.Time
 	}
@@ -142,7 +171,17 @@ func (db *DB) GetAgent(id string) (*shared.Agent, error) {
 	a.IPs = parseStringList(ips)
 	a.FRPVersion = ver
 	a.AgentVersion = aver
+	// 最后一步：心跳过期的客户端在这里被判为离线（见 applyAgentTTL）。
 	applyAgentTTL(a)
+	return nil
+}
+
+func (db *DB) GetAgent(id string) (*shared.Agent, error) {
+	a := &shared.Agent{}
+	row := db.QueryRow("SELECT "+agentColumns(true)+" FROM agents WHERE id=?", id)
+	if err := scanAgentRow(row, a, true); err != nil {
+		return nil, err
+	}
 	return a, nil
 }
 
@@ -176,7 +215,9 @@ func (db *DB) UpdateAgentHeartbeat(id string, ips []string, frpVersion, agentVer
 // 指令走心跳下发而不是长连接：客户端不需要开任何入站端口，面板也不需要
 // 保存到客户端的连接——这跟现有的升级下发是同一套通道。
 func (db *DB) RequestAgentUninstall(id string) error {
-	_, err := db.Exec("UPDATE agents SET uninstall_requested=1 WHERE id=?", id)
+	// 同时清掉上次的 sent_at：用户再点一次，说明上一次没成功，
+	// 面板应当回到「等下发」状态重新走一遍，而不是继续显示「已下发」。
+	_, err := db.Exec("UPDATE agents SET uninstall_requested=1, uninstall_sent_at=NULL WHERE id=?", id)
 	return err
 }
 
@@ -187,7 +228,7 @@ func (db *DB) RequestAgentUninstall(id string) error {
 // 若它因权限不足没删干净就会无限重试，日志刷爆且无法区分新旧请求。
 // 清除后客户端没执行成功的话，用户在面板再点一次即可重新下发。
 func (db *DB) ConsumeAgentUninstall(id string) bool {
-	res, err := db.Exec("UPDATE agents SET uninstall_requested=0 WHERE id=? AND uninstall_requested=1", id)
+	res, err := db.Exec("UPDATE agents SET uninstall_requested=0, uninstall_sent_at=CURRENT_TIMESTAMP WHERE id=? AND uninstall_requested=1", id)
 	if err != nil {
 		return false
 	}
@@ -196,7 +237,7 @@ func (db *DB) ConsumeAgentUninstall(id string) bool {
 }
 
 func (db *DB) ListAgents() ([]shared.Agent, error) {
-	rows, err := db.Query("SELECT id,name,os,arch,online,last_seen,created_at,services,ips,frp_version,agent_version FROM agents ORDER BY created_at DESC")
+	rows, err := db.Query("SELECT " + agentColumns(false) + " FROM agents ORDER BY created_at DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -204,27 +245,12 @@ func (db *DB) ListAgents() ([]shared.Agent, error) {
 	var out []shared.Agent
 	for rows.Next() {
 		a := shared.Agent{}
-		var svc, ips, ver, aver string
-		var online int
-		var lastSeen, createdAt sql.NullTime
-		if err := rows.Scan(&a.ID, &a.Name, &a.Os, &a.Arch, &online, &lastSeen, &createdAt, &svc, &ips, &ver, &aver); err != nil {
+		if err := scanAgentRow(rows, &a, false); err != nil {
 			return nil, err
 		}
-		a.Online = online == 1
-		if lastSeen.Valid {
-			a.LastSeen = lastSeen.Time
-		}
-		if createdAt.Valid {
-			a.CreatedAt = createdAt.Time
-		}
-		a.Services = parseServices(svc)
-		a.IPs = parseStringList(ips)
-		a.FRPVersion = ver
-		a.AgentVersion = aver
-		applyAgentTTL(&a)
 		out = append(out, a)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // agentOfflineAfter 超过这个时间没收到心跳就判定离线。

@@ -91,8 +91,18 @@ export function VersionCard() {
           const stage = r.last_update.stage
           if (stage === 'succeeded' || stage === 'rolled-back' || stage === 'failed') {
             setUpdating(false)
-            if (stage === 'succeeded') toast(`面板已更新到 ${r.last_update.to}`, 'ok')
-            else if (stage === 'rolled-back') toast('新版本未通过健康检查，已自动回滚', 'bad')
+            if (stage === 'succeeded') {
+              toast(`面板已更新到 ${r.last_update.to}，正在重新加载页面…`, 'ok')
+              // 必须重载页面。
+              //
+              // 面板换了二进制不会让已打开的标签页换代码：内存里跑的还是更新前
+              // 那份 JS，只有重新拉 index.html 才会换上新的。不刷新就会出现
+              // 「提示更新成功，但左侧没有新菜单、点了没反应」—— 用户会以为
+              // 功能没做。这里等一秒让提示出来再刷，hash 路由会保留。
+              window.setTimeout(() => window.location.reload(), 1200)
+              return
+            }
+            if (stage === 'rolled-back') toast('新版本未通过健康检查，已自动回滚', 'bad')
             else toast(`更新失败：${r.last_update.error}`, 'bad')
           }
         }

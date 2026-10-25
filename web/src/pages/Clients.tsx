@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useApp, type CommandKind } from '../store'
 import { api } from '../lib/api'
 import { copyText, fmtAgo } from '../lib/format'
+import type { Agent } from '../types'
 import {
   Alert,
   Button,
@@ -73,12 +74,94 @@ function PortWarn({ base, port, accessHost }: { base: string; port: string; acce
   )
 }
 
+/**
+ * 客户端卡片的状态。
+ *
+ * 只看 online 不够：点了卸载之后，客户端要先停 frpc、删文件、退进程才会消失，
+ * 这中间画面上只会显示「在线」，用户根本分不清是「正在卸载」还是「点了没反应」。
+ * 而卸载失败（多因权限不足）时它会一直在线，那就更看不出来了。
+ *
+ * 三个字段的组合含义见 shared.Agent 的注释：
+ *   requested 未消费   → 指令排队中
+ *   已消费 + 仍在心跳  → 卸载没生效
+ *   已消费 + 已离线    → 卸载成功，记录是残留
+ */
+function agentState(a: Agent): {
+  label: string
+  tone: 'ok' | 'gray' | 'warn' | 'bad'
+  led: 'ok' | 'bad' | 'warn'
+  note?: React.ReactNode
+  /** 机器上已经没有 agent 了（只剩面板记录） */
+  gone: boolean
+} {
+  const sent = !!a.uninstall_sent_at
+  if (sent && a.online) {
+    return {
+      label: '卸载未生效',
+      tone: 'bad',
+      led: 'bad',
+      gone: false,
+      note: (
+        <>
+          卸载指令已经下发，但它仍在正常心跳 —— 多半是 agent 没有 root / 管理员权限，删不掉自己。
+          到那台机器上执行上面「卸载客户端」里的命令；或者给它提权后在这里重新点一次「卸载」。
+        </>
+      ),
+    }
+  }
+  if (sent) {
+    return {
+      label: '已卸载',
+      tone: 'gray',
+      led: 'bad',
+      gone: true,
+      note: (
+        <>
+          那台机器上的 agent 已经卸载（最后心跳 {fmtAgo(a.last_seen)}）。面板这条记录只是残留，
+          不影响隧道之外的任何东西，点「移除」就能清掉。
+        </>
+      ),
+    }
+  }
+  if (a.uninstall_requested) {
+    return {
+      label: '等待卸载',
+      tone: 'warn',
+      led: 'warn',
+      gone: false,
+      note: <>卸载指令已排队，等它下一次心跳（约 15 秒内）领取后执行。</>,
+    }
+  }
+  return { label: a.online ? '在线' : '离线', tone: a.online ? 'ok' : 'gray', led: a.online ? 'ok' : 'bad', gone: false }
+}
+
 export function Clients() {
-  const { agents, install, uninstall, installBase, panelPort, accessHost, loadAll, toast } = useApp()
+  const {
+    agents,
+    install,
+    uninstall,
+    installBase,
+    panelPort,
+    accessHost,
+    loadAll,
+    loadAgents,
+    toast,
+  } = useApp()
   const [kind, setKind] = useState<CommandKind>('linux')
 
   const cmd = install[kind] || '加载中…'
   const unCmd = uninstall[kind] || '加载中…'
+
+  // 客户端状态必须自己刷。
+  //
+  // 面板不推事件，这个页面原来只在进入时取一次数据，于是「agent 早就停了、
+  // 甚至已经卸载了，卡片还一直显示在线」—— 而离线判定（60 秒无心跳）是在
+  // 后端读取时算的，前端不来取就永远看不到。10 秒一轮，比心跳 15 秒略快，
+  // 状态最多滞后一个周期。
+  useEffect(() => {
+    const h = window.setInterval(() => void loadAgents(), 10000)
+    return () => window.clearInterval(h)
+  }, [loadAgents])
 
   /** 云端下发卸载：标记随该客户端下一次心跳下发，由它自己清理并退出。 */
   async function uninstallAgent(id: string, name: string, online: boolean) {
@@ -97,15 +180,15 @@ export function Clients() {
     }
   }
 
-  async function remove(id: string, name: string) {
-    if (
-      !confirm(
-        `仅移除面板里的记录「${name}」？\n\n这只删面板这一条记录，并把它的隧道解绑为草稿；` +
-          `那台机器上的 agent 仍在运行、仍会继续连面板（下次心跳会重新注册回来）。\n\n` +
-          `要真正卸载那台机器，请用上面的「卸载命令」或卡片上的「卸载」。`,
-      )
-    )
-      return
+  async function remove(id: string, name: string, gone: boolean) {
+    const msg = gone
+      ? `清掉残留记录「${name}」？\n\n` +
+        `那台机器上已经没有 frpeasy 的 agent 了，这条记录只是面板留下的历史。\n\n` +
+        `如果还有隧道绑着它，那些隧道会变成「未部署」草稿（配置不删）。`
+      : `仅移除面板里的记录「${name}」？\n\n这只删面板这一条记录，并把它的隧道解绑为草稿；` +
+        `那台机器上的 agent 仍在运行、仍会继续连面板（下次心跳会重新注册回来）。\n\n` +
+        `要真正卸载那台机器，请用上面的「卸载命令」或卡片上的「卸载」。`
+    if (!confirm(msg)) return
     try {
       await api('DELETE', `/api/agents/${encodeURIComponent(id)}`)
       toast('已移除客户端记录')
@@ -185,28 +268,52 @@ export function Clients() {
             const svcs = a.services ?? []
             const shown = svcs.slice(0, 8)
             const rest = svcs.length - shown.length
+            const st = agentState(a)
             return (
               <div key={a.id} className="rounded-xl border border-border bg-card px-4.5 py-4">
                 <div className="flex items-center gap-[9px] text-[14.5px] font-[650]">
-                  <Led tone={a.online ? 'ok' : 'bad'} />
+                  <Led tone={st.led} />
                   {a.name}
                   <span className="ml-auto">
-                    <Badge tone={a.online ? 'ok' : 'gray'}>{a.online ? '在线' : '离线'}</Badge>
+                    <Badge tone={st.tone}>{st.label}</Badge>
                   </span>
                   <div className="ml-2 flex items-center gap-1.5">
-                    {/* 云端卸载：真正删那台机器上的东西，务必与「移除记录」区分开 */}
+                    {/* 云端卸载：真正删那台机器上的东西，务必与「移除记录」区分开。
+                        已经确认卸载掉的（机器上没 agent 了）不再给这个按钮：
+                        点了只会把指令存起来等一台不会再上线的机器。 */}
+                    {!st.gone && (
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        onClick={() => void uninstallAgent(a.id, a.name, a.online)}
+                      >
+                        {st.label === '卸载未生效' ? '重新卸载' : '卸载'}
+                      </Button>
+                    )}
                     <Button
-                      variant="danger"
+                      variant={st.gone ? 'primary' : 'ghost'}
                       size="sm"
-                      onClick={() => void uninstallAgent(a.id, a.name, a.online)}
+                      onClick={() => void remove(a.id, a.name, st.gone)}
                     >
-                      卸载
-                    </Button>
-                    <Button variant="ghost" size="sm" onClick={() => void remove(a.id, a.name)}>
-                      移除
+                      {st.gone ? '清掉记录' : '移除'}
                     </Button>
                   </div>
                 </div>
+
+                {st.note && (
+                  <div
+                    className={cx(
+                      'mt-2 rounded-lg border px-3 py-2 text-[12.5px] leading-[1.65]',
+                      st.label === '卸载未生效'
+                        ? 'border-bad/40 bg-bad/10 text-fg'
+                        : st.label === '已卸载'
+                          ? 'border-border bg-card2 text-muted'
+                          : 'border-warn/40 bg-warn/10 text-fg',
+                    )}
+                  >
+                    {st.note}
+                  </div>
+                )}
 
                 <div className="mt-2 grid grid-cols-[auto_1fr] gap-x-2.5 gap-y-1 text-xs text-muted">
                   <b className="font-medium text-dim">系统</b>

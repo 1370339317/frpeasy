@@ -42,6 +42,13 @@ export interface Agent {
   online: boolean
   created_at: string
   services: DiscoveredService[] | null
+  /** 卸载指令已排队，还没被心跳领走 */
+  uninstall_requested: boolean
+  /**
+   * 卸载指令被领走的时刻。有值就说明「已经让它卸载了」：
+   * 配合 online 判断结果 —— 仍在线=没生效，已离线=卸载成功。
+   */
+  uninstall_sent_at?: string | null
 }
 
 export type ProxyState = 'online' | 'waiting_server' | 'not_deployed' | 'offline'

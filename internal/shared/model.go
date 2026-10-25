@@ -70,6 +70,17 @@ type Agent struct {
 	Online       bool                `json:"online"`
 	CreatedAt    time.Time           `json:"created_at"`
 	Services     []DiscoveredService `json:"services"` // 兼容保留：本地监听服务
+
+	// 卸载状态。
+	//
+	// 单靠 online 无法表达「我已经让它卸载了，现在等结果」：客户端收到指令后
+	// 要停 frpc、删文件、退进程，画面上会先在线再消失，用户完全不知道
+	// 「它正在卸载」还是「点了没反应」。这两个字段把过程显式化：
+	//   Requested=true          → 指令已排队，还没被心跳领走
+	//   SentAt 非零 && !Online  → 已下发且它离线了 = 卸载成功
+	//   SentAt 非零 && Online   → 已下发但仍在心跳 = 卸载没生效（多为权限不足）
+	UninstallRequested bool       `json:"uninstall_requested"`
+	UninstallSentAt    *time.Time `json:"uninstall_sent_at,omitempty"`
 }
 
 // DiscoveredService Agent 在客户端机器上探测到的本地监听服务。

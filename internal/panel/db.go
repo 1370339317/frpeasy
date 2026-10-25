@@ -91,6 +91,12 @@ func (db *DB) migrate() error {
 	// 用数据库而不是内存 map：面板重启后指令不该丢，否则用户点了卸载、
 	// 面板恰好重启，那台机器就永远收不到指令，而界面看起来「已下发」。
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN uninstall_requested INTEGER NOT NULL DEFAULT 0`)
+
+	// uninstall_sent_at 记录「卸载指令被心跳领走的时刻」。
+	// 只存 uninstall_requested 一个标记不够：它必须「取出即清除」，
+	// 清掉之后面板就再也分不清「从没下发过」和「已下发、正在等它死」，
+	// 于是卸载完的客户端只能一直显示成普通的「离线」。
+	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN uninstall_sent_at DATETIME`)
 	return nil
 }
 

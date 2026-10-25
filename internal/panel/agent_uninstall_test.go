@@ -90,3 +90,95 @@ func TestUninstallCommandsCarryNoToken(t *testing.T) {
 		}
 	}
 }
+
+// 卸载指令被领走之后必须留下痕迹（uninstall_sent_at）。
+//
+// 只存一个「待办标记」并在取出时清零的话，面板就再也分不清
+// 「从没让它卸载过」和「已经让它卸载了、正在等结果」这两种状态，
+// 于是卸载完的客户端永远只能显示成普通「离线」，用户看不出到底成没成。
+func TestUninstallSentAtRecorded(t *testing.T) {
+	db := newTestDB(t)
+	a := &shared.Agent{ID: "u2", Name: "box2", Os: "windows", Arch: "amd64", InstallToken: "it", AgentToken: "at"}
+	if err := db.CreateAgent(a); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetAgent("u2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UninstallRequested || got.UninstallSentAt != nil {
+		t.Fatal("新客户端不该带卸载状态")
+	}
+
+	if err := db.RequestAgentUninstall("u2"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = db.GetAgent("u2")
+	if !got.UninstallRequested {
+		t.Fatal("下发后 uninstall_requested 应为 true")
+	}
+	if got.UninstallSentAt != nil {
+		t.Fatal("还没被心跳领走，不该有 sent_at")
+	}
+
+	if !db.ConsumeAgentUninstall("u2") {
+		t.Fatal("心跳没取到卸载指令")
+	}
+	got, _ = db.GetAgent("u2")
+	if got.UninstallRequested {
+		t.Fatal("取出后 uninstall_requested 应清零")
+	}
+	if got.UninstallSentAt == nil {
+		t.Fatal("取出后必须记录 sent_at，否则界面无法区分「已卸载」和「从没卸载过」")
+	}
+}
+
+// 用户再点一次「卸载」意味着上一次没成功：要回到「等待下发」，
+// 否则界面会一直停在「已下发/已卸载」，而实际上指令根本没再发出去。
+func TestReRequestUninstallClearsSentAt(t *testing.T) {
+	db := newTestDB(t)
+	a := &shared.Agent{ID: "u3", Name: "box3", Os: "linux", Arch: "arm64", InstallToken: "it", AgentToken: "at"}
+	if err := db.CreateAgent(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RequestAgentUninstall("u3"); err != nil {
+		t.Fatal(err)
+	}
+	db.ConsumeAgentUninstall("u3")
+
+	if err := db.RequestAgentUninstall("u3"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := db.GetAgent("u3")
+	if !got.UninstallRequested {
+		t.Fatal("重新下发后应为等待状态")
+	}
+	if got.UninstallSentAt != nil {
+		t.Fatal("重新下发必须清掉旧的 sent_at，否则界面显示「已卸载」但指令其实还没发")
+	}
+}
+
+// 列表接口也要带出卸载状态：客户端卡片就是用 ListAgents 渲染的，
+// 少扫这两列会直接导致界面永远看不到「已卸载 / 卸载未生效」。
+func TestListAgentsExposesUninstallState(t *testing.T) {
+	db := newTestDB(t)
+	a := &shared.Agent{ID: "u4", Name: "box4", Os: "linux", Arch: "amd64", InstallToken: "it", AgentToken: "at"}
+	if err := db.CreateAgent(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RequestAgentUninstall("u4"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := db.ListAgents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || !list[0].UninstallRequested {
+		t.Fatalf("ListAgents 没带出卸载状态：%+v", list)
+	}
+	// 令牌不能进列表，那个返回值会直接进浏览器
+	if list[0].AgentToken != "" || list[0].InstallToken != "" {
+		t.Fatal("ListAgents 泄漏了令牌")
+	}
+}

@@ -46,6 +46,9 @@ type Panel struct {
 	binDir   string
 	dataDir  string
 	uiSource string // embed | dir：UI 到底来自二进制内嵌还是磁盘目录
+	// uiRoot 是当前正在对外服务的前端根目录，/api/ui/build 靠它读出
+	// index.html 引用的入口脚本名，用来让过期的标签页自己发现该刷新。
+	uiRoot fs.FS
 	// listenAddr 面板原始监听参数（如 ":8080" 或 "127.0.0.1:8080"）。
 	// 端口清单页要靠它判断"面板是否只绑了环回"——绑 127.0.0.1 时放行防火墙
 	// 也没用，得先改启动参数，这个坑必须在 UI 上说清。
@@ -122,6 +125,9 @@ func (p *Panel) Run(listen string) error {
 	// 必须能在旧进程关闭前就返回「我是谁、什么版本」——
 	// 交接进程靠 version 字段确认"响应我的确实是新进程"，而不是还没退干净的旧进程。
 	mux.HandleFunc("GET /api/healthz", p.healthzHandler)
+	// 前端自检：当前 index.html 引用的入口脚本名。页面据此判断自己是否过期
+	// （面板自更新后，已打开的标签页不会自动重新拉 index.html）。
+	mux.HandleFunc("GET /api/ui/build", p.uiBuildHandler)
 
 	// Agent 接口（无需管理员登录）
 	mux.HandleFunc("POST /api/agent/register", p.agentRegisterHandler)
@@ -214,6 +220,8 @@ func (p *Panel) Run(listen string) error {
 		return p.serve(listen, mux)
 	}
 	mux.Handle("/", staticCache(http.FileServer(http.FS(uiRoot))))
+	// 记录实际在服务的 UI 根目录：/api/ui/build 要从中读出入口脚本名
+	p.uiRoot = uiRoot
 	return p.serve(listen, mux)
 }
 

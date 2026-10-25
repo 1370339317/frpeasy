@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, UnauthorizedError } from './lib/api'
+import { useUiAutoRefresh } from './lib/uidrift'
 import { AppProvider, useApp } from './store'
 import { Login } from './components/Login'
 import { Layout } from './components/Layout'
@@ -104,8 +105,29 @@ function Shell({ onLogout }: { onLogout: () => void }) {
 
 type Auth = 'checking' | 'in' | 'out'
 
+/**
+ * 「页面过期」提示条。
+ *
+ * 不做成静默刷新：用户刚点完更新，页面自己闪一下会让人以为是出错。
+ * 明说一句「正在刷新」，比什么都不说要好。放在 App 顶层所以不依赖
+ * AppProvider —— 登录页也要能显示。
+ */
+function StaleBanner({ show }: { show: boolean }) {
+  if (!show) return null
+  return (
+    <div className="pointer-events-none fixed inset-x-0 bottom-5 z-50 flex justify-center px-4">
+      <div className="rounded-[10px] bg-accent px-4 py-2.5 text-[13px] font-semibold text-white shadow-lg">
+        面板已更新，正在刷新页面以加载新界面…
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const [auth, setAuth] = useState<Auth>('checking')
+  // 面板换了二进制，这个标签页还跑着旧 JS：提示并自动刷新（见 lib/uidrift.ts）
+  const [staleUi, setStaleUi] = useState(false)
+  useUiAutoRefresh(useCallback(() => setStaleUi(true), []))
 
   // 会话探测：能拿到隧道列表就说明 cookie 还有效
   useEffect(() => {
@@ -141,11 +163,17 @@ export default function App() {
     // 注意：这里不能挂 <Toasts /> —— 它依赖 AppProvider（useApp），
     // 而登录页在 Provider 之外，一旦渲染就直接抛异常、整页白屏。
     // 登录失败的信息由 Login 组件自己在表单里显示。
-    return <Login onSuccess={() => setAuth('in')} />
+    return (
+      <>
+        <StaleBanner show={staleUi} />
+        <Login onSuccess={() => setAuth('in')} />
+      </>
+    )
   }
 
   return (
     <AppProvider onUnauthorized={() => setAuth('out')}>
+      <StaleBanner show={staleUi} />
       <Shell onLogout={() => void logout()} />
       <Toasts />
     </AppProvider>

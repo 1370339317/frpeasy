@@ -71,9 +71,20 @@ REG2=$(curl -s -X POST $B/api/agent/register -H 'Content-Type: application/json'
 AG2=$(echo "$REG2" | jget "d['agent_id']")
 AG2TOK=$(echo "$REG2" | jget "d['agent_token']")
 chk "下发卸载指令 ok" True "$(curl -s -b cj.txt -X POST $B/api/agents/$AG2/uninstall | jget "d['ok']")"
+# 下发后、心跳前：处于「等待领取」，sent_at 还没有值
+AG2Q="[a for a in d['agents'] if a['id']=='$AG2'][0]"
+chk "等待下发时 requested=true" True "$(curl -s -b cj.txt $B/api/agents | jget "$AG2Q['uninstall_requested']")"
+chk "等待下发时 sent_at 为空" None "$(curl -s -b cj.txt $B/api/agents | jget "$AG2Q.get('uninstall_sent_at')")"
 chk "心跳带回 uninstall=true" True "$(curl -s -X POST $B/api/agent/heartbeat -H 'Content-Type: application/json' -d "{\"agent_id\":\"$AG2\",\"agent_token\":\"$AG2TOK\",\"status\":[]}" | jget "d.get('uninstall')")"
+# 被领走之后必须留下痕迹：否则面板分不清「从没卸载过」和「已让它卸载、等结果」，
+# 卸载完的客户端就只能显示成普通「离线」，用户看不出成功还是失败。
+chk "被领走后 requested 清零" False "$(curl -s -b cj.txt $B/api/agents | jget "$AG2Q['uninstall_requested']")"
+chk "被领走后 sent_at 有值" 0 "$(curl -s -b cj.txt $B/api/agents | jget "0 if $AG2Q.get('uninstall_sent_at') else 1")"
 # 取出即清除：否则客户端每 15 秒重复收到同一指令，权限不足时会无限重试刷日志
 chk "第二次心跳不再下发" None "$(curl -s -X POST $B/api/agent/heartbeat -H 'Content-Type: application/json' -d "{\"agent_id\":\"$AG2\",\"agent_token\":\"$AG2TOK\",\"status\":[]}" | jget "d.get('uninstall')")"
+# 再点一次「卸载」= 上次没成功，状态要回到「等待下发」
+curl -s -b cj.txt -X POST $B/api/agents/$AG2/uninstall >/dev/null
+chk "重新下发清掉旧 sent_at" None "$(curl -s -b cj.txt $B/api/agents | jget "$AG2Q.get('uninstall_sent_at')")"
 chk "不存在的客户端下发 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/agents/nosuchagent/uninstall)"
 # 0.3.0 的客户端：必须明确拒绝，而不是「已下发」然后客户端毫无反应
 chk "过旧客户端被拒 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/agents/$AGID/uninstall)"
@@ -199,6 +210,12 @@ chk "kind 非法 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X
 # frpc 托管接口必须存在。上游没有该架构时应回 502（而不是 404）——
 # 客户端按 5xx 决定回退直连，404 会被理解成"这个平台本来就没有"。
 chk "frpc 托管接口存在（上游缺该架构时 502）" 502 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 $B/api/frpc/bin/linux/riscv64)"
+
+# 前端「我这个标签页是不是过期了」的自检接口。
+# 没有它，面板自更新后已打开的页面会一直跑旧 JS，用户看到「更新成功」却找不到新菜单。
+chk "前端产物自检接口可用" 200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/ui/build)"
+chk "自检接口带 asset 字段" 1 "$(curl -s $B/api/ui/build | jget "1 if 'asset' in d else 0")"
+chk "自检接口带版本号" 1 "$(curl -s $B/api/ui/build | jget "1 if d.get('version') else 0")"
 
 kill $PANEL_PID 2>/dev/null || true
 # Windows 上 kill 只作用于 bash 的作业，原生 exe 会留下来继续心跳（并锁住 exe），
