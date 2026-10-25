@@ -1,0 +1,37 @@
+# ============================================================
+# 换行符策略
+#
+# 这是功能性问题，不是风格问题：
+#   - install.sh 由面板原样下发到 `curl ... | sh` 执行，带 CRLF 会报
+#     "bad interpreter: no such file or directory"；
+#   - install.ps1 由 `irm -OutFile` 原样落字节，带 CRLF 且无 BOM 时，
+#     Windows PowerShell 5.1 在中文系统按 GBK 解码会破坏引号。
+#
+# Windows 上 git 默认 core.autocrlf=true 会把 checkout 出来的文件转成 CRLF，
+# 所以必须在这里显式钉死 LF，不能依赖本地配置。
+# ============================================================
+* text=auto eol=lf
+
+*.go     text eol=lf
+*.sh     text eol=lf
+*.ps1    text eol=lf
+*.ts     text eol=lf
+*.tsx    text eol=lf
+*.css    text eol=lf
+*.json   text eol=lf
+*.md     text eol=lf
+*.mod    text eol=lf
+*.sum    text eol=lf
+Makefile text eol=lf
+
+# ============================================================
+# 二进制（禁止任何换行/文本转换）
+# ============================================================
+*.exe    binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.woff   binary
+*.woff2  binary
