@@ -32,6 +32,11 @@ type ProxyStats struct {
 	LastClose string `json:"last_close_time"`
 }
 
+// maxRestartAttempts 连续自动重启的次数上限。
+// 超过就熔断：端口被别人占着这类问题重试一万次也不会好，只会刷爆日志、
+// 让 UI 永远显示「拉取中」。停下并把真实原因（日志尾部）交给用户决断。
+const maxRestartAttempts = 5
+
 // FrpsManager 负责 frps 二进制的动态拉取、配置生成与子进程生命周期管理。
 type FrpsManager struct {
 	db       *DB
@@ -45,6 +50,12 @@ type FrpsManager struct {
 	// 前者不能自动拉起（否则点了停也没用），后者应该自动恢复。
 	stoppedByUser bool
 	logPath       string
+
+	// 连续自动重启失败次数。进程每次异常退出都会触发一次自动重启；
+	// 如果原因是「端口被别的程序占着」这种自愈不了的问题，重启会永远失败，
+	// 日志每 3 秒刷一条、CPU 白烧、页面永远停在「拉取中」。
+	// 超过上限就停下并把原因留给 UI，让人来决断（换端口 / 停掉占用者）。
+	restartFails int
 
 	// 最近一次「启动失败」的原因，供面板直接展示。
 	// 原来只写进 systemd 日志：用户在页面上只能看到一个永远转的「拉取中」，
@@ -282,9 +293,38 @@ func (m *FrpsManager) Start() (err error) {
 	if err != nil {
 		return err
 	}
+	// 起新进程之前先收掉「同一份二进制的残留进程」。
+	//
+	// 面板自更新/重启时，旧 frps 子进程可能活下来：systemd 的 KillMode=process
+	// 只杀主进程，panel 被 SIGKILL 时其子进程也只是被 init 收养。残留进程继续
+	// 占着 bindPort 和所有隧道端口，新拉起的 frps 只会得到
+	// "bind: address already in use" 并立刻退出 —— 而 Wait 回调又会 3 秒后重启，
+	// 形成无限循环：日志里每 1.3 秒一条 bind 失败，页面永远停在「拉取中」。
+	//
+	// 只按「可执行文件的真实路径」认领，不用 pkill frps：用户可能同时跑着
+	// 另一份 frp，误杀别人的进程比端口冲突严重得多。
+	if n := m.killStrayFrps(); n > 0 {
+		log.Printf("[frps] 清理了 %d 个残留的 frps 进程（上次面板退出时未被回收），等待端口释放", n)
+		m.waitPortFree(3 * time.Second)
+	}
 	cfg, err := m.generateConfig()
 	if err != nil {
 		return err
+	}
+	// 起进程前先确认端口真的能绑。
+	//
+	// 不这么做的话，「端口被别的程序占着」只会表现为 frps 秒退 + 日志里一行
+	// bind 失败；用户看到的是「启动了一下又停了」，完全不知道被谁占的。
+	// 这里直接给出占用者，把排查从「猜」变成「看」。
+	bindPort, _ := strconv.Atoi(m.db.GetSetting("frps_bind_port"))
+	if bindPort > 0 {
+		if ln, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(bindPort))); err != nil {
+			return fmt.Errorf("frps 端口 %d 已被占用%s，frps 无法监听它，隧道不可能建立。"+
+				"请到「设置」把 frps 端口换成空闲端口，或停掉占用它的程序后点「启动」重试",
+				bindPort, portOwnerHint(bindPort))
+		} else {
+			_ = ln.Close()
+		}
 	}
 	cmd := exec.Command(bin, "--config", cfg)
 	f, err := os.OpenFile(m.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
@@ -319,7 +359,22 @@ func (m *FrpsManager) Start() (err error) {
 			// frps 意外退出（OOM、端口被占、配置文件被手改等）：
 			// 不自动拉起的话，面板重启或 frps 一崩，所有隧道就永久卡在
 			// 「等待服务端」，用户只会觉得"点什么都没反应"。
-			log.Printf("[frps] 进程退出（%v），3 秒后自动重启", err)
+			m.mu.Lock()
+			m.restartFails++
+			fails := m.restartFails
+			m.mu.Unlock()
+			// 熔断：连续多次起不来，说明是自愈不了的原因，继续重试只会把
+			// 日志刷爆、页面永远转圈。停下来把原因交给用户。
+			if fails > maxRestartAttempts {
+				reason := m.tailLogBrief()
+				log.Printf("[frps] 连续 %d 次自动重启均失败，已停止重试：%s", fails, reason)
+				m.mu.Lock()
+				m.lastErr = fmt.Sprintf("连续 %d 次自动重启失败，已停止重试：%s", fails, reason)
+				m.lastErrAt = time.Now()
+				m.mu.Unlock()
+				return
+			}
+			log.Printf("[frps] 进程退出（%v），3 秒后自动重启（第 %d/%d 次）", err, fails, maxRestartAttempts)
 			time.Sleep(3 * time.Second)
 			m.mu.Lock()
 			stillWanted := !m.stoppedByUser
@@ -331,11 +386,112 @@ func (m *FrpsManager) Start() (err error) {
 			}
 		}
 	}(cmd)
-	// 稍等探活
-	time.Sleep(500 * time.Millisecond)
+	// 探活：不能只 Start() 成功就返回。
+	//
+	// `cmd.Start()` 只保证 fork+exec 成功，frps 完全可能因为端口被占、配置非法
+	// 在几十毫秒内退出。原来这种情况被当成功返回，于是：
+	//   - UI 显示"已启动"（或闪一下），实际进程不在；
+	//   - last_error 永远是空的，用户看不到任何原因；
+	//   - Wait 回调每 3 秒重试一次，日志里刷 bind 失败，页面永远「拉取中」。
+	// 这里等一小会儿确认它真的活着；死了就把日志尾部当作错误返回。
+	alive := false
+	for i := 0; i < 12; i++ { // 最多 1.2 秒
+		time.Sleep(100 * time.Millisecond)
+		m.mu.Lock()
+		alive = m.running && m.cmd == cmd
+		m.mu.Unlock()
+		if !alive {
+			break
+		}
+	}
+	if !alive {
+		return fmt.Errorf("frps 启动后立即退出：%s", m.tailLogBrief())
+	}
+	// 真的活了，清掉失败计数：下次崩溃应该重新获得完整的重试额度。
+	m.mu.Lock()
+	m.restartFails = 0
+	m.mu.Unlock()
 	// 立刻取一次真实代理状态，避免最多等一个轮询周期才刷新
 	go m.RefreshProxies()
 	return nil
+}
+
+// tailLogBrief 取日志末尾一小段，用于把"frps 为什么起不来"直接带到页面上。
+// 只保留最后几行非空内容，避免把整份日志塞进错误信息。
+func (m *FrpsManager) tailLogBrief() string {
+	raw := strings.TrimSpace(m.TailLog(2048))
+	if raw == "" {
+		return "frps 无输出（可到「服务端 frps」页查看完整日志）"
+	}
+	lines := strings.Split(raw, "\n")
+	if len(lines) > 4 {
+		lines = lines[len(lines)-4:]
+	}
+	// frps 自己带时间戳，这里去掉重复前缀噪音没有必要，保留原文更利于搜索
+	return strings.TrimSpace(strings.Join(lines, " | "))
+}
+
+// killStrayFrps 杀掉「与本面板同一份 frps 二进制」的残留进程，返回杀掉的个数。
+//
+// 为什么需要它：面板重启/自更新后，旧 frps 可能还活着（systemd KillMode=process
+// 只杀主进程；panel 被 SIGKILL 时子进程被 init 收养）。它继续占着 bindPort，
+// 新 frps 每次 bind 都失败 → 崩溃 → 3 秒重启 → 无限循环。
+//
+// 只做「路径精确匹配」：/proc/<pid>/exe 的真实路径必须等于我们的二进制路径。
+// 绝不用 pkill frps —— 用户机器上可能同时跑着另一份 frp，误杀别人比端口冲突严重。
+// 非 Linux 平台直接返回 0（Windows 上没有等价的 /proc，且面板通常不会留下孤儿）。
+func (m *FrpsManager) killStrayFrps() int {
+	if runtime.GOOS != "linux" {
+		return 0
+	}
+	want := m.binaryPath()
+	if real, err := filepath.EvalSymlinks(want); err == nil {
+		want = real
+	}
+	self := os.Getpid()
+	ents, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range ents {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == self {
+			continue
+		}
+		exe, err := os.Readlink(filepath.Join("/proc", e.Name(), "exe"))
+		if err != nil {
+			continue
+		}
+		// 二进制被替换过时内核会在链接尾部加 " (deleted)"
+		exe = strings.TrimSuffix(exe, " (deleted)")
+		if exe != want && exe != m.binaryPath() {
+			continue
+		}
+		if p, err := os.FindProcess(pid); err == nil {
+			if err := p.Kill(); err == nil {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// waitPortFree 等 bindPort 真正可以绑定（SIGKILL 后内核释放 socket 有几毫秒延迟）。
+func (m *FrpsManager) waitPortFree(max time.Duration) {
+	bindPort, _ := strconv.Atoi(m.db.GetSetting("frps_bind_port"))
+	if bindPort <= 0 {
+		return
+	}
+	deadline := time.Now().Add(max)
+	for time.Now().Before(deadline) {
+		ln, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(bindPort)))
+		if err == nil {
+			_ = ln.Close()
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // Stop 停止 frps 子进程。
