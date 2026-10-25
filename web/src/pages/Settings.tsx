@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useApp } from '../store'
 import { api, qs } from '../lib/api'
 import { copyText, fmtBytes } from '../lib/format'
@@ -10,7 +10,7 @@ import {
   Hint,
   Input,
 } from '../components/ui'
-import type { MirrorTestResult, SettingsBody, SettingsSaveResult } from '../types'
+import type { MirrorTestResult, Settings as SettingsShape, SettingsBody, SettingsSaveResult } from '../types'
 
 const MIRROR_PRESETS: { label: string; value: string; note?: string }[] = [
   { label: 'GitHub 官方', value: '' },
@@ -46,17 +46,36 @@ export function SettingsPage() {
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<MirrorTestResult | null>(null)
 
-  useEffect(() => {
-    if (!settings) return
-    setPublicAddr(settings.public_addr ?? '')
-    setMirror(settings.mirror_base ?? '')
-    setPStart(settings.port_range_start ?? '')
-    setPEnd(settings.port_range_end ?? '')
-    setBindPort(settings.frps_bind_port ?? '')
-    setDashPort(settings.dashboard_port ?? '')
+  // 表单只在「第一次拿到设置」时回填一次。
+  //
+  // 早期写法是 useEffect(..., [settings]) —— 而 store 每次 loadSettings 都会
+  // 放一个**新的对象**进来，于是依赖每次都变、表单被反复重置。用户正在输入
+  // 公网地址时，只要期间发生过一次设置刷新（切页面回来、保存别的项），
+  // 输入框就被冲回库里的旧值；如果那次保存发生在这之后，提交上去的就是空。
+  // 用户看到的现象就是「填了没生效 / 更新后配置消失」。
+  //
+  // hydrated 标记保证：除非保存成功后再显式重新回填，否则不动用户的输入。
+  const hydrated = useRef(false)
+
+  // fillForm 把「库里的值」灌进表单。抽出来是为了让「放弃修改」也能复用：
+  // 那个按钮原来只是重新 loadSettings，而 loadSettings 会因为 hydrated 已置位
+  // 不再回填，于是点了没反应。
+  const fillForm = useCallback((s: SettingsShape) => {
+    setPublicAddr(s.public_addr ?? '')
+    setMirror(s.mirror_base ?? '')
+    setPStart(s.port_range_start ?? '')
+    setPEnd(s.port_range_end ?? '')
+    setBindPort(s.frps_bind_port ?? '')
+    setDashPort(s.dashboard_port ?? '')
     setToken('')
     setPass('')
-  }, [settings])
+  }, [])
+
+  useEffect(() => {
+    if (!settings || hydrated.current) return
+    hydrated.current = true
+    fillForm(settings)
+  }, [settings, fillForm])
 
   useEffect(() => {
     void loadNet()
@@ -64,23 +83,49 @@ export function SettingsPage() {
 
   const save = useCallback(async () => {
     if (saving) return
+    // 设置还没加载出来时禁止保存。此时表单是一片空白，提交上去就等于
+    // 把库里的真实配置全部覆盖成空 —— 这正是「更新后配置消失」的成因。
+    if (!settings) {
+      toast('设置尚未加载完成，请稍候再保存（必要时刷新页面）', 'bad')
+      return
+    }
     setSaving(true)
     try {
-      const body: SettingsBody = {
-        public_addr: publicAddr.trim(),
-        mirror_base: mirror.trim(),
-        port_range_start: pStart.trim(),
-        port_range_end: pEnd.trim(),
-        frps_bind_port: bindPort.trim(),
-        dashboard_port: dashPort.trim(),
+      // 只提交真正改动过的字段。
+      //
+      // 原来是把整份表单原样回传：只要某个字段因为任何原因显示成空
+      // （最典型的就是设置还没加载完、或输入被冲掉），保存就会把它在库里的
+      // 值覆盖成空，而用户完全看不出是哪一步弄丢的。改成逐字段比对后，
+      // 「没动过的字段」永远不会被写，丢配置这条路就被堵死了。
+      const trim = (v: string) => v.trim()
+      const body: SettingsBody = {}
+
+      if (trim(publicAddr) !== trim(settings.public_addr ?? '')) {
+        body.public_addr = trim(publicAddr)
+        // 清空公网地址是破坏性操作（安装命令和客户端连 frps 的地址都失去基准），
+        // 必须显式带上 clear 标记，服务端才允许写入空值。
+        if (!body.public_addr) body.clear_public_addr = '1'
       }
+      if (trim(mirror) !== trim(settings.mirror_base ?? '')) body.mirror_base = trim(mirror)
+      if (trim(pStart) !== trim(settings.port_range_start ?? '')) body.port_range_start = trim(pStart)
+      if (trim(pEnd) !== trim(settings.port_range_end ?? '')) body.port_range_end = trim(pEnd)
+      if (trim(bindPort) !== trim(settings.frps_bind_port ?? '')) body.frps_bind_port = trim(bindPort)
+      if (trim(dashPort) !== trim(settings.dashboard_port ?? '')) body.dashboard_port = trim(dashPort)
       // 令牌输入框拿到的是脱敏串，只有用户重新输入时才提交
       if (token.trim()) body.frps_token = token.trim()
       if (pass) body.new_password = pass
 
+      if (Object.keys(body).length === 0) {
+        toast('没有改动，无需保存')
+        return
+      }
+
       const r = await api<SettingsSaveResult>('POST', '/api/settings', body)
       setToken('')
       setPass('')
+      // 保存后重新回填：服务端会规范化取值（例如去掉公网地址末尾的斜杠），
+      // 让表单显示真正落库的值，避免"看起来没保存成功"。
+      hydrated.current = false
       // 必须重拉隧道：访问地址是按公网地址实时推导的，不刷新表格里还是旧地址
       await Promise.all([loadSettings(), loadMe(), loadTunnels()])
 
@@ -101,6 +146,7 @@ export function SettingsPage() {
     }
   }, [
     saving,
+    settings,
     publicAddr,
     mirror,
     pStart,
@@ -332,11 +378,19 @@ export function SettingsPage() {
         </a>
         。
       </Hint>
-      <div className="flex flex-wrap gap-2.5">
-        <Button onClick={() => void save()} disabled={saving}>
+      <div className="flex flex-wrap items-center gap-2.5">
+        <Button onClick={() => void save()} disabled={saving || !settings}>
           {saving ? '保存中…' : '保存设置'}
         </Button>
-        <Button variant="ghost" onClick={() => void loadSettings()}>
+        <Button
+          variant="ghost"
+          disabled={!settings}
+          onClick={() => {
+            if (!settings) return
+            fillForm(settings)
+            toast('已恢复为当前已保存的设置')
+          }}
+        >
           放弃修改
         </Button>
         <Button
@@ -348,6 +402,11 @@ export function SettingsPage() {
         >
           复制安装令牌
         </Button>
+        {!settings && (
+          <span className="text-xs text-dim">
+            配置还在加载中，暂不能保存 —— 空白表单如果直接保存会把已有配置覆盖掉
+          </span>
+        )}
       </div>
       <Hint>安装令牌用于客户端认领到这台面板；更换后旧客户端仍保持已授权，不影响现有隧道。</Hint>
     </>

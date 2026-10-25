@@ -63,10 +63,24 @@ func TestSettingsPublicAddrImpact(t *testing.T) {
 		t.Errorf("值未变时应 public_addr_changed=false，实际 %v", out["public_addr_changed"])
 	}
 
-	// 改回空：也算变更
+	// 清空公网地址是破坏性操作，必须显式带 clear 标记。
+	// 早期实现里「空值即清空」，于是空表单一次保存就把地址清掉了（用户报的
+	// 「更新后配置消失」）；现在不带标记的空值会被忽略并保留原值。
 	_, out = postSettings(t, p, `{"public_addr":""}`)
+	if out["public_addr_changed"] == true {
+		t.Error("不带 clear 标记的空值不该被当成变更")
+	}
+	if v := db.GetSetting("public_addr"); v != "1.2.3.4" {
+		t.Errorf("不带标记的空值应被忽略，实际变成了 %q", v)
+	}
+
+	// 显式要求清空时才生效，并且要如实报告变更
+	_, out = postSettings(t, p, `{"public_addr":"","clear_public_addr":"1"}`)
 	if out["public_addr_changed"] != true {
-		t.Errorf("清空也应标记为变更，实际 %v", out["public_addr_changed"])
+		t.Errorf("显式清空也应标记为变更，实际 %v", out["public_addr_changed"])
+	}
+	if v := db.GetSetting("public_addr"); v != "" {
+		t.Errorf("显式清空后应为空，实际 %q", v)
 	}
 
 	// 非法值必须被拒，且不能写进数据库（否则客户端会连到错误地址）

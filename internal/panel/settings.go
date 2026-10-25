@@ -38,8 +38,36 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	needFrpsRestart := false
 	publicAddrChanged := false
+
+	// 端口池是成对生效的（start < end）。先按「这次保存之后的最终值」做组合校验，
+	// 而不是在循环里逐个校验 —— 每项单看都合法、组合起来却不合法是很常见的输入错误，
+	// 而一旦写进库，下一次分配端口就会报「端口池配置非法」，用户完全联想不到是设置问题。
+	finalStart, finalEnd := p.db.GetSetting("port_range_start"), p.db.GetSetting("port_range_end")
+	if v, ok := body["port_range_start"]; ok {
+		finalStart = strings.TrimSpace(v)
+	}
+	if v, ok := body["port_range_end"]; ok {
+		finalEnd = strings.TrimSpace(v)
+	}
+	if err := requirePortPair(finalStart, finalEnd); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// 变更审计：只记 key 名，绝不记值（令牌、口令都会经过这里）。
+	// 用户反馈「配置自己没了」时，这是唯一能回答「什么时候被谁写成了什么」的依据。
+	var changedKeys []string
+	defer func() {
+		if len(changedKeys) > 0 {
+			log.Printf("[settings] 已变更: %s", strings.Join(changedKeys, ", "))
+		}
+	}()
+
 	for k, v := range body {
 		switch k {
+		case "clear_public_addr":
+			// 仅作为 public_addr 的附属标记使用，不落库
+			continue
 		case "public_addr":
 			// 这个值同时被当成「面板地址」（安装命令）和「frps 主机」（frpc serverAddr），
 			// 填错会同时影响两者，所以入库前必须校验，不能让畸形值静默生效。
@@ -48,12 +76,39 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if nv != p.db.GetSetting("public_addr") {
-				_ = p.db.SetSetting(k, nv)
+			old := p.db.GetSetting("public_addr")
+			// 「已有值 → 空值」必须显式要求清空。
+			//
+			// 不设这道护栏时，任何一次把表单以空白状态整体提交的保存（设置还没
+			// 加载完、输入被冲掉、页面旧了字段对不上……）都会静默清空公网地址。
+			// 用户看到的就是「面板更新后配置消失了」，而且无从得知是哪一步弄丢的。
+			// 现在只有明确带 clear_public_addr=1 才允许清空，其余空值一律忽略。
+			if nv == "" && old != "" && body["clear_public_addr"] != "1" {
+				log.Printf("[settings] 拒绝清空 public_addr（原值 %q）：请求未显式要求清空，视为无效提交", old)
+				continue
+			}
+			if nv != old {
+				if err := p.db.SetSetting(k, nv); err != nil {
+					http.Error(w, "保存公网地址失败："+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				log.Printf("[settings] public_addr: %q -> %q", old, nv)
+				changedKeys = append(changedKeys, k)
 				publicAddrChanged = true
 			}
-		case "mirror_base", "port_range_start", "port_range_end", "frp_version":
+		case "mirror_base", "frp_version":
+			// 这两个空值是合法的：mirror_base 空 = 走 GitHub 官方，
+			// frp_version 空 = 跟随最新稳定版。
 			_ = p.db.SetSetting(k, v)
+			changedKeys = append(changedKeys, k)
+		case "port_range_start", "port_range_end":
+			// 组合非法已在循环前拦掉，这里只需保证单项是合法端口号。
+			if err := requirePort(k, v); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			_ = p.db.SetSetting(k, v)
+			changedKeys = append(changedKeys, k)
 		case "update_base":
 			// 更新源要落成绝对地址：相对路径无从解析，而空串是合法值（=不检查）。
 			// 这里只做基本校验，真正拉取失败会在「检查更新」时带明确原因报出来 ——
@@ -67,6 +122,7 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			_ = p.db.SetSetting(k, nv)
+			changedKeys = append(changedKeys, k)
 			// 换源后旧缓存必须作废，否则「检查更新」还会显示上一个源的结果
 			p.manifestMu.Lock()
 			p.manifestInfo = nil
@@ -74,10 +130,12 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 		case "agent_auto_update":
 			if v == "1" || v == "0" {
 				_ = p.db.SetSetting(k, v)
+				changedKeys = append(changedKeys, k)
 			}
 		case "prefetch_all":
 			if v == "1" || v == "0" {
 				_ = p.db.SetSetting(k, v)
+				changedKeys = append(changedKeys, k)
 				if v == "1" {
 					// 刚打开就立刻补一次：用户按下开关时的预期就是"现在开始准备"，
 					// 而不是等下一次检查更新。重复调用是幂等的。
@@ -85,15 +143,36 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		case "dashboard_port":
+			// 空串一律拒绝：它会被直接拼进 frps 的 toml，写进去之后 frps 起不来，
+			// 而报错来自子进程日志，用户根本联想不到是自己刚保存的设置。
+			if err := requirePort(k, v); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			_ = p.db.SetSetting(k, v)
+			changedKeys = append(changedKeys, k)
 			needFrpsRestart = true
 		case "frps_bind_port", "frps_token":
 			// 只有值真的变了才重启 frps：UI 每次保存都会回传当前端口值，
 			// 若不比对，改个公网地址也会把 frps 重启一遍（隧道白白中断）。
 			// 令牌从前端拿到的永远是脱敏串，UI 只在用户重新输入时才提交，
 			// 因此“非空即视为要改”是安全的。
-			if (k == "frps_token" && v != "") || v != p.db.GetSetting(k) {
+			if k == "frps_token" {
+				if v == "" {
+					continue
+				}
 				_ = p.db.SetSetting(k, v)
+				changedKeys = append(changedKeys, k)
+				needFrpsRestart = true
+				continue
+			}
+			if err := requirePort(k, v); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if v != p.db.GetSetting(k) {
+				_ = p.db.SetSetting(k, v)
+				changedKeys = append(changedKeys, k)
 				needFrpsRestart = true
 			}
 		case "new_password":
@@ -147,6 +226,38 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// requirePort 校验单个端口设置项：必须是 1-65535 的整数。
+//
+// 为什么必须拦：这些值会被直接拼进 frps 的 toml。空串或非数字写进库之后，
+// frps 下次启动就失败，而错误来自子进程日志（"invalid port"），
+// 用户完全联想不到是自己刚才保存的设置项有问题。
+func requirePort(key, v string) error {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("%s 必须是 1-65535 之间的端口号，收到 %q", key, v)
+	}
+	return nil
+}
+
+// requirePortPair 校验端口池是一个合法的区间（start < end，且范围不过宽）。
+//
+// 单独校验每一端都能通过，组合起来却不合法 —— 这是最常见的输入错误，
+// 而且一旦落库，表现是「建隧道时提示端口池配置非法」，与设置页毫无关联。
+func requirePortPair(start, end string) error {
+	if err := requirePort("port_range_start", start); err != nil {
+		return err
+	}
+	if err := requirePort("port_range_end", end); err != nil {
+		return err
+	}
+	s, _ := strconv.Atoi(strings.TrimSpace(start))
+	e, _ := strconv.Atoi(strings.TrimSpace(end))
+	if e <= s {
+		return fmt.Errorf("端口池的结束端口必须大于起始端口（当前 %d - %d）", s, e)
+	}
+	return nil
+}
+
 // normalizePublicAddr 校验并规范化 public_addr。
 //
 // 允许三种写法：host、host:port、http(s)://host[:port]（末尾斜杠会被去掉）。
@@ -186,4 +297,3 @@ func normalizePublicAddr(v string) (string, error) {
 	}
 	return strings.TrimRight(s, "/"), nil
 }
-

@@ -333,13 +333,25 @@ export interface TunnelBody {
   clear_agent?: boolean
 }
 
+/**
+ * 设置保存请求体。
+ *
+ * **所有字段都是可选的，而且只该提交「真正改动过」的字段。**
+ * 早期实现每次都把整份表单原样回传，后果是：表单里任何一个字段状态不对
+ * （例如设置还没加载完就被渲染成空），保存时会把它在库里的值覆盖成空。
+ * 用户看到的就是「配置莫名其妙消失了」——公网地址被清空就是这么来的。
+ *
+ * 服务端对「非空变空」还有一道护栏（见 clear_public_addr）。
+ */
 export interface SettingsBody {
-  public_addr: string
-  mirror_base: string
-  port_range_start: string
-  port_range_end: string
-  frps_bind_port: string
-  dashboard_port: string
+  public_addr?: string
+  /** 把它置 '1' 才允许把已有的公网地址清空；不带这个字段时空值会被忽略 */
+  clear_public_addr?: string
+  mirror_base?: string
+  port_range_start?: string
+  port_range_end?: string
+  frps_bind_port?: string
+  dashboard_port?: string
   frps_token?: string
   new_password?: string
   update_base?: string

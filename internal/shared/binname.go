@@ -65,13 +65,29 @@ var SupportedPlatforms = []Platform{
 	{"windows", "arm64"},
 }
 
+// IsSupportedPlatform 该平台是否在面板的服务范围内。
+//
+// 必须有这层白名单：NormalizePlatform 只做别名收敛（x86_64→amd64），
+// 对任意乱写的值都会原样返回。少了这道判断，/api/frpc/bin/nosuchos/xxx
+// 会被当成合法请求去向上游拉取，最后以 502「上游取不到」收场 ——
+// 而真实原因是调用方传错了平台，语义完全错位、排查方向也被带偏。
+func IsSupportedPlatform(osName, arch string) bool {
+	osName, arch = NormalizePlatform(osName, arch)
+	for _, p := range SupportedPlatforms {
+		if p.OS == osName && p.Arch == arch {
+			return true
+		}
+	}
+	return false
+}
+
 // FrpcBinFileName 面板托管的 frpc 缓存文件名。
 //
 // 与 agent 产物同一套平台收敛规则：客户端请求 /api/frpc/bin/linux/amd64 时，
 // 面板按这个名字去 <data>/bin 找缓存，找不到再按 frp_version + 镜像去拉。
 func FrpcBinFileName(osName, arch string) string {
 	osName, arch = NormalizePlatform(osName, arch)
-	if osName == "" || arch == "" {
+	if !IsSupportedPlatform(osName, arch) {
 		return ""
 	}
 	name := "frpc-" + osName + "-" + arch

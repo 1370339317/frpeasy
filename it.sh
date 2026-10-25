@@ -218,7 +218,12 @@ chk "删除不存在的文件 404" 404 "$(curl -s -o /dev/null -w '%{http_code}'
 chk "kind 非法 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X DELETE "$B/api/files?kind=xx&os=linux&arch=amd64")"
 # frpc 托管接口必须存在。上游没有该架构时应回 502（而不是 404）——
 # 客户端按 5xx 决定回退直连，404 会被理解成"这个平台本来就没有"。
-chk "frpc 托管接口存在（上游缺该架构时 502）" 502 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 $B/api/frpc/bin/linux/riscv64)"
+# frpc 托管接口的语义：非法平台 400、合法但取不到 5xx，**绝不能是 404** ——
+# 客户端把 404 理解成「面板本来就不提供这个平台」，会直接放弃并继续回退，
+# 而真实原因（更新源没配、镜像不通）就永远查不出来。
+# 不要断言具体是 502：那取决于上游此刻有没有这个架构，网络通不通都能让断言翻脸。
+chk "frpc 托管：非法平台 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/frpc/bin/nosuchos/nosucharch)"
+chk "frpc 托管：合法平台不是 404" 1 "$(case $(curl -s -o /dev/null -w '%{http_code}' --max-time 60 $B/api/frpc/bin/linux/amd64) in 404) echo 0;; *) echo 1;; esac)"
 
 # 前端「我这个标签页是不是过期了」的自检接口。
 # 没有它，面板自更新后已打开的页面会一直跑旧 JS，用户看到「更新成功」却找不到新菜单。
