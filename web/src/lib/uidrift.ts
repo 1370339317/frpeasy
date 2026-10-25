@@ -23,6 +23,19 @@ function ownAsset(): string {
   }
 }
 
+/**
+ * 当前页面实际在跑的那份前端产物的短标识（如 `BHApYXSL`），开发态返回 `dev`。
+ *
+ * 侧边栏底部要显示它：那里原来写的是 `me.panel_version`，而那个值来自
+ * **服务器的 /api/me** —— 页面跑着旧代码时它照样显示新版本号。于是出现
+ * 「面板明明 0.7.0，我却看不到新菜单」，两边都对，就是看不出问题在哪。
+ * 有了这个 hash，一眼就能对比：它必须等于 `/api/ui/build` 里 asset 的中段。
+ */
+export function ownBundleHash(): string {
+  const m = /^index-([A-Za-z0-9_-]+)\.js$/.exec(ownAsset())
+  return m ? m[1] : 'dev'
+}
+
 const RELOADED_KEY = 'frpeasy:ui-reloaded-for'
 
 export function useUiAutoRefresh(onStale?: () => void) {

@@ -3,6 +3,7 @@ import { useApp } from '../store'
 import { fmtBuildTime } from '../lib/format'
 import { Button, IconButton, Led, cx } from './ui'
 import { VIEW_GROUPS, VIEW_TITLES, type View } from '../views'
+import { ownBundleHash } from '../lib/uidrift'
 
 /**
  * 应用外壳：左侧导航 + 顶栏 + 内容区。
@@ -76,9 +77,15 @@ export function Layout({
           </div>
           <div
             className="mt-1.5 border-t border-dashed border-border pt-1.5 font-mono text-[10.5px] leading-[1.5] break-all opacity-80"
-            title="前端是编译期嵌进二进制的；构建时间没变就说明跑的还是旧二进制，需要重新 go build"
+            title={
+              '面板 = 服务器上那个二进制的版本（来自 /api/me）；' +
+              '界面 = 当前这个标签页实际在跑的前端产物哈希。' +
+              '两者对不上就说明页面是旧的（通常发生在面板刚更新之后），刷新一次即可。'
+            }
           >
             {me?.panel_version ?? 'dev'} · {fmtBuildTime(me?.panel_built ?? '')}
+            <br />
+            界面 {ownBundleHash()}
             {me?.ui_source === 'dir' ? ' · UI取磁盘' : ''}
           </div>
         </div>
