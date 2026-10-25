@@ -53,7 +53,21 @@ curl -fsSL https://github.com/1370339317/frpeasy/releases/latest/download/deploy
 它会：拉清单 → 选本机平台的产物 → 下载 → 校验 sha256 → 预检二进制能否执行 →
 停旧实例 → 装到 `/opt/frpeasy` → 注册 systemd 并启动 → 轮询 healthz 确认起来了。
 
-**重复执行就是升级**，`data` 目录原样保留。改端口：
+**国内服务器拉不动 GitHub 时**，把地址换成镜像（整条命令连 `--base` 一起换，
+否则脚本还是会去 GitHub 下二进制）：
+
+```bash
+MIRROR=https://ghfast.top/https://github.com/1370339317/frpeasy/releases/latest/download
+curl -fsSL "$MIRROR/deploy.sh" | sudo bash -s -- --base "$MIRROR"
+```
+
+**Alpine 最小系统没有 bash**，先装：
+
+```bash
+apk add bash curl
+```
+
+**重复执行就是升级**，会装回原来的位置、沿用原来的端口和数据目录，配置一条不动。改端口：
 
 ```bash
 curl -fsSL https://github.com/1370339317/frpeasy/releases/latest/download/deploy.sh | sudo PORT=9000 bash

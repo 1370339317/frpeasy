@@ -297,7 +297,7 @@ if [ "$(id -u)" != "0" ] && [ ! -w "$(dirname "$PREFIX")" ]; then
 fi
 
 command -v curl >/dev/null || command -v wget >/dev/null \
-  || die "需要 curl 或 wget。Alpine 上先 apk add curl"
+  || die "需要 curl 或 wget。Alpine 上先 apk add curl bash"
 
 fetch() { # fetch <url> <输出文件>
   if command -v curl >/dev/null; then

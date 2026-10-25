@@ -82,6 +82,10 @@ A 和 B 的完整命令在 [README 的安装一节](README.md#安装三种方式
 一键脚本的可调项：
 
 ```bash
+# 国内服务器拉不动 GitHub：镜像要连 --base 一起换，否则脚本照样去 GitHub 下二进制
+MIRROR=https://ghfast.top/https://github.com/1370339317/frpeasy/releases/latest/download
+curl -fsSL "$MIRROR/deploy.sh" | sudo bash -s -- --base "$MIRROR"
+
 # 换端口
 curl -fsSL .../deploy.sh | sudo PORT=9000 bash
 
@@ -98,6 +102,8 @@ curl -fsSL .../deploy.sh | sudo NO_SERVICE=1 bash
 升级还会**沿用你上次的安装目录、端口、数据目录**——脚本先从 systemd unit 里
 反查出真实位置，只有你这次显式指定的参数才会覆盖它。所以升级不会读到一个
 空库、把你重新打回 `admin/admin` 加一页要重填的配置。
+
+> Alpine 最小系统**没有 bash**，脚本要用它，先 `apk add bash curl`。
 
 ### 卸载
 
