@@ -112,7 +112,14 @@ Write-Host "[frpeasy] target : windows/$arch"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
 # ---- 1. download to a temp name and verify it before touching the old install
-$tmp = "$exe.new"
+# The temp file MUST keep the .exe extension.
+#
+# It used to be "$exe.new", which expands to frpeasy-agent.exe.new - extension
+# becomes .new, and Windows does not treat that as an executable. The check
+# `& $tmp --version` below then always fails, reporting
+# "cannot run (wrong architecture or corrupt download)", which sends everyone
+# hunting for a corrupt download or the wrong platform while the file is fine.
+$tmp = Join-Path $dir "frpeasy-agent.new.exe"
 if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
 $tryArch = @($arch)
 if ($arch -eq "arm64") { $tryArch += "amd64" }

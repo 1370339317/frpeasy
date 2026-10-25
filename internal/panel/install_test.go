@@ -51,6 +51,24 @@ func TestInstallScriptNoCR(t *testing.T) {
 	}
 }
 
+// 回归：Windows 上会被**执行**的临时文件必须带 .exe 后缀。
+//
+// 真机踩过：临时文件写成 "$exe.new"（展开成 frpeasy-agent.exe.new），
+// Windows 不认为它是可执行文件，`& $tmp --version` 的校验必然失败，
+// 报错却是 "cannot run (wrong architecture or corrupt download)" ——
+// 把人的注意力全引到"下载坏了/平台不对"上，实际文件完好无损。
+//
+// 同理 internal/panel/panelupdate.go 里的 panel.new 也必须带 ExeSuffix()。
+func TestInstallScriptPS1TempFileHasExeSuffix(t *testing.T) {
+	if strings.Contains(installScriptPS1, `$tmp = "$exe.new"`) {
+		t.Fatal("临时文件不能命名成 <exe>.new（扩展名变成 .new，Windows 无法执行，" +
+			"会导致 --version 校验永远失败）")
+	}
+	if !strings.Contains(installScriptPS1, `frpeasy-agent.new.exe`) {
+		t.Fatal("临时文件应带 .exe 后缀，形如 frpeasy-agent.new.exe")
+	}
+}
+
 // 计划任务必须以 SYSTEM 身份注册：AtStartup 触发时用户往往尚未登录，
 // 若用交互用户身份且未保存口令，任务会静默不执行。
 func TestInstallScriptPS1UsesSystemPrincipal(t *testing.T) {

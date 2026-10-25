@@ -14,7 +14,7 @@ GOARCH_LOCAL      := $(shell go env GOARCH)
 EXE_SUFFIX        := $(if $(filter windows,$(GOOS_LOCAL)),.exe,)
 LOCAL_AGENT_ASSET := $(BIN_DIR)/$(BINARY_AGENT)-$(GOOS_LOCAL)-$(GOARCH_LOCAL)$(EXE_SUFFIX)
 DATA_DIR      ?= ./data
-VERSION       ?= 0.5.5
+VERSION       ?= 0.5.6
 
 # 发布相关的仓库信息。改仓库就要改这里 —— 它同时决定：
 #   - 绿色包 systemd unit 里写死的更新源（FRPEASY_UPDATE_BASE）

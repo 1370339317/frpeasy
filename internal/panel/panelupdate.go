@@ -94,7 +94,10 @@ func (p *Panel) doPanelUpdate(manifest *shared.Manifest, asset *shared.Asset, ex
 	to := manifest.Version
 	dir := updateDir(p.dataDir)
 	_ = os.MkdirAll(dir, 0o755)
-	newPath := filepath.Join(dir, "panel.new")
+	// 必须保留 .exe 后缀：Windows 上 exec.Command 只认扩展名为 .exe 的文件，
+	// 叫 "panel.new" 的话下面 -build 预检必然失败，整个自更新链在 Windows 上
+	// 表现为「下载完就报新版本无法执行」，与文件内容无关。
+	newPath := filepath.Join(dir, "panel.new"+shared.ExeSuffix())
 
 	stage := func(s, detail string, errMsg string) {
 		WriteUpdateState(p.dataDir, UpdateState{
