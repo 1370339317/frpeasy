@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# frpeasy 面板一键部署 / 升级脚本。
+# frpeasy 面板一键部署 / 升级 / 卸载脚本。
 #
 #   curl -fsSL https://github.com/1370339317/frpeasy/releases/latest/download/deploy.sh | sudo bash
 #
 # 它做四件事：从 Release 拉最新版 → 校验 sha256 → 装到 /opt/frpeasy → 起 systemd 服务。
 # 重复执行就是升级：二进制换掉，data 目录（含数据库）原样保留。
+#
+# 卸载（删服务、程序、数据，像没装过）：
+#   curl -fsSL .../deploy.sh | sudo bash -s -- --uninstall
+#   curl -fsSL .../deploy.sh | sudo bash -s -- --uninstall --keep-data   # 留数据库
+#   非交互环境（CI、批量脚本）必须加 --yes
 #
 # 可覆盖的参数（环境变量或命令行），都有合理默认值：
 #   BASE=https://...   更新源。默认指向本仓库最新 Release，可换镜像或自建静态目录
@@ -31,6 +36,14 @@ LISTEN=${LISTEN:-:$PORT}
 # DATA 的默认值依赖 PREFIX，而 PREFIX 可能被下面的命令行参数改掉，
 # 所以这里先留空，等参数解析完再兜底。
 DATA=${DATA:-}
+# 卸载开关。默认 KEEP_DATA=0：用户要的是「像没装过」，残留一个 SQLite
+# 就不算干净。但删数据必须显式确认，见 do_uninstall。
+UNINSTALL=${UNINSTALL:-0}
+KEEP_DATA=${KEEP_DATA:-0}
+ASSUME_YES=${ASSUME_YES:-0}
+# unit 目录。真机上永远是 /etc/systemd/system，可覆盖只是为了让
+# tests/deploy-smoke.sh 能在临时目录里造一个 unit 来验证「反查安装位置」。
+UNIT_DIR=${UNIT_DIR:-/etc/systemd/system}
 
 # ---- 解析命令行（覆盖环境变量）----
 while [ $# -gt 0 ]; do
@@ -42,8 +55,11 @@ while [ $# -gt 0 ]; do
     --data) DATA=$2; shift 2 ;;
     --no-service) NO_SERVICE=1; shift ;;
     --service-name) SERVICE_NAME=$2; shift 2 ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    --keep-data) KEEP_DATA=1; shift ;;
+    -y|--yes) ASSUME_YES=1; shift ;;
     -h|--help)
-      sed -n '2,30p' "$0" 2>/dev/null || echo "见脚本头部注释"
+      sed -n '2,32p' "$0" 2>/dev/null || echo "见脚本头部注释"
       exit 0 ;;
     *) echo "未知参数: $1（-h 看用法）" >&2; exit 2 ;;
   esac
@@ -56,11 +72,164 @@ say()  { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
 die()  { printf '\n错误：%s\n' "$*" >&2; exit 1; }
 
+# ============================================================
+# 卸载
+#
+# 目标是「像没装过一样」：服务、unit、二进制、frp 缓存、数据库全清掉。
+# 但绝不能靠猜路径 —— 用户可能用 --prefix / --data 装到别处，也可能早就
+# 忘了装在哪。所以优先从 systemd unit 的 ExecStart 反查真实位置，查不到
+# 才用命令行参数（含默认值）。
+#
+# 删数据是有意的默认行为，但必须显式确认：非交互场景要求 --yes，
+# 免得某个自动化脚本把它顺手带走。
+# ============================================================
+
+# 从 unit 里取 ExecStart 的可执行文件路径
+unit_exec() { sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$1" 2>/dev/null | head -1; }
+# 从 unit 里取 --data 的参数值
+unit_data() { sed -n 's/.*--data[[:space:]][[:space:]]*\([^ ]*\).*/\1/p' "$1" 2>/dev/null | head -1; }
+
+# 防止手滑把 /opt 甚至 / 删掉。至少要求「/父/子」两层。
+refuse_path() {
+  case "$2" in
+    ""|"/"|"/."|"/.."|"/usr"|"/usr/local"|"/usr/bin"|"/usr/sbin"|"/bin"|"/sbin"| \
+    "/etc"|"/var"|"/var/lib"|"/root"|"/home"|"/opt"|"/srv"|"/data"|"/tmp")
+      die "拒绝在可疑路径上操作：$1 = '$2'" ;;
+  esac
+  printf '%s' "$2" | grep -qE '^/[^/]+/.+' \
+    || die "拒绝在过浅的路径上操作：$1 = '$2'（至少要 /父/子 两层）"
+}
+
+do_uninstall() {
+  local unit="$UNIT_DIR/$SERVICE_NAME.service"
+
+  # ---- 1. 先确定真实安装位置 ----
+  if [ -f "$unit" ]; then
+    local exe realp reald
+    exe=$(unit_exec "$unit")
+    if [ -n "$exe" ]; then
+      realp=$(dirname "$exe")
+      if [ "$realp" != "$PREFIX" ]; then
+        say "    依据 systemd unit 修正安装目录：$PREFIX -> $realp"
+        PREFIX=$realp
+      fi
+    fi
+    reald=$(unit_data "$unit")
+    if [ -n "$reald" ] && [ "$reald" != "$DATA" ]; then
+      say "    依据 systemd unit 修正数据目录：$DATA -> $reald"
+      DATA=$reald
+    fi
+  fi
+
+  refuse_path "程序目录 PREFIX" "$PREFIX"
+  refuse_path "数据目录 DATA" "$DATA"
+
+  step "将卸载 frpeasy 面板"
+  say "    服务      $SERVICE_NAME（$unit）"
+  say "    程序目录  $PREFIX"
+  if [ "$KEEP_DATA" -eq 1 ]; then
+    say "    数据目录  $DATA  （保留：数据库与隧道配置不动）"
+  else
+    say "    数据目录  $DATA  （含数据库与隧道配置，一并删除）"
+  fi
+
+  if [ "$ASSUME_YES" -eq 0 ]; then
+    if [ -r /dev/tty ]; then
+      printf '\n确认删除以上内容请输入 yes: '
+      local ans=""
+      read -r ans </dev/tty || ans=""
+      [ "$ans" = "yes" ] || die "已取消，什么都没动。"
+    else
+      die "非交互环境。确认卸载请加 --yes；只想留数据库请加 --keep-data。"
+    fi
+  fi
+
+  # ---- 2. 停服务 ----
+  step "停止服务"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+  fi
+  # 裸跑的实例（NO_SERVICE=1 或绿色包）也要收掉。按完整路径认领，
+  # 避免把别人的同名进程杀了。
+  pkill -f "^$PREFIX/frpeasy-panel" 2>/dev/null || true
+  sleep 1
+
+  # ---- 3. 收拾面板拉起的 frp 子进程 ----
+  #
+  # 面板收到 SIGTERM 时会自己停 frps；但被 SIGKILL（systemd 超时）时来不及，
+  # 会留下一个还在监听 7000 的孤儿 —— 重装就撞端口，而且报错完全指不到它。
+  # 按可执行文件路径匹配，不用 `pkill frps`（那会杀掉别人的 frps）。
+  step "清理残留 frp 进程"
+  local f
+  for f in "$PREFIX/bin/frps" "$DATA/bin/frps"; do
+    pkill -f "^$f" 2>/dev/null || true
+  done
+
+  # ---- 4. 删 unit ----
+  if [ -f "$unit" ]; then
+    rm -f "$unit"
+    say "    removed $unit"
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+
+  # ---- 5. 删数据 / 程序目录 ----
+  # 默认 DATA 就在 PREFIX 里面，所以「留数据」时必须逐项删 PREFIX、
+  # 跳过 data，否则 rm -rf PREFIX 会把要留的东西一起带走。
+  local data_inside=0
+  case "$DATA" in
+    "$PREFIX"/*) data_inside=1 ;;
+  esac
+
+  if [ "$KEEP_DATA" -eq 1 ]; then
+    say "    保留数据目录 $DATA"
+  elif [ -d "$DATA" ]; then
+    rm -rf "$DATA"
+    say "    removed $DATA"
+  fi
+
+  if [ -d "$PREFIX" ]; then
+    if [ "$KEEP_DATA" -eq 1 ] && [ "$data_inside" -eq 1 ]; then
+      local entry
+      for entry in "$PREFIX"/* "$PREFIX"/.[!.]*; do
+        [ -e "$entry" ] || continue
+        [ "$entry" = "$DATA" ] && continue
+        rm -rf "$entry"
+      done
+      say "    cleared $PREFIX（仅保留 $DATA）"
+    else
+      rm -rf "$PREFIX"
+      say "    removed $PREFIX"
+    fi
+  fi
+
+  # ---- 6. 报告 ----
+  step "卸载完成"
+  say "自查（下面这些都应该报「不存在」）："
+  say "    systemctl status $SERVICE_NAME"
+  say "    ls -d $PREFIX"
+  [ "$KEEP_DATA" -eq 0 ] && say "    ls -d $DATA"
+  say ""
+  if [ "$KEEP_DATA" -eq 1 ]; then
+    say "数据库与隧道配置保留在 $DATA。确认不再需要时手动删除："
+    say "    rm -rf $DATA"
+    say ""
+  fi
+  say "面板占用的 $PORT 端口已释放。防火墙/安全组里的放行规则不会自动撤销，"
+  say "需要的话自己去云控制台或 ufw/firewalld 里删掉。"
+  exit 0
+}
+
 # ---- 0. 环境检查 ----
 case "$(uname -s)" in
   Linux) ;;
   *) die "本脚本只支持 Linux。Windows 请直接下载 frpeasy-panel-windows-*.exe 双击运行。" ;;
 esac
+
+# 卸载放在架构判断之前：卸载不需要架构匹配（面板装的是哪个平台都该能卸）。
+[ "$UNINSTALL" -eq 1 ] && do_uninstall
 
 case "$(uname -m)" in
   x86_64|amd64)   ARCH=amd64 ;;

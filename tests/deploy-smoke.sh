@@ -119,7 +119,79 @@ fi
 [ -f "$WORK/data/sentinel.txt" ] && ok "数据目录被保留" || bad "数据目录被清掉了"
 [ -f "$PREFIX/frpeasy-panel.prev" ] && ok "留下了 .prev 备份" || bad "没留 .prev 备份（回滚无路）"
 
-echo "=== 4. 篡改产物后必须拒绝安装（sha256 校验有效）==="
+echo "=== 4. 卸载 --keep-data：程序清掉、数据库留下 ==="
+mkdir -p "$PREFIX/data"
+echo "db" > "$PREFIX/data/frpeasy.db"
+if BASE="$BASE" PREFIX="$PREFIX" NO_SERVICE=1 \
+   bash "$REL/deploy.sh" --uninstall --keep-data --yes >"$WORK/un1.log" 2>&1; then
+  ok "卸载退出码 0"
+else
+  bad "卸载失败"; cat "$WORK/un1.log"
+fi
+[ -e "$PREFIX/frpeasy-panel" ] && bad "二进制还在" || ok "二进制已删除"
+[ -e "$PREFIX/frpeasy-panel.prev" ] && bad ".prev 备份还在（会残留）" || ok ".prev 备份已删除"
+[ -f "$PREFIX/data/frpeasy.db" ] && ok "数据库被保留（--keep-data 生效）" \
+  || bad "数据库被删掉了 —— --keep-data 没起作用"
+
+echo "=== 5. 重新安装后全量卸载：像没装过一样 ==="
+if BASE="$BASE" PREFIX="$PREFIX" NO_SERVICE=1 bash "$REL/deploy.sh" >"$WORK/run4.log" 2>&1; then
+  ok "重装成功"
+else
+  bad "重装失败"; cat "$WORK/run4.log"
+fi
+mkdir -p "$PREFIX/data" && echo "db" > "$PREFIX/data/frpeasy.db"
+# 造一个假的 frp 缓存目录，验证 ·/bin 也被带走
+mkdir -p "$PREFIX/bin" && echo "frps" > "$PREFIX/bin/frps"
+
+if BASE="$BASE" PREFIX="$PREFIX" NO_SERVICE=1 \
+   bash "$REL/deploy.sh" --uninstall --yes >"$WORK/un2.log" 2>&1; then
+  ok "卸载退出码 0"
+else
+  bad "卸载失败"; cat "$WORK/un2.log"
+fi
+[ -e "$PREFIX" ] && { bad "程序目录还在：$(ls -A "$PREFIX" 2>/dev/null | tr '\n' ' ')"; } \
+  || ok "程序目录整个消失"
+[ -e "$PREFIX/data/frpeasy.db" ] && bad "数据库残留" || ok "数据库已删除"
+[ -e "$PREFIX/bin/frps" ] && bad "frp 二进制残留" || ok "frp 二进制已删除"
+
+echo "=== 6. 忘了装在哪：从 systemd unit 反查真实位置 ==="
+FORGOT="$WORK/forgotten"
+mkdir -p "$FORGOT/bin" "$FORGOT/data" "$WORK/units"
+cp bin/frpeasy-panel-linux-amd64 "$FORGOT/frpeasy-panel"
+chmod +x "$FORGOT/frpeasy-panel"
+echo "db" > "$FORGOT/data/frpeasy.db"
+echo "frps" > "$FORGOT/bin/frps"
+cat > "$WORK/units/frpeasy-forgot.service" <<UNIT
+[Unit]
+Description=frpeasy (test)
+[Service]
+ExecStart=$FORGOT/frpeasy-panel --data $FORGOT/data --listen :8080
+[Install]
+WantedBy=multi-user.target
+UNIT
+# 故意给一组完全错误的 --prefix / --data：脚本必须以 unit 为准，
+# 否则用户「忘了装在哪」就永远卸不干净。
+if PREFIX=/tmp/wrong-prefix DATA=/tmp/wrong-prefix/data \
+   SERVICE_NAME=frpeasy-forgot UNIT_DIR="$WORK/units" BASE="$BASE" \
+   bash "$REL/deploy.sh" --uninstall --yes >"$WORK/un3.log" 2>&1; then
+  ok "卸载退出码 0"
+else
+  bad "卸载失败"; cat "$WORK/un3.log"
+fi
+grep -q "修正安装目录" "$WORK/un3.log" && ok "日志说明已依据 unit 修正路径" \
+  || { bad "没提示修正路径"; tail -6 "$WORK/un3.log"; }
+[ -e "$FORGOT" ] && { bad "反查到的目录没被删掉"; } || ok "按 unit 反查的目录已清除"
+[ -e "$WORK/units/frpeasy-forgot.service" ] && bad "unit 文件残留" || ok "unit 文件已删除"
+
+echo "=== 7. 拒绝在可疑路径上卸载（防止手滑删系统目录）==="
+if PREFIX=/opt BASE="$BASE" bash "$REL/deploy.sh" --uninstall --yes >"$WORK/un4.log" 2>&1; then
+  bad "PREFIX=/opt 竟然被接受了"
+else
+  ok "拒绝 PREFIX=/opt"
+  grep -q "拒绝" "$WORK/un4.log" && ok "错误信息说明了拒绝原因" || bad "没说清拒绝原因"
+fi
+
+echo "=== 8. 篡改产物后必须拒绝安装（sha256 校验有效）==="
 # 换一个字节但保持大小不变，模拟「清单与产物不是同一批发布」
 printf 'X' | dd of="$REL/frpeasy-panel-linux-amd64" bs=1 seek=200 conv=notrunc status=none
 if BASE="$BASE" PREFIX="$WORK/install2" NO_SERVICE=1 bash "$REL/deploy.sh" >"$WORK/run3.log" 2>&1; then

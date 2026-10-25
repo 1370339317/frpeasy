@@ -95,6 +95,39 @@ curl -fsSL .../deploy.sh | sudo NO_SERVICE=1 bash
 **重复执行就是升级**：二进制换掉，`data` 目录（含数据库）原样保留，
 旧二进制备份成 `frpeasy-panel.prev`，新版起不来可以立刻换回去。
 
+### 卸载
+
+```bash
+# 全删（服务 / 程序 / 数据库 / frp 缓存），像没装过一样
+curl -fsSL .../deploy.sh | sudo bash -s -- --uninstall
+
+# 保留数据库与隧道配置
+curl -fsSL .../deploy.sh | sudo bash -s -- --uninstall --keep-data
+
+# 非交互场景（CI、批量脚本）必须显式 --yes
+curl -fsSL .../deploy.sh | sudo bash -s -- --uninstall --yes
+```
+
+删之前会把「服务名 / 程序目录 / 数据目录」列出来，要你输入 `yes` 才动。
+几个设计上的选择：
+
+- **路径不靠你记**：优先从 systemd unit 的 `ExecStart` 反查真实安装位置与 `--data`，
+  所以哪怕当初 `--prefix /srv/xxx` 装到别处，也照样卸得干净。
+- **连 frp 子进程一起收**：面板正常收到 SIGTERM 会自己停 frps；但被 SIGKILL
+  （systemd 超时）时来不及，会留下仍监听 7000 的孤儿进程 —— 重装就撞端口，
+  而且报错完全指不到它。所以按可执行文件路径精确认领并清理。
+- **`--keep-data` 时不会误删**：数据目录默认就在程序目录里面，
+  所以这种情况下是逐项清理程序目录、跳过 `data`，而不是 `rm -rf` 整个目录。
+- **危险路径直接拒绝**：`/`、`/opt`、`/usr`、`/tmp` 这类过浅路径一律不执行。
+- **不动防火墙**：放行规则属于系统配置，自动撤销的风险大于收益，需要你自己清。
+
+卸载后自查（都应该报「不存在」）：
+
+```bash
+systemctl status frpeasy
+ls -d /opt/frpeasy
+```
+
 ### 装完之后：更新源是怎么自动配好的
 
 方式 A 会把仓库的 Release 地址写进 unit 的 `Environment=FRPEASY_UPDATE_BASE=...`。
