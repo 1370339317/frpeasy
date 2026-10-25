@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 
 	"frpeasy/internal/shared"
 )
@@ -47,12 +46,14 @@ func (p *Panel) agentBinHandler(w http.ResponseWriter, r *http.Request, osName, 
 		http.Error(w, "os / arch 参数无效", http.StatusBadRequest)
 		return
 	}
-	// 查找位置由 agentBinDirs 统一给出（面板同级 / 同级 bin/ / 数据目录 bin/）。
-	// 与升级下发共用同一套规则：否则会出现"装的时候能下、升级时 404"。
-	path := p.findAgentBin(osName, arch)
-	if path == "" {
-		http.Error(w, fmt.Sprintf("未找到 agent 二进制 %s，请放到以下任一位置：\n  %s\n（make build-alpine 生成到 bin/，make stage-agent 复制到数据目录）",
-			name, strings.Join(p.agentBinDirs(), "\n  ")), http.StatusNotFound)
+	// 优先用面板自带的（同级 / 同级 bin / data/bin）；没有就按需从更新源拉一份
+	// 缓存到 data/bin。一键部署的服务器上通常一个 agent 二进制都没有，缺了这步
+	// 客户端安装会直接 404，而服务器侧完全看不出问题。
+	path, err := p.ensureAgentBin(osName, arch)
+	if err != nil {
+		// 502 而不是 404：404 意味着"这里没有这个平台"，而实际原因通常是
+		// 更新源没配 / 上游取不到 / 校验失败 —— 用 404 会把排查方向带偏。
+		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	f, err := os.Open(path)

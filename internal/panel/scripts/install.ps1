@@ -135,7 +135,7 @@ foreach ($a in $tryArch) {
   }
 }
 if (-not $newVer) {
-  Fail "could not download a working agent binary. The existing installation, if any, was left untouched. Make sure the panel has the Windows agent staged (run 'make stage-agent' next to the panel)."
+  Fail "could not download a working agent binary (see the HTTP error above). Nothing was changed on this machine. Check: 1) the panel URL is reachable from here; 2) the panel has an update source configured (panel -> Settings -> version & update) - the panel fetches the agent binary from there on first request; 3) that the panel itself can reach the internet or its configured mirror."
 }
 
 $oldVer = $null

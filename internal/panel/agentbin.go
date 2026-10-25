@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 
 	"frpeasy/internal/shared"
 )
@@ -53,6 +55,90 @@ func (p *Panel) findAgentBin(osName, arch string) string {
 		}
 	}
 	return ""
+}
+
+
+// agentFetchMu 串行化按需拉取。
+//
+// 两个客户端同时首次安装时，没有它就会：同时下载同一份十几 MB、
+// 同时往同一个临时文件里写、最后互相把对方的 .part 删掉。
+var agentFetchMu sync.Mutex
+
+// ensureAgentBin 确保该平台的 agent 二进制在本地可用，返回它的路径。
+//
+// 查找顺序：面板自带（同级 / 同级 bin / data/bin）→ 按需从更新源拉取并缓存。
+//
+// 为什么必须有「按需拉取」这一步：一键部署只在服务器上装了面板本体，而客户端
+// 可能是 windows/amd64、linux/arm64、android 中的任意一种 —— 云服务器上不可能
+// 预置所有平台的客户端二进制。没有按需拉取时，客户端安装会直接 404，而服务器侧
+// 一切正常（面板能开、隧道页能看），排查方向完全被带偏。
+//
+// 服务端只从**面板的更新源**取（不回源 GitHub），这样内网机器只要能访问面板就能
+// 装客户端；面板侧配的镜像也会一并生效。
+func (p *Panel) ensureAgentBin(osName, arch string) (string, error) {
+	name := shared.AgentBinFileName(osName, arch)
+	if name == "" {
+		return "", fmt.Errorf("os / arch 参数无效（%s/%s）", osName, arch)
+	}
+	if path := p.findAgentBin(osName, arch); path != "" {
+		return path, nil
+	}
+
+	agentFetchMu.Lock()
+	defer agentFetchMu.Unlock()
+	// 等锁期间别的请求可能已经下好了，拿到锁必须再查一次
+	if path := p.findAgentBin(osName, arch); path != "" {
+		return path, nil
+	}
+
+	base := strings.TrimSpace(p.db.GetSetting("update_base"))
+	if base == "" {
+		return "", fmt.Errorf("面板上没有 %s，且未配置「更新源」，无法自动拉取。"+
+			"到面板「设置 → 版本与更新」填上更新源（如本仓库的 releases/latest/download），"+
+			"或手工把该文件放进 %s", name, p.dataDir+"/bin")
+	}
+
+	m, err := shared.FetchManifest(base, p.db.GetSetting("mirror_base"))
+	if err != nil {
+		return "", fmt.Errorf("面板上没有 %s，从更新源拉清单也失败：%v", name, err)
+	}
+	asset, err := m.SelectAsset("agent", osName, arch)
+	if err != nil {
+		return "", fmt.Errorf("面板上没有 %s，而且 %v", name, err)
+	}
+
+	dir := filepath.Join(p.dataDir, "bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("创建缓存目录 %s 失败：%v", dir, err)
+	}
+	dst := filepath.Join(dir, name)
+	tmp := dst + ".part"
+	defer os.Remove(tmp) // 失败路径上不留下半截文件
+
+	url := m.URL(asset)
+	n, err := shared.DownloadFile(url, tmp)
+	if err != nil {
+		return "", fmt.Errorf("下载 %s 失败（%s）：%v", name, url, err)
+	}
+	// 先比长度再比哈希：长度不符多半是代理返回了截断内容，报长度更好理解
+	if asset.Size > 0 && n != asset.Size {
+		return "", fmt.Errorf("下载 %s 大小不符：期望 %d 字节，实际 %d 字节（下载被截断或中间有代理）", name, asset.Size, n)
+	}
+	if asset.SHA256 != "" {
+		got, err := shared.FileSHA256(tmp)
+		if err != nil {
+			return "", fmt.Errorf("计算 %s 哈希失败：%v", name, err)
+		}
+		if !strings.EqualFold(got, asset.SHA256) {
+			return "", fmt.Errorf("下载 %s 后 sha256 与清单不符 —— 传输损坏，或清单与产物不是同一次发布", name)
+		}
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return "", fmt.Errorf("保存 %s 失败：%v", dst, err)
+	}
+	// 客户端安装脚本自己也会 chmod，但 Linux 上直接执行时先给权限更省事
+	_ = os.Chmod(dst, 0o755)
+	return dst, nil
 }
 
 

@@ -352,7 +352,11 @@ if [ "$rc" -ne 0 ]; then
     2) adb push frpeasy-agent-linux-$ARCH /data/local/tmp/frpeasy-agent/frpeasy-agent
     3) adb shell chmod 755 /data/local/tmp/frpeasy-agent/frpeasy-agent"
   fi
-  die "download failed (rc=$rc). The existing installation, if any, was left untouched."
+  die "download failed (rc=$rc). The existing installation, if any, was left untouched.
+  Most likely the panel has no $OSKEY/$ARCH agent binary and could not fetch one from its
+  update source. Check panel -> Settings -> version & update has an update source set.
+  To see the exact reason, run this on any machine that can reach the panel:
+    curl -i $URL"
 fi
 
 SZ=$(wc -c < "$TMP" 2>/dev/null | tr -d ' ')
@@ -360,8 +364,10 @@ SZ=$(wc -c < "$TMP" 2>/dev/null | tr -d ' ')
 if [ "$SZ" -lt 500000 ]; then
   HEAD=$(head -c 300 "$TMP" 2>/dev/null | tr -d '\r')
   rm -f "$TMP"
-  die "downloaded file is too small ($SZ bytes). The panel probably has no $OSKEY/$ARCH agent staged
-  (run 'make stage-agent' on the panel host). Panel said: $HEAD"
+  die "downloaded file is too small ($SZ bytes) - this is an error page, not a binary.
+  The panel said: $HEAD
+  Fix: the panel needs to be able to fetch the $OSKEY/$ARCH agent binary. Set an update
+  source in panel -> Settings -> version & update, or place the file next to the panel binary."
 fi
 
 chmod 755 "$TMP" 2>/dev/null || true
