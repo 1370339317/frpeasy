@@ -453,14 +453,45 @@ if command -v curl >/dev/null; then
     | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
 fi
 
+# 猜一个能打开的地址。取「路由到外网时使用的源地址」，比 hostname -I 的第一个更靠谱
+# （后者在多网卡机器上常给 docker0 之类）。云服务器的公网 IP 通常不在网卡上（NAT），
+# 所以这里拿到的多半是内网地址 —— 下面会提示用控制台里的公网 IP。
+guess_ip() {
+  local ip=""
+  if command -v ip >/dev/null 2>&1; then
+    ip=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
+  fi
+  if [ -z "$ip" ] && command -v hostname >/dev/null 2>&1; then
+    ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  fi
+  printf '%s' "$ip"
+}
+HOST_IP=$(guess_ip)
+
 say ""
 say "======================================================"
 say " frpeasy 已就绪"
 say "   版本    ${VER_RUNNING:-$VERSION}"
-say "   地址    http://<这台机器的IP>:$PORT"
+if [ -n "$HOST_IP" ]; then
+  say "   地址    http://$HOST_IP:$PORT"
+else
+  say "   地址    http://<这台机器的IP>:$PORT"
+fi
 say "   目录    $PREFIX   （数据在 $DATA）"
 say "   服务    systemctl status $SERVICE_NAME"
 say "======================================================"
 say ""
-say "首次登录用 admin / admin —— 页面顶部会红条提醒，登录后立刻改口令。"
+say "还差三步才能真正用起来："
+say ""
+say "  1. 放行端口 TCP $PORT —— 云服务器要在控制台「安全组」和机器防火墙两处都开，"
+say "     少一处就是浏览器打不开（内网访问正常、公网超时，最容易被误判成程序挂了）。"
+say ""
+say "  2. 浏览器打开面板，用 admin / admin 登录，顶部有红条提醒，立刻改口令。"
+say ""
+say "  3. 设置页填「公网地址」：填你用浏览器访问面板时用的那个地址（云服务器就是公网 IP）。"
+say "     填了它，生成的客户端安装命令、客户端连 frps 的地址才会是对的。"
+say ""
+say "其余要放行的端口（frps 接入、每条隧道的公网端口）在面板左侧「端口 / 防火墙」页"
+say "会列全，并给出可直接粘贴的 ufw / firewalld / nftables / iptables 放行命令。"
+say ""
 say "更新源已写进服务环境变量，以后在面板「设置 → 版本与更新」点一下就自动升级。"
