@@ -87,6 +87,10 @@ func (db *DB) migrate() error {
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN ips TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN frp_version TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN agent_version TEXT NOT NULL DEFAULT ''`)
+	// uninstall_requested 面板要求该客户端自卸载的待办标记。
+	// 用数据库而不是内存 map：面板重启后指令不该丢，否则用户点了卸载、
+	// 面板恰好重启，那台机器就永远收不到指令，而界面看起来「已下发」。
+	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN uninstall_requested INTEGER NOT NULL DEFAULT 0`)
 	return nil
 }
 

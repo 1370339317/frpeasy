@@ -63,6 +63,25 @@ chk "心跳 ok" True "$(curl -s -X POST $B/api/agent/heartbeat -H 'Content-Type:
   -d "{\"agent_id\":\"$AGID\",\"agent_token\":\"$AGTOK\",\"status\":[],\"services\":[{\"host\":\"127.0.0.1\",\"port\":8123,\"addr\":\"127.0.0.1:8123\",\"name\":\"Web(HTTP)\",\"confidence\":3}]}" | jget "d['ok']")"
 chk "错误令牌被拒 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST $B/api/agent/heartbeat -H 'Content-Type: application/json' -d "{\"agent_id\":\"$AGID\",\"agent_token\":\"bad\",\"status\":[]}")"
 
+say "== 4b) 云端卸载指令：随心跳下发，且只发一次 =="
+# 用一台临时「新版」客户端测：上面 AGID 上报的是 0.3.0，会被版本门槛拦下（那也是有意的，
+# 老 agent 解码时会静默忽略卸载字段，点下去只会「没反应」）。测完立刻删掉，
+# 否则后面「唯一 agent 自动绑定」那条会因存在两台客户端而失败。
+REG2=$(curl -s -X POST $B/api/agent/register -H 'Content-Type: application/json' -d "{\"install_token\":\"$TOKEN\",\"os\":\"windows\",\"arch\":\"amd64\",\"name\":\"uninstall-test\",\"agent_version\":\"0.5.9\"}")
+AG2=$(echo "$REG2" | jget "d['agent_id']")
+AG2TOK=$(echo "$REG2" | jget "d['agent_token']")
+chk "下发卸载指令 ok" True "$(curl -s -b cj.txt -X POST $B/api/agents/$AG2/uninstall | jget "d['ok']")"
+chk "心跳带回 uninstall=true" True "$(curl -s -X POST $B/api/agent/heartbeat -H 'Content-Type: application/json' -d "{\"agent_id\":\"$AG2\",\"agent_token\":\"$AG2TOK\",\"status\":[]}" | jget "d.get('uninstall')")"
+# 取出即清除：否则客户端每 15 秒重复收到同一指令，权限不足时会无限重试刷日志
+chk "第二次心跳不再下发" None "$(curl -s -X POST $B/api/agent/heartbeat -H 'Content-Type: application/json' -d "{\"agent_id\":\"$AG2\",\"agent_token\":\"$AG2TOK\",\"status\":[]}" | jget "d.get('uninstall')")"
+chk "不存在的客户端下发 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/agents/nosuchagent/uninstall)"
+# 0.3.0 的客户端：必须明确拒绝，而不是「已下发」然后客户端毫无反应
+chk "过旧客户端被拒 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/agents/$AGID/uninstall)"
+curl -s -b cj.txt -X DELETE $B/api/agents/$AG2 >/dev/null
+IC2=$(curl -s -b cj.txt $B/api/tunnels | jget "d['uninstall_command']")
+chk "卸载命令已下发" 1 "$(case "$IC2" in *--uninstall*) echo 1;; *) echo 0;; esac)"
+chk "卸载命令确实没带 --token" 0 "$(case "$IC2" in *--token*) echo 1;; *) echo 0;; esac)"
+
 say "== 5) 探测服务出现在列表 =="
 chk "agent.services 已存储" "127.0.0.1:8123" "$(curl -s -b cj.txt $B/api/tunnels | jget "[a for a in d['agents'] if a['id']=='$AGID'][0]['services'][0]['addr']")"
 chk "agent 自身版本已落库（升级判定的地基）" "0.3.0" "$(curl -s -b cj.txt $B/api/agents | jget "[a for a in d['agents'] if a['id']=='$AGID'][0]['agent_version']")"
@@ -122,12 +141,12 @@ say "== 15) 面板下发 agent 二进制（数据目录兜底查找） =="
 mkdir -p it-data/bin && cp ../frpeasy/bin/frpeasy-agent-linux-arm64 it-data/bin/ 2>/dev/null || mkdir -p it-data/bin
 # 注意用**我们从不构建**的平台组合：面板除了数据目录，还会去查自身同级目录
 # 与同级 bin/（发布布局），所以"bin/ 里恰好有 linux/amd64"时那条不算未暂存。
-chk "未暂存平台 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/agent/bin/linux/riscv64)"
+chk "未暂存平台 502" 502 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/agent/bin/linux/riscv64)"
 chk "已暂存平台 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/agent/bin/linux/arm64 2>/dev/null)"
 
 say "== 16) Android 客户端二进制（android/* 是 linux/* 的别名） =="
 chk "android/arm64 可下载" 200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/agent/bin/android/arm64)"
-chk "android/未暂存架构 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/agent/bin/android/mips)"
+chk "android/未暂存架构 502" 502 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/agent/bin/android/mips)"
 
 say "== 17) Android 安装命令下发 =="
 AND=$(curl -s -b cj.txt $B/api/tunnels | jget "d['install_command_android']")

@@ -47,6 +47,8 @@ interface AppData {
   versions: VersionsResponse | null
   net: NetworkResponse | null
   install: Record<CommandKind, string>
+  /** 卸载命令：同样按平台分，androidRoot 复用 android 那条 */
+  uninstall: Record<CommandKind, string>
   accessHost: string
   accessSource: AccessHostSource
   installBase: string
@@ -101,6 +103,7 @@ export function AppProvider({
     versions: null,
     net: null,
     install: EMPTY_INSTALL,
+    uninstall: EMPTY_INSTALL,
     accessHost: '',
     accessSource: 'fallback',
     installBase: '',
@@ -164,6 +167,13 @@ export function AppProvider({
         win: r.install_command_windows || '',
         android: r.install_command_android || '',
         androidRoot: r.install_command_android_root || '',
+      },
+      uninstall: {
+        linux: r.uninstall_command || '',
+        win: r.uninstall_command_windows || '',
+        android: r.uninstall_command_android || '',
+        // Android 的卸载与是否 root 无关（同一个脚本、同一套目录），复用一条
+        androidRoot: r.uninstall_command_android || '',
       },
       accessHost: r.access_host || '',
       accessSource: r.access_host_source || 'fallback',

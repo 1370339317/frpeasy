@@ -74,21 +74,41 @@ function PortWarn({ base, port, accessHost }: { base: string; port: string; acce
 }
 
 export function Clients() {
-  const { agents, install, installBase, panelPort, accessHost, loadAll, toast } = useApp()
+  const { agents, install, uninstall, installBase, panelPort, accessHost, loadAll, toast } = useApp()
   const [kind, setKind] = useState<CommandKind>('linux')
 
   const cmd = install[kind] || '加载中…'
+  const unCmd = uninstall[kind] || '加载中…'
+
+  /** 云端下发卸载：标记随该客户端下一次心跳下发，由它自己清理并退出。 */
+  async function uninstallAgent(id: string, name: string, online: boolean) {
+    const msg = online
+      ? `让「${name}」自己卸载 frpeasy agent？\n\n` +
+        `它会在下一次心跳（约 15 秒内）停掉 frpc、摘掉开机自启、删除程序和配置目录，然后从面板上离线。\n\n` +
+        `这台机器以后要重新执行安装命令才能再接入。若它当前不是以 root / 管理员运行，会卸载失败并继续在线。`
+      : `「${name}」当前离线。\n\n卸载指令会先存下来，等它下次上线心跳时立即执行。确定下发吗？`
+    if (!confirm(msg)) return
+    try {
+      const r = await api<{ message: string }>('POST', `/api/agents/${encodeURIComponent(id)}/uninstall`)
+      toast(r?.message || '卸载指令已下发', 'ok')
+      await loadAll()
+    } catch (e) {
+      toast(`下发失败：${(e as Error).message}`, 'bad')
+    }
+  }
 
   async function remove(id: string, name: string) {
     if (
       !confirm(
-        `移除客户端「${name}」？\n\n只会删掉面板里的这条记录，并把它绑定的隧道解绑为草稿；不会卸载那台机器上的 agent，也不会影响其它隧道。`,
+        `仅移除面板里的记录「${name}」？\n\n这只删面板这一条记录，并把它的隧道解绑为草稿；` +
+          `那台机器上的 agent 仍在运行、仍会继续连面板（下次心跳会重新注册回来）。\n\n` +
+          `要真正卸载那台机器，请用上面的「卸载命令」或卡片上的「卸载」。`,
       )
     )
       return
     try {
       await api('DELETE', `/api/agents/${encodeURIComponent(id)}`)
-      toast('已移除客户端')
+      toast('已移除客户端记录')
       await loadAll()
     } catch (e) {
       toast(`移除失败：${(e as Error).message}`, 'bad')
@@ -120,6 +140,38 @@ export function Clients() {
         </div>
       </Card>
 
+      <Card
+        title="卸载客户端"
+        desc="客户端在线时更省事：点下面卡片上的「卸载」，面板会通知它自己清理；离线或用不了面板时，复制这条命令到那台机器执行"
+        actions={<Tabs value={kind} onChange={setKind} items={TABS} />}
+      >
+        <Pre>{unCmd}</Pre>
+        <div className="mt-2 text-xs leading-[1.6] text-dim">
+          卸载命令<b>不需要令牌</b>：它只做三件事 —— 停掉进程、摘掉开机自启（systemd / OpenRC /
+          计划任务）、删掉二进制和数据目录。跑完那台机器上不留 frpeasy 的任何东西。
+          {kind === 'android' || kind === 'androidRoot' ? (
+            <>
+              {' '}
+              Android 卸载同样<b>不会</b>注册或删除任何自启，只是把{' '}
+              <span className="font-mono">/data/local/tmp/frpeasy-agent</span> 整个删掉。
+            </>
+          ) : null}
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <Button
+            size="sm"
+            onClick={async () =>
+              toast((await copyText(unCmd)) ? '已复制卸载命令' : '复制失败，请手动选中', 'ok')
+            }
+          >
+            复制卸载命令
+          </Button>
+          <span className="text-xs text-dim">
+            卸载只影响这一台机器；它绑定的隧道会变成草稿（不删配置），重新装回客户端即可继续使用。
+          </span>
+        </div>
+      </Card>
+
       <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(290px,1fr))]">
         {agents.length === 0 ? (
           <div className="rounded-xl border border-border bg-card px-4.5 py-4">
@@ -141,14 +193,19 @@ export function Clients() {
                   <span className="ml-auto">
                     <Badge tone={a.online ? 'ok' : 'gray'}>{a.online ? '在线' : '离线'}</Badge>
                   </span>
-                  <Button
-                    variant="danger"
-                    size="sm"
-                    className="ml-2"
-                    onClick={() => void remove(a.id, a.name)}
-                  >
-                    移除
-                  </Button>
+                  <div className="ml-2 flex items-center gap-1.5">
+                    {/* 云端卸载：真正删那台机器上的东西，务必与「移除记录」区分开 */}
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onClick={() => void uninstallAgent(a.id, a.name, a.online)}
+                    >
+                      卸载
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => void remove(a.id, a.name)}>
+                      移除
+                    </Button>
+                  </div>
                 </div>
 
                 <div className="mt-2 grid grid-cols-[auto_1fr] gap-x-2.5 gap-y-1 text-xs text-muted">

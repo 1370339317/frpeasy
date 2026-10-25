@@ -163,6 +163,12 @@ type AgentUpdate struct {
 type HeartbeatResponse struct {
 	OK          bool         `json:"ok"`
 	AgentUpdate *AgentUpdate `json:"agent_update,omitempty"`
+	// Uninstall 面板要求客户端自卸载。
+	//
+	// 老客户端只读 ok 字段，多出来的字段会被静默忽略 —— 与 AgentUpdate 同理，
+	// 所以复用心跳当下发通道，不需要长连接，也不需要客户端开端口。
+	// 客户端执行后本进程即退出，无法回报结果；面板侧以「离线」为成功标志。
+	Uninstall bool `json:"uninstall,omitempty"`
 }
 
 // TunnelStatus 单隧道运行时状态。

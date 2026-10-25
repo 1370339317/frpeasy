@@ -195,7 +195,27 @@ arm64-v8a → `linux/arm64`，armeabi-v7a → `linux/arm`，frp 官方也是这�
 下载失败时**旧安装原样保留、继续运行**。Windows 额外多做一步：替换前把旧 exe
 备份成 `.bak`，新版本 20 秒内起不来就自动回滚到旧版本。
 
-卸载：`sh frpeasy-install.sh --uninstall`（Linux/Android）、`.\install.ps1 -Uninstall`（Windows）。
+### 卸载
+
+面板「客户端」页有两种方式，**优先用第一种**：
+
+1. **云端下发（在线时最省事）**：那台机器的卡片上点「卸载」。面板把指令挂到
+   该客户端名下，随它下一次心跳（约 15 秒）发下去。客户端收到后自己停 frpc、
+   摘掉开机自启（systemd / OpenRC / 计划任务）、删二进制与数据目录，然后退出。
+   - 离线也能点：指令存在数据库里，等它下次上线心跳时立即执行（面板重启也不丢）。
+   - **客户端会先检查权限**：不是 root（Linux）/ 管理员（Windows）时不硬删，
+     而是打印原因并继续在线 —— 半删比不删更难收拾，你在面板上看到它还在线就知道没成功。
+2. **复制命令去执行**：同一页有「卸载命令」，按平台分好（Linux / Windows / Android），
+   粘到那台机器上跑。命令**不带令牌**，只依赖面板能把脚本发下去，所以客户端
+   失联或面板换地址时也能用。
+
+```bash
+curl -sSL http://你的面板:28080/install | sh -s -- --uninstall          # Linux / Android
+powershell -ExecutionPolicy Bypass -Command "iwr http://你的面板:28080/install.ps1 -OutFile $env:TEMP\frpeasy-install.ps1 -UseBasicParsing; & $env:TEMP\frpeasy-install.ps1 -Uninstall"   # Windows
+```
+
+> 卡片上的「移除」**只是删面板记录**：那台机器上的 agent 还在跑，下次心跳会重新
+> 注册回来，隧道也可能重新绑上。要真正卸载用上面的两种方式。
 
 ---
 

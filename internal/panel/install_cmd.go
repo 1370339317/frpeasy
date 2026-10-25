@@ -44,6 +44,32 @@ func (p *Panel) buildInstallCommandAndroid(r *http.Request) string {
 		"sh " + sh + " --server " + panelHTTP + " --token " + token + "\""
 }
 
+// buildUninstallCommand 生成「在那台机器上执行即可卸载」的命令。
+//
+// 不需要 --server / --token：install.sh 把 --uninstall 的处理放在参数校验之前，
+// 所以卸载只依赖面板能把脚本本身发下去。这一点被测试守着。
+func (p *Panel) buildUninstallCommand(r *http.Request) string {
+	panelHTTP := p.resolvePanelBase(r)
+	return "curl -sSL " + panelHTTP + "/install | sh -s -- --uninstall"
+}
+
+// buildUninstallCommandWindows 生成 Windows 卸载命令（计划任务 + 目录一并清理）。
+func (p *Panel) buildUninstallCommandWindows(r *http.Request) string {
+	panelHTTP := p.resolvePanelBase(r)
+	return "powershell -ExecutionPolicy Bypass -Command \"iwr " + panelHTTP + "/install.ps1 -OutFile $env:TEMP\\frpeasy-install.ps1 -UseBasicParsing; & $env:TEMP\\frpeasy-install.ps1 -Uninstall\""
+}
+
+// buildUninstallCommandAndroid 生成 Android（adb shell）卸载命令。
+// 与安装同理：只试两种下载器，落地失败就明确退出，不去 sh 一个不存在的文件。
+func (p *Panel) buildUninstallCommandAndroid(r *http.Request) string {
+	panelHTTP := p.resolvePanelBase(r)
+	sh := "/data/local/tmp/frpeasy-install.sh"
+	return "adb shell \"curl -fsSL " + panelHTTP + "/install -o " + sh +
+		" || toybox wget -O " + sh + " " + panelHTTP + "/install; " +
+		"[ -s " + sh + " ] || { echo 'download failed on device: neither curl nor toybox wget worked'; exit 1; }; " +
+		"sh " + sh + " --uninstall\""
+}
+
 // buildInstallCommandAndroidRoot 以 root 身份安装（可选，不是必需的）。
 //
 // **不假设 su 是哪种实现**：Magisk / KernelSU / APatch / adbsu 的调用形状各不相同
@@ -179,4 +205,3 @@ func (p *Panel) resolveFRPSAddr(r *http.Request, bindPort int) string {
 	}
 	return host + ":" + strconv.Itoa(bindPort)
 }
-

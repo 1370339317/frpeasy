@@ -117,6 +117,12 @@ func (p *Panel) listTunnelsHandler(w http.ResponseWriter, r *http.Request) {
 		"install_command_windows":      p.buildInstallCommandWindows(r),
 		"install_command_android":      p.buildInstallCommandAndroid(r),
 		"install_command_android_root": p.buildInstallCommandAndroidRoot(r),
+		// 卸载命令：给「现在的面板上直接复制一条命令去那台机器执行」用。
+		// 与云端一键卸载（POST /api/agents/{id}/uninstall）互补：
+		// 前者适合客户端已失联/面板换了地址，后者适合它还在线。
+		"uninstall_command":         p.buildUninstallCommand(r),
+		"uninstall_command_windows": p.buildUninstallCommandWindows(r),
+		"uninstall_command_android": p.buildUninstallCommandAndroid(r),
 		// 供 UI 展示“当前生效的公网入口”及其来源
 		"access_host":        accessHost,
 		"access_host_source": accessSource,

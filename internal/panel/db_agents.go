@@ -8,7 +8,6 @@ import (
 	"frpeasy/internal/shared"
 )
 
-
 // --- Agents ---
 
 // 注：这里曾有一个 GetAgentByInstallToken（按 install_token 查已注册客户端），
@@ -20,7 +19,6 @@ import (
 //
 // agents.install_token 列保留：已有部署的库里该列有值，删列要走迁移，
 // 收益不足以抵消风险。新写入时它只是留痕，不再参与任何判定。
-
 
 // FindAgentToReuse 找一个可以接管的既有客户端记录。判据：同名 + 同平台 +
 // 上报的内网 IP 有交集。加 IP 交集是为了避免「两台机器恰好同名」时互相顶掉。
@@ -54,7 +52,6 @@ func (db *DB) FindAgentToReuse(name, osName, arch string, ips []string) (*shared
 	return nil, false
 }
 
-
 // ReattachAgent 用新注册发放的凭据接管既有记录（保留 id 与它绑定的隧道）。
 func (db *DB) ReattachAgent(a *shared.Agent) error {
 	ipsB, _ := json.Marshal(a.IPs)
@@ -64,7 +61,6 @@ func (db *DB) ReattachAgent(a *shared.Agent) error {
 	)
 	return err
 }
-
 
 // DeleteAgent 删除客户端记录，并把它绑定的隧道解绑为草稿
 // （隧道名/公网端口在 frps 上是全局唯一的，留着悬空 agent_id 只会变成永远不部署的死隧道）。
@@ -78,7 +74,6 @@ func (db *DB) DeleteAgent(id string) error {
 	return err
 }
 
-
 func (db *DB) CreateAgent(a *shared.Agent) error {
 	ipsB, _ := json.Marshal(a.IPs)
 	_, err := db.Exec(
@@ -88,14 +83,12 @@ func (db *DB) CreateAgent(a *shared.Agent) error {
 	return err
 }
 
-
 // UpdateAgentServices 持久化 Agent 最近一次探测到的本机服务。
 func (db *DB) UpdateAgentServices(id string, svcs []shared.DiscoveredService) error {
 	b, _ := json.Marshal(svcs)
 	_, err := db.Exec("UPDATE agents SET services=? WHERE id=?", string(b), id)
 	return err
 }
-
 
 // GetAgentServices 读取 Agent 探测到的本机服务列表。
 func (db *DB) GetAgentServices(id string) ([]shared.DiscoveredService, error) {
@@ -105,7 +98,6 @@ func (db *DB) GetAgentServices(id string) ([]shared.DiscoveredService, error) {
 	}
 	return parseServices(s), nil
 }
-
 
 func parseServices(s string) []shared.DiscoveredService {
 	if s == "" {
@@ -118,7 +110,6 @@ func parseServices(s string) []shared.DiscoveredService {
 	return out
 }
 
-
 func parseStringList(s string) []string {
 	if s == "" {
 		return nil
@@ -129,7 +120,6 @@ func parseStringList(s string) []string {
 	}
 	return out
 }
-
 
 func (db *DB) GetAgent(id string) (*shared.Agent, error) {
 	a := &shared.Agent{}
@@ -156,7 +146,6 @@ func (db *DB) GetAgent(id string) (*shared.Agent, error) {
 	return a, nil
 }
 
-
 // UpdateAgentHeartbeat 记录心跳。ips 与 frp_version 各自独立更新：
 // 老实现是「两者都为空就整条不更新」，一旦客户端某次上报取不到（例如 frpc 尚未
 // 下载完、或在 SYSTEM 账户下拿不到网卡），该列就永远停在注册时的空值上，
@@ -182,6 +171,29 @@ func (db *DB) UpdateAgentHeartbeat(id string, ips []string, frpVersion, agentVer
 	return err
 }
 
+// RequestAgentUninstall 标记「下次心跳时要求该客户端自卸载」。
+//
+// 指令走心跳下发而不是长连接：客户端不需要开任何入站端口，面板也不需要
+// 保存到客户端的连接——这跟现有的升级下发是同一套通道。
+func (db *DB) RequestAgentUninstall(id string) error {
+	_, err := db.Exec("UPDATE agents SET uninstall_requested=1 WHERE id=?", id)
+	return err
+}
+
+// ConsumeAgentUninstall 原子地取出并清除卸载标记。
+// 返回 true 表示这次心跳要把「卸载」指令发下去。
+//
+// 必须是「取出即清除」：否则客户端每 15 秒收到一次相同指令，
+// 若它因权限不足没删干净就会无限重试，日志刷爆且无法区分新旧请求。
+// 清除后客户端没执行成功的话，用户在面板再点一次即可重新下发。
+func (db *DB) ConsumeAgentUninstall(id string) bool {
+	res, err := db.Exec("UPDATE agents SET uninstall_requested=0 WHERE id=? AND uninstall_requested=1", id)
+	if err != nil {
+		return false
+	}
+	n, err := res.RowsAffected()
+	return err == nil && n > 0
+}
 
 func (db *DB) ListAgents() ([]shared.Agent, error) {
 	rows, err := db.Query("SELECT id,name,os,arch,online,last_seen,created_at,services,ips,frp_version,agent_version FROM agents ORDER BY created_at DESC")
@@ -218,7 +230,6 @@ func (db *DB) ListAgents() ([]shared.Agent, error) {
 // agentOfflineAfter 超过这个时间没收到心跳就判定离线。
 // 心跳间隔是 15 秒，取 4 个周期，留出抖动与短时网络故障的余量。
 const agentOfflineAfter = 60 * time.Second
-
 
 // applyAgentTTL 把「心跳已过期」的客户端标成离线。
 //

@@ -171,6 +171,10 @@ export interface TunnelsResponse {
   install_command_windows: string
   install_command_android: string
   install_command_android_root: string
+  /** 卸载命令：在那台机器上直接执行即可（与云端下发卸载互补） */
+  uninstall_command: string
+  uninstall_command_windows: string
+  uninstall_command_android: string
   access_host: string
   access_host_source: AccessHostSource
   frps_bind_port: number

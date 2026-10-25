@@ -2,6 +2,7 @@ package panel
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -124,6 +125,11 @@ func (p *Panel) agentHeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	if up := p.agentUpdateFor(r, agent); up != nil {
 		resp["agent_update"] = up
 	}
+	// 卸载指令走同一条通道：客户端在收到后自己停服务、删文件、退出。
+	// 取出即清除（Consume），避免客户端因权限不足没删干净时被反复重试。
+	if p.db.ConsumeAgentUninstall(req.AgentID) {
+		resp["uninstall"] = true
+	}
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -188,5 +194,63 @@ func (p *Panel) systemVersionsHandler(w http.ResponseWriter, r *http.Request) {
 		"latest_version":       latest,
 		"pinned":               pinned,
 		"update_available":     updateAvailable,
+	})
+}
+
+// minUninstallAgentVersion 云端卸载要求的最低 agent 版本。
+//
+// 卸载是随心跳下发的新字段；比它更老的 agent 解码时会静默忽略未知字段，
+// 于是「点了没反应」—— 这种失败最难排查，所以在面板侧直接拦住并说明。
+const minUninstallAgentVersion = "0.5.9"
+
+// agentUninstallHandler POST /api/agents/{id}/uninstall
+//
+// 云端发起卸载：写一个待办标记，随该客户端下一次心跳下发（默认 15 秒内）。
+// 客户端收到后自己停 frpc、摘掉自启、删二进制与数据目录，然后退出。
+//
+// 为什么不在面板侧直接下发一条 shell 命令：
+// 面板不知道客户端的权限模型、安装位置、自启方式（systemd / OpenRC /
+// 计划任务 / 什么都没有），远程拼命令本质上是在猜；而 agent 就在那台机器上，
+// 它自己最清楚该怎么删干净。
+func (p *Panel) agentUninstallHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "客户端 id 无效", http.StatusBadRequest)
+		return
+	}
+	agent, err := p.db.GetAgent(id)
+	if err != nil {
+		http.Error(w, "客户端不存在", http.StatusNotFound)
+		return
+	}
+	// 版本门槛：卸载指令是新增字段，旧 agent 的 json 解码会**静默忽略**它。
+	// 不拦的话用户点了卸载、界面显示已下发、客户端毫无反应 —— 最糟的一种失败。
+	if agent.AgentVersion == "" || shared.IsNewer(minUninstallAgentVersion, agent.AgentVersion) {
+		ver := agent.AgentVersion
+		if ver == "" {
+			ver = "未知（旧版未上报）"
+		}
+		http.Error(w, fmt.Sprintf(
+			"这台客户端的 agent 版本是 %s，低于支持云端卸载的 %s —— 老版本不认识卸载指令，"+
+				"点了不会有任何反应。二选一：① 先在面板把它升级到最新版再点卸载；"+
+				"② 直接用上面的「卸载命令」到那台机器执行。", ver, minUninstallAgentVersion),
+			http.StatusConflict)
+		return
+	}
+	if err := p.db.RequestAgentUninstall(id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 离线时也照样下发：标记留在库里，等它下次上线。
+	// 客户端可能只是短暂断网，不该逼用户守着页面等它上线再点一次。
+	msg := "卸载指令已下发，客户端会在下一次心跳（约 15 秒内）执行并退出"
+	if !agent.Online {
+		msg = "该客户端当前离线，指令已保存；它下次上线心跳时会立即执行"
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"ok":      true,
+		"online":  agent.Online,
+		"message": msg,
 	})
 }

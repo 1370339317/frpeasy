@@ -223,6 +223,10 @@ func (c *Client) Run() error {
 		resp, herr := c.heartbeat(statuses)
 		if herr != nil {
 			fmt.Println("[agent] 心跳失败:", herr)
+		} else if resp != nil && resp.Uninstall {
+			// 卸载优先于升级：两者同时下发时，没有任何理由先升完再卸
+			c.selfUninstall()
+			return nil
 		} else if resp != nil && resp.AgentUpdate != nil {
 			// 升级指令随心跳下发。执行成功后本进程必须退出（新进程已接管），
 			// 否则会出现两个 agent 同时连面板、各起一个 frpc。

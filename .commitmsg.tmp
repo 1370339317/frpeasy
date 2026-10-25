@@ -1,0 +1,62 @@
+feat: 客户端卸载 —— 面板里能看卸载命令，也能云端一键下发
+
+用户问：客户端那一栏只有安装命令、没有卸载，云端好像也不能发起卸载。
+
+核实结果：卸载能力早就存在（install.sh 的 --uninstall / install.ps1 的
+-Uninstall），但面板从来没暴露过；客户端页只有一个「移除」，而它明确只删面板
+记录、不动那台机器。等于卸载功能对用户不可见。
+
+一、面板里直接给卸载命令
+
+/api/tunnels 增加 uninstall_command / _windows / _android，客户端页新增
+「卸载客户端」卡片：按平台分页签、一键复制。
+
+命令不带令牌：install.sh 把 --uninstall 的处理放在 --server 校验之前，
+所以卸载只依赖面板能把脚本发下去。这条顺序很关键 —— 反过来用户复制命令执行会
+直接撞上「--server is required」，且完全看不出问题在哪。已加测试守着。
+
+二、云端发起卸载（真正删那台机器）
+
+链路复用心跳，和现有的升级下发同一条通道：
+
+- agents 表加 uninstall_requested（存库而不是内存：面板重启不该丢指令，
+  否则界面显示「已下发」而客户端永远收不到）；
+- POST /api/agents/{id}/uninstall 置标记；
+- 心跳响应带 uninstall: true，取出即清除（不清的话客户端因权限不足
+  没删干净时会被每 15 秒重试一次，日志刷爆且分不清是新请求还是残留）；
+- agent 收到后 selfUninstall()：停 frpc → 摘自启 → 删二进制与数据目录 → 退出。
+
+卸载动作交给一个独立进程，本进程在它完成前保持存活。原因：
+  - agent 的 unit 是 Restart=always + StartLimitIntervalSec=0，不先把
+    unit 从 systemd 摘掉，主进程一退出就被无限拉起；
+  - Windows 上运行中的 exe 根本删不掉；
+  - 清理进程和 agent 在同一个 cgroup，主进程提前退出会让 systemd 回收整个
+    cgroup，把正在删文件的清理进程一起杀掉，留下半个 unit + 半个目录。
+所以脚本里不调用 systemctl stop（那会杀掉清理进程自己），只做
+disable + 删 unit + daemon-reload + 删文件。
+
+三、两个安全边界
+
+- 版本门槛：卸载是新增字段，老 agent 解码时静默忽略，点了会「没反应」。
+  面板比对 agent_version，低于 0.5.9 直接返回 409 并说明该用哪条路，
+  而不是假装已下发。空版本（旧 agent 未上报）同样拒绝。
+- 权限检查：Linux 上非 root 不做硬删 —— 删一半（服务还在、二进制没了）
+  比不删更难收拾。此时打印原因并继续在线，用户看到它还在线就知道没成功。
+- 路径校验 safeCleanPath：拒绝 /、/usr、/var、/data、/opt、/tmp 和层级过浅的
+  路径（至少两层），与安装脚本 do_uninstall 同一套规则。
+
+四、顺带修
+
+it.sh 里两条 agent 二进制断言还停在 404，而 0.5.5 已把状态码改成 502
+（404 意味着「没这个平台」，真实原因多半是更新源没配，会带偏排查方向）。
+
+五、测试
+
+- agent_uninstall_test.go：标记一次性、未知客户端不写入、--uninstall 必须早于
+  参数校验、三条卸载命令都不含令牌且地址正确；
+- uninstall_test.go：危险路径拒绝、正常安装目录放行、两套引号规则不混用
+  （POSIX 用反斜杠转义单引号，Windows 用两个单引号）；
+- it.sh 新增 7 条：下发 ok、心跳带回、第二次不下发、404、过旧客户端 409、
+  卸载命令含 --uninstall、不含 --token。总 66 条全过。
+
+go build（含 GOOS=windows）+ go test 全绿；前端 tsc + vite 通过。
