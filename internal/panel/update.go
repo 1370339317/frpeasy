@@ -74,7 +74,6 @@ func (p *Panel) currentManifest(force bool) (*shared.Manifest, string) {
 	return c.Manifest, c.Err
 }
 
-
 // dirWritable 试写一个临时文件判断目录是否可写。
 //
 // 自更新要 rename 二进制，只读目录做不了。提前判断比"用户点了更新，
@@ -106,9 +105,13 @@ type versionAgent struct {
 	Hosted       string `json:"hosted"`
 	HostedSHA256 string `json:"hosted_sha256"`
 	HostedSize   int64  `json:"hosted_size"`
-	Latest       string `json:"latest"`
-	AutoUpdate   bool   `json:"auto_update"`
-	Outdated     int    `json:"outdated"`
+	// HostedNote 解释 hosted 这个版本号是怎么来的（本机内置 / 已接入客户端的
+	// 那份 / 清单登记、按需拉取）。服务器只装面板时本机平台产物必然不存在，
+	// UI 需要能说明"这不是故障"，否则用户会去追一个不存在的文件。
+	HostedNote string `json:"hosted_note"`
+	Latest     string `json:"latest"`
+	AutoUpdate bool   `json:"auto_update"`
+	Outdated   int    `json:"outdated"`
 	// Legacy 仍在心跳、但没上报版本号的客户端数。
 	// 这类客户端跑的是「还没有自更新能力」的老二进制 —— 它根本不认识心跳里的
 	// agent_update 字段，面板下发的升级对它完全无效。必须与 Outdated 分开计数：
@@ -145,7 +148,6 @@ type versionResponse struct {
 	LastUpdate   *UpdateState `json:"last_update"`
 }
 
-
 // collectVersions 组装三层版本现状。
 func (p *Panel) collectVersions(force bool) versionResponse {
 	manifest, mErr := p.currentManifest(force)
@@ -181,7 +183,6 @@ func (p *Panel) collectVersions(force bool) versionResponse {
 	resp.Agent.Hosted = bin.Version
 	resp.Agent.HostedSHA256 = bin.SHA256
 	resp.Agent.HostedSize = bin.Size
-	resp.Agent.Error = bin.Err
 	resp.Agent.AutoUpdate = p.db.GetSetting("agent_auto_update") != "0"
 	if manifest != nil {
 		// 清单里的 agent 版本只用来回答"面板自带的这份是不是也旧了"。
@@ -191,6 +192,8 @@ func (p *Panel) collectVersions(force bool) versionResponse {
 		}
 		resp.Agent.MinSupported = manifest.MinAgentVersion
 	}
+	// 已接入客户端的平台各自会收到哪一版（取第一台作为展示代表）。
+	var clientVer string
 	if agents, err := p.db.ListAgents(); err == nil {
 		resp.Agent.Total = len(agents)
 		// 逐台按**它将收到的那个文件**的版本比较，而不是统一拿本机平台的版本：
@@ -204,15 +207,36 @@ func (p *Panel) collectVersions(force bool) versionResponse {
 				resp.Agent.Missing++
 				continue
 			}
+			v := p.agentBinFor(path).Version
+			if clientVer == "" {
+				clientVer = v
+			}
 			// 老客户端（< 引入自更新的版本）心跳里没有版本号。
 			// 无法判断它到底多旧，也无法让它自己升级 —— 只能提示重装。
 			if strings.TrimSpace(a.AgentVersion) == "" {
 				resp.Agent.Legacy++
 				continue
 			}
-			if v := p.agentBinFor(path).Version; v != "" && shared.IsNewer(v, a.AgentVersion) {
+			if v != "" && shared.IsNewer(v, a.AgentVersion) {
 				resp.Agent.Outdated++
 			}
+		}
+	}
+	// hosted 的语义是"面板现在能给客户端提供哪一版"，而不是"本机平台那份在哪"。
+	// 本机平台没有产物是常态（服务器只装面板、不跑客户端），依次退到：
+	// 已接入客户端拿到的那份 → 清单登记版本（该平台首次取用时按需拉取）。
+	if resp.Agent.Hosted == "" {
+		switch {
+		case clientVer != "":
+			resp.Agent.Hosted = clientVer
+			resp.Agent.HostedNote = "本机未内置（本机不跑客户端），已为接入的平台缓存好该版本"
+		case resp.Agent.Latest != "":
+			resp.Agent.Hosted = resp.Agent.Latest
+			resp.Agent.HostedNote = "本机未内置，客户端首次取用时按需从更新源拉取"
+		default:
+			// 既没有本机产物，也拿不到清单 —— 这才是真的发不出去。
+			resp.Agent.Error = "面板没有可下发的 agent，且取不到更新源清单；客户端将无法安装。" +
+				"到「设置 → 版本与更新」填写更新源即可。"
 		}
 	}
 
@@ -235,12 +259,10 @@ func (p *Panel) collectVersions(force bool) versionResponse {
 	return resp
 }
 
-
 // versionHandler GET /api/version
 func (p *Panel) versionHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(p.collectVersions(false))
 }
-
 
 // versionCheckHandler POST /api/version/check —— 强制重新拉清单。
 func (p *Panel) versionCheckHandler(w http.ResponseWriter, r *http.Request) {

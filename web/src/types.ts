@@ -122,9 +122,13 @@ export interface VersionPanel {
 }
 
 export interface VersionAgent {
+  // hosted 面板现在能给客户端提供的 agent 版本。本机平台没有内置产物时
+  // 依次退到「已接入客户端拿到的那份」→「清单登记版本（按需拉取）」，
+  // 所以它正常都该有值；hosted_note 说明这个号是从哪来的。
   hosted: string
   hosted_sha256: string
   hosted_size: number
+  hosted_note: string
   latest: string
   auto_update: boolean
   outdated: number

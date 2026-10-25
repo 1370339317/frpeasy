@@ -12,7 +12,6 @@ import (
 	"frpeasy/internal/shared"
 )
 
-
 // localAgentBin 返回面板自带的、本机平台的 agent 二进制信息（版本 + 哈希）。
 //
 // 为什么要真的执行一次 `--version` 而不是只看文件名：
@@ -41,7 +40,6 @@ func (p *Panel) agentBinDirs() []string {
 	return dirs
 }
 
-
 // findAgentBin 按平台找到要下发的 agent 二进制，找不到返回空串。
 func (p *Panel) findAgentBin(osName, arch string) string {
 	name := shared.AgentBinFileName(osName, arch)
@@ -56,7 +54,6 @@ func (p *Panel) findAgentBin(osName, arch string) string {
 	}
 	return ""
 }
-
 
 // agentFetchMu 串行化按需拉取。
 //
@@ -212,18 +209,19 @@ func (p *Panel) cacheStampMatches(path, version string) bool {
 	return strings.TrimSpace(string(b)) == strings.TrimSpace(version)
 }
 
-
-// localAgentBin 面板本机平台的 agent 二进制信息（给 UI 显示"面板自带哪一版"）。
+// localAgentBin 面板本机平台（runtime.GOOS/GOARCH）的 agent 产物信息。
+//
+// 文件不存在不算错误：面板通常装在云服务器上，本机并不跑客户端，所以
+// linux/amd64 那份产物只有在该平台上装过客户端之后才会存在（按需拉取缓存）。
+// 原来这里返回一句「面板未提供本机平台的 agent 二进制…执行 make build-alpine」，
+// 结果 UI 上常驻一条黄色告警，用户被迫去追一个本就不该存在的文件 ——
+// 真正的判定在 collectVersions 里做（本机没有就用清单版本 / 客户端那份兜底）。
 func (p *Panel) localAgentBin() *agentBinInfo {
 	if path := p.findAgentBin(runtime.GOOS, runtime.GOARCH); path != "" {
 		return p.agentBinFor(path)
 	}
-	return &agentBinInfo{
-		Err: fmt.Sprintf("面板未提供本机平台的 agent 二进制（%s）。执行 `make build-alpine` 生成全部平台产物",
-			shared.AgentBinFileName(runtime.GOOS, runtime.GOARCH)),
-	}
+	return &agentBinInfo{}
 }
-
 
 // agentBinFor 探测任意一份 agent 二进制的版本与哈希，按 (path, mtime, size) 缓存。
 //
@@ -272,7 +270,6 @@ func (p *Panel) agentBinFor(path string) *agentBinInfo {
 	return info
 }
 
-
 // ---- 客户端（agent）升级 ----
 
 // resolveAgentBin 按客户端上报的平台找到面板要下发的那个文件。
@@ -282,7 +279,6 @@ func (p *Panel) agentBinFor(path string) *agentBinInfo {
 func (p *Panel) resolveAgentBin(osName, arch string) string {
 	return p.findAgentBin(osName, arch)
 }
-
 
 // agentUpdateFor 判断某台客户端是否需要升级，需要则返回下发内容。
 //

@@ -229,7 +229,9 @@ export function VersionCard() {
               // 落后的会自动升，缺产物的永远升不了。
               <Badge tone="warn">缺 {a.missing} 台平台产物</Badge>
             ) : a?.error ? (
-              <Badge tone="warn">面板未提供本机 agent</Badge>
+              // 只有「既无本机产物、又取不到更新源清单」才会走到这里：
+              // 此时客户端确实装不上，属于必须修的运维问题。
+              <Badge tone="warn">无法下发 agent</Badge>
             ) : a && a.legacy > 0 ? (
               // 老客户端不认识心跳里的 agent_update，点多少次都不会升 ——
               // 这里必须说"需重装"，否则用户会等一个永不到来的升级。
@@ -334,7 +336,15 @@ export function VersionCard() {
         <Hint>
           客户端只从本面板下载（<code className="font-mono">/api/agent/bin/…</code>），
           下载后会校验 sha256 并试运行确认版本；失败按包退避 30 分钟，不会反复重试。
-          {a && a.hosted_size > 0 && <> 当前面板提供：{a.hosted}（{fmtBytes(a.hosted_size)}）。</>}
+          {a?.error ? (
+            <span className="text-warn-fg">{a.error}</span>
+          ) : a?.hosted ? (
+            <>
+              当前可下发：<b>{a.hosted}</b>
+              {a.hosted_size > 0 ? `（${fmtBytes(a.hosted_size)}）` : ''}
+              {a.hosted_note ? `，${a.hosted_note}` : ''}。
+            </>
+          ) : null}
         </Hint>
       </div>
     </Card>
