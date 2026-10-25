@@ -236,6 +236,24 @@ func (db *DB) ConsumeAgentUninstall(id string) bool {
 	return err == nil && n > 0
 }
 
+// CancelAgentUninstall 撤销一条还没被领走的卸载指令。
+//
+// 为什么需要：指令是存在库里的，客户端离线时点下去，它会一直挂着，
+// 等那台机器下次开机立刻执行 —— 期间没有任何办法反悔，点错了只能去那台
+// 机器上重装，代价太大。
+//
+// 只清 uninstall_requested，不动 uninstall_sent_at：sent_at 有值说明指令
+// 已经送到客户端了，那是既成事实，面板没法「撤回」——清掉它只会让界面
+// 误以为从没下发过，反而看不出为什么那台机器没了。
+func (db *DB) CancelAgentUninstall(id string) (bool, error) {
+	res, err := db.Exec("UPDATE agents SET uninstall_requested=0 WHERE id=? AND uninstall_requested=1", id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return err == nil && n > 0, err
+}
+
 func (db *DB) ListAgents() ([]shared.Agent, error) {
 	rows, err := db.Query("SELECT " + agentColumns(false) + " FROM agents ORDER BY created_at DESC")
 	if err != nil {

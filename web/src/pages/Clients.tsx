@@ -129,7 +129,14 @@ function agentState(a: Agent): {
       tone: 'warn',
       led: 'warn',
       gone: false,
-      note: <>卸载指令已排队，等它下一次心跳（约 15 秒内）领取后执行。</>,
+      note: a.online ? (
+        <>卸载指令已排队，等它下一次心跳（约 15 秒内）领取后执行。</>
+      ) : (
+        <>
+          卸载指令已排队，但它<b>当前离线</b> —— 指令存在面板里，等它下次上线心跳时<b>立即执行</b>。
+          它可能几天后才开机，想反悔的话现在还能撤销。
+        </>
+      ),
     }
   }
   return { label: a.online ? '在线' : '离线', tone: a.online ? 'ok' : 'gray', led: a.online ? 'ok' : 'bad', gone: false }
@@ -177,6 +184,18 @@ export function Clients() {
       await loadAll()
     } catch (e) {
       toast(`下发失败：${(e as Error).message}`, 'bad')
+    }
+  }
+
+  /** 撤销还没被领走的卸载指令：离线时点错了的唯一反悔途径。 */
+  async function cancelUninstall(id: string, name: string) {
+    if (!confirm(`撤销对「${name}」的卸载指令？\n\n它还没被那台机器领走，撤销后不会再执行。`)) return
+    try {
+      const r = await api<{ message: string }>('DELETE', `/api/agents/${encodeURIComponent(id)}/uninstall`)
+      toast(r?.message || '已撤销卸载指令', 'ok')
+      await loadAll()
+    } catch (e) {
+      toast(`撤销失败：${(e as Error).message}`, 'bad')
     }
   }
 
@@ -288,6 +307,12 @@ export function Clients() {
                         onClick={() => void uninstallAgent(a.id, a.name, a.online)}
                       >
                         {st.label === '卸载未生效' ? '重新卸载' : '卸载'}
+                      </Button>
+                    )}
+                    {/* 排队中的指令可以撤销：离线点错了否则只能等它开机把自己删掉 */}
+                    {a.uninstall_requested && (
+                      <Button size="sm" onClick={() => void cancelUninstall(a.id, a.name)}>
+                        撤销卸载
                       </Button>
                     )}
                     <Button

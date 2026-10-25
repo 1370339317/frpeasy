@@ -159,6 +159,8 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("GET /api/agents", p.requireAuth(p.agentsHandler))
 	// 云端发起卸载：标记后随该客户端下一次心跳下发，由它自己清理并退出。
 	mux.HandleFunc("POST /api/agents/{id}/uninstall", p.requireAuth(p.agentUninstallHandler))
+	// 撤销还没被心跳领走的卸载指令（离线点错了的唯一反悔途径）
+	mux.HandleFunc("DELETE /api/agents/{id}/uninstall", p.requireAuth(p.agentUninstallCancelHandler))
 	mux.HandleFunc("DELETE /api/agents/{id}", p.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/api/agents/")
 		if id == "" || strings.Contains(id, "/") {

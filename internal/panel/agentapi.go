@@ -254,3 +254,34 @@ func (p *Panel) agentUninstallHandler(w http.ResponseWriter, r *http.Request) {
 		"message": msg,
 	})
 }
+
+// agentUninstallCancelHandler DELETE /api/agents/{id}/uninstall
+//
+// 撤销还在排队、没被心跳领走的卸载指令。
+//
+// 这个入口的存在理由很具体：客户端离线时下发卸载，指令会存进库里等它上线。
+// 那台机器可能几天后才开机 —— 期间用户发现自己点错了，却没有办法反悔，
+// 只能等它被删掉再重装。已经送出去的（sent_at 有值）不能撤销：那是既成事实。
+func (p *Panel) agentUninstallCancelHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "客户端 id 无效", http.StatusBadRequest)
+		return
+	}
+	if _, err := p.db.GetAgent(id); err != nil {
+		http.Error(w, "客户端不存在", http.StatusNotFound)
+		return
+	}
+	ok, err := p.db.CancelAgentUninstall(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		// 没有待执行的指令（已经送出去了，或本来就没有）——如实说，不要说「已取消」
+		http.Error(w, "没有可撤销的卸载指令：它要么没有下发，要么已经被客户端领走（已领走的无法撤回，只能到那台机器上处理）",
+			http.StatusConflict)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"ok": true, "message": "已撤销卸载指令，客户端不会再收到它"})
+}

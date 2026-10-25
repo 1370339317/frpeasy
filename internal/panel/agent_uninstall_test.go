@@ -182,3 +182,44 @@ func TestListAgentsExposesUninstallState(t *testing.T) {
 		t.Fatal("ListAgents 泄漏了令牌")
 	}
 }
+
+// 撤销只对「还排着队」的指令有效。
+//
+// 已经送出去（sent_at 有值）的不能撤：那是既成事实，清掉标记只会让界面
+// 误以为从没下发过，反而看不出那台机器为什么没了。
+func TestCancelUninstallOnlyBeforeDelivery(t *testing.T) {
+	db := newTestDB(t)
+	a := &shared.Agent{ID: "u5", Name: "box5", Os: "linux", Arch: "amd64", InstallToken: "it", AgentToken: "at"}
+	if err := db.CreateAgent(a); err != nil {
+		t.Fatal(err)
+	}
+
+	// 还没下发过：撤销应返回 false，而不是假装成功
+	if ok, err := db.CancelAgentUninstall("u5"); err != nil || ok {
+		t.Fatalf("没有待执行指令时不应撤销成功（ok=%v err=%v）", ok, err)
+	}
+
+	if err := db.RequestAgentUninstall("u5"); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := db.CancelAgentUninstall("u5")
+	if err != nil || !ok {
+		t.Fatalf("排队中的指令应可撤销（ok=%v err=%v）", ok, err)
+	}
+	if db.ConsumeAgentUninstall("u5") {
+		t.Fatal("撤销后仍被心跳取走了卸载指令")
+	}
+
+	// 重新下发并让心跳领走，此后不可撤销
+	if err := db.RequestAgentUninstall("u5"); err != nil {
+		t.Fatal(err)
+	}
+	db.ConsumeAgentUninstall("u5")
+	if ok, _ := db.CancelAgentUninstall("u5"); ok {
+		t.Fatal("已被领走的指令不该允许撤销")
+	}
+	got, _ := db.GetAgent("u5")
+	if got.UninstallSentAt == nil {
+		t.Fatal("撤销失败不应动 sent_at")
+	}
+}

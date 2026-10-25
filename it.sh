@@ -85,6 +85,15 @@ chk "第二次心跳不再下发" None "$(curl -s -X POST $B/api/agent/heartbeat
 # 再点一次「卸载」= 上次没成功，状态要回到「等待下发」
 curl -s -b cj.txt -X POST $B/api/agents/$AG2/uninstall >/dev/null
 chk "重新下发清掉旧 sent_at" None "$(curl -s -b cj.txt $B/api/agents | jget "$AG2Q.get('uninstall_sent_at')")"
+# 排队中的指令可以撤销：离线点错了否则只能等它开机把自己删掉
+chk "撤销排队中的卸载 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X DELETE $B/api/agents/$AG2/uninstall)"
+chk "撤销后 requested 归零" False "$(curl -s -b cj.txt $B/api/agents | jget "$AG2Q['uninstall_requested']")"
+chk "撤销后心跳不再下发" None "$(curl -s -X POST $B/api/agent/heartbeat -H 'Content-Type: application/json' -d "{\"agent_id\":\"$AG2\",\"agent_token\":\"$AG2TOK\",\"status\":[]}" | jget "d.get('uninstall')")"
+# 已送出去的不能撤：那是既成事实，清掉标记只会让界面看不出那台机器为什么没了
+curl -s -b cj.txt -X POST $B/api/agents/$AG2/uninstall >/dev/null
+curl -s -X POST $B/api/agent/heartbeat -H 'Content-Type: application/json' -d "{\"agent_id\":\"$AG2\",\"agent_token\":\"$AG2TOK\",\"status\":[]}" >/dev/null
+chk "已领走的卸载无法撤销 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X DELETE $B/api/agents/$AG2/uninstall)"
+chk "无法撤销时 sent_at 仍在" 1 "$(curl -s -b cj.txt $B/api/agents | jget "1 if $AG2Q.get('uninstall_sent_at') else 0")"
 chk "不存在的客户端下发 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/agents/nosuchagent/uninstall)"
 # 0.3.0 的客户端：必须明确拒绝，而不是「已下发」然后客户端毫无反应
 chk "过旧客户端被拒 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/agents/$AGID/uninstall)"
