@@ -51,14 +51,18 @@ build: web build-panel build-agent stage-local
 
 # 前端子项目（web/）：React 19 + TypeScript + Tailwind v4 + Vite
 # 产物输出到 internal/webui/dist，由 internal/webui/embed.go 嵌入
+#
+# vite build 会清空 outDir，把入库的 dist/.keep 一起删掉 —— 那个文件不在的话，
+# 干净 clone 上没构建前端时 `go:embed all:dist` 会直接编译失败。所以每次构建后补回来。
 web:
 	cd web && npm run build
+	@touch internal/webui/dist/.keep
 
 # 首次克隆后装依赖（有 node_modules 就跳过）
 web-install:
 	@test -d web/node_modules || (cd web && npm ci)
 
-# 前端开发服务器：HMR + /api 代理到本机 8080 的 panel
+# 前端开发服务器：HMR + /api 代理到本机 28080 的 panel
 # 用法：先 make build-go && ./frpeasy-panel --data ./data，再另开一个终端 make web-dev
 web-dev:
 	cd web && npm run dev
@@ -129,7 +133,7 @@ stage-agent: build-alpine
 	@echo "agent 二进制已就位: $(DATA_DIR)/bin/"
 
 run: build-panel
-	./$(BINARY_PANEL) --data ./data --listen :8080
+	./$(BINARY_PANEL) --data ./data --listen :28080
 
 # 调试前端产物用这个：直接从磁盘读 internal/webui/dist，改完刷新浏览器即可，
 # 不用每次 go build（go:embed 是编译期嵌入的）。
@@ -137,7 +141,7 @@ run: build-panel
 # 日常改前端更好的做法是 make web-dev（Vite HMR + 接口代理），
 # 只有要验证「打包进二进制的最终形态」时才用 dev-ui。
 dev-ui: build-go web
-	./$(BINARY_PANEL) --data ./data --listen :8080 --ui-dir ./internal/webui/dist
+	./$(BINARY_PANEL) --data ./data --listen :28080 --ui-dir ./internal/webui/dist
 
 # 生成自更新清单（面板自身与客户端升级的唯一入口）。
 #

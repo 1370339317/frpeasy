@@ -45,7 +45,7 @@ for f in "$BIN"/frpeasy-panel-linux-*; do
 
   sed -e "s|@@PREFIX@@|/opt/frpeasy|g" \
       -e "s|@@DATA@@|/opt/frpeasy/data|g" \
-      -e "s|@@LISTEN@@|:8080|g" \
+      -e "s|@@LISTEN@@|:28080|g" \
       -e "s|@@UPDATE_BASE@@|$BASE_ESC|g" \
       "$unit_src" > "$stage/frpeasy.service"
 
@@ -59,9 +59,9 @@ frpeasy 面板 v$VER (linux-$arch)
 【最快：直接运行】
   tar xzf frpeasy-panel-$VER-linux-$arch.tar.gz
   chmod +x frpeasy-panel
-  ./frpeasy-panel --data ./data --listen :8080
+  ./frpeasy-panel --data ./data --listen :28080
 
-  浏览器打开  http://<服务器IP>:8080
+  浏览器打开  http://<服务器IP>:28080
   默认账号 admin / admin —— 登录后页面顶部会红条提醒你改口令。
 
 【要开机自启：交给 systemd】
@@ -73,7 +73,7 @@ frpeasy 面板 v$VER (linux-$arch)
   sudo systemctl status frpeasy     # 看是否 active (running)
   journalctl -u frpeasy -f          # 跟日志
 
-  unit 里写死了 /opt/frpeasy 和 :8080。换目录或换端口，
+  unit 里写死了 /opt/frpeasy 和 :28080。换目录或换端口，
   改 ExecStart 那一行，并把 WorkingDirectory 一起改。
 
 【自动更新】
@@ -92,7 +92,7 @@ frpeasy 面板 v$VER (linux-$arch)
   备份就是拷这一个文件。升级不会动它。
 
 【要开哪些端口】
-  - 面板网页端口：默认 8080（本文件里的 unit 就是它）
+  - 面板网页端口：默认 28080（本文件里的 unit 就是它）
   - frps 的客户端接入端口：默认 7000（面板会提示你放行）
   - 隧道的公网端口：默认从 10000-20000 里自动分配
   面板「端口/防火墙」页会把当前需要放行的端口列出来，并给出对应的

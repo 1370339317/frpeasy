@@ -89,7 +89,7 @@ frpc:  serverAddr / serverPort / auth.* / [[proxies]]
 不能沿用旧 INI 的 `[common]` / `server_addr` / `remote_port`。有测试守着
 (断言生成的配置里不出现这些旧键)。
 
-### C3. 端口池默认 10000–20000,frps bindPort 默认 7000,dashboard 默认 7500
+### C3. 端口池默认 21000–26000,frps bindPort 默认 27900,dashboard 默认 27500
 
 dashboard **只监听 127.0.0.1**,是面板读取真实代理状态的通道,不对外暴露,
 也不需要放行。端口清单的唯一来源是 `ports.go`,文档里不要另抄一份。

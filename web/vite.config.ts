@@ -19,10 +19,10 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    // 开发期直连后端：npm run dev 时先起 panel(:8080)，前端走 HMR，不用重新编译 Go
+    // 开发期直连后端：npm run dev 时先起 panel(:28080)，前端走 HMR，不用重新编译 Go
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8080',
+        target: 'http://127.0.0.1:28080',
         changeOrigin: true,
       },
     },

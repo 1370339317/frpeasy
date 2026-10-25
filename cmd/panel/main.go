@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"syscall"
 
 	"frpeasy/internal/panel"
+	"frpeasy/internal/shared"
 	"frpeasy/internal/webui"
 )
 
@@ -21,7 +23,7 @@ var (
 
 func main() {
 	dataDir := flag.String("data", "./data", "数据目录（存放 sqlite、frps 缓存与日志）")
-	listen := flag.String("listen", ":8080", "Web 监听地址")
+	listen := flag.String("listen", ":"+strconv.Itoa(shared.DefaultPanelPort), "Web 监听地址")
 	ver := flag.String("version", version, "版本号")
 	uiDir := flag.String("ui-dir", "", "从磁盘目录加载 Web UI（开发用；留空则使用编译时内嵌的 UI）")
 	showBuild := flag.Bool("build", false, "打印版本与构建时间后退出")
@@ -96,7 +98,7 @@ func main() {
 	// 优雅退出：面板被 Ctrl+C / systemd stop / 自更新替换时，必须先把
 	// frps 子进程停掉。
 	//
-	// 这一步以前完全没有，后果是：父进程退出后 frps 变成孤儿继续占着 7000 端口，
+	// 这一步以前完全没有，后果是：父进程退出后 frps 变成孤儿继续占着 frps 接入端口，
 	// 下一个面板实例启动时自己的 frps 抢不到端口、反复失败 ——
 	// 表现为"重启面板之后隧道全挂"，而且日志里看不出是谁占了端口。
 	go func() {

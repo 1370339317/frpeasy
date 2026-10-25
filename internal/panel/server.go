@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"frpeasy/internal/shared"
 	"frpeasy/internal/webui"
 )
 
@@ -84,7 +86,9 @@ func NewPanel(dataDir, listen, version string) (*Panel, error) {
 	binDir := filepath.Dir(exe)
 	_, port, _ := net.SplitHostPort(listen)
 	if port == "" {
-		port = "8080"
+		// 解析不出端口（如 --listen 只给了主机）时回退到默认端口，
+		// 与 cmd/panel 的 flag 默认值同源，避免两处各写一个数字。
+		port = strconv.Itoa(shared.DefaultPanelPort)
 	}
 	pnl := &Panel{
 		db:         db,

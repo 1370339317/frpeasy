@@ -11,7 +11,7 @@ export function Overview() {
   const tunnelsOn = tunnels.filter((t) => t.proxy_state === 'online').length
 
   // 后端已按「设置 → 请求 Host → 127.0.0.1」推导好并剥掉端口，直接采信。
-  // 不再从 public_addr 原始值自己拼，否则带面板端口时会拼出 host:8080:10001。
+  // 不再从 public_addr 原始值自己拼，否则带面板端口时会拼出 host:28080:21001。
   const host =
     accessHost || (settings?.public_addr ?? '').replace(/^https?:\/\//i, '').replace(/[:/].*$/, '')
 

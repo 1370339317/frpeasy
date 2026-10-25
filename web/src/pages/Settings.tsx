@@ -145,8 +145,8 @@ export function SettingsPage() {
           label="公网地址（域名或 IP，可带面板端口）"
           hint={
             <>
-              只填<b>主机名/IP</b>（要写面板端口就写 <span className="font-mono">1.2.3.4:8080</span>）。
-              <b>不要填 frps 的 7000 端口</b> —— 那个端口面板会自动拼。这里改了，安装命令、客户端连 frps
+              只填<b>主机名/IP</b>（要写面板端口就写 <span className="font-mono">1.2.3.4:28080</span>）。
+              <b>不要填 frps 的接入端口</b> —— 那个端口面板会自动拼。这里改了，安装命令、客户端连 frps
               的地址、以及所有隧道的访问地址会一起跟着变；客户端约 15 秒后自动重连新地址。
             </>
           }

@@ -26,7 +26,7 @@ func main() {
 	// 保证 --version 打印的、心跳上报的是同一个值（面板靠它判定是否该升级）。
 	agent.Version = version
 
-	server := flag.String("server", "", "面板 HTTP 基址，如 http://1.2.3.4:8080")
+	server := flag.String("server", "", "面板 HTTP 基址，如 http://1.2.3.4:28080")
 	token := flag.String("token", "", "安装令牌（来自面板生成的安装命令）")
 	name := flag.String("name", hostname(), "本机名称（便于在面板识别）")
 	dataDir := flag.String("data", "./agent-data", "agent 数据/缓存目录")

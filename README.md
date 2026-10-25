@@ -18,15 +18,15 @@
 
 | 端口 | 干什么用的 | 要放开吗 |
 |---|---|---|
-| **8080** | 你浏览器打开面板用的 | **必须** |
-| **7000** | 客户端 agent 连服务器用的（frps 入口） | **必须** |
-| **10000–20000** | 每条隧道从这里分走一个，这就是你服务的公网端口 | **必须**（不用全开，见下） |
-| 7500 | frps 内部 dashboard，只监听 127.0.0.1 | 不用 |
+| **28080** | 你浏览器打开面板用的 | **必须** |
+| **27900** | 客户端 agent 连服务器用的（frps 入口） | **必须** |
+| **21000–26000** | 每条隧道从这里分走一个，这就是你服务的公网端口 | **必须**（不用全开，见下） |
+| 27500 | frps 内部 dashboard，只监听 127.0.0.1 | 不用 |
 
 然后浏览器打开：
 
 ```
-http://你的服务器公网IP:8080
+http://你的服务器公网IP:28080
 ```
 
 默认账号 `admin` / `admin` —— **登录后第一件事是改口令**，页面顶部会有红条提醒你。
@@ -34,7 +34,7 @@ http://你的服务器公网IP:8080
 > 云服务器要**两处**都放行：云厂商控制台的「安全组」+ 机器里的防火墙。
 > 少放一处就是访问超时。
 >
-> 端口池 10000–20000 有上万个，**不用全开**。每建一条隧道，面板会明确告诉你
+> 端口池 21000–26000 有上万个，**不用全开**。每建一条隧道，面板会明确告诉你
 > 这条分到了哪个端口；左侧「端口 / 防火墙」页把它们列全，并给你可直接粘的
 > ufw / firewalld / nftables / iptables 放行命令，还带外网回访检测确认真的通了。
 
@@ -80,7 +80,7 @@ curl -fsSL https://github.com/1370339317/frpeasy/releases/latest/download/deploy
 ```bash
 tar xzf frpeasy-panel-*-linux-amd64.tar.gz
 chmod +x frpeasy-panel
-./frpeasy-panel --data ./data --listen :8080
+./frpeasy-panel --data ./data --listen :28080
 ```
 
 包里还有 `frpeasy.service`（可直接用的 systemd unit）和 `README.txt`。
@@ -92,7 +92,7 @@ Windows 下 `frpeasy-panel-windows-amd64.exe` 双击就跑，配置落在旁边�
 ```bash
 cd web && npm ci && npm run build && cd ..   # 前端产物不入库，首次必须构建
 make build
-./frpeasy-panel --data ./data --listen :8080
+./frpeasy-panel --data ./data --listen :28080
 ```
 
 ---
@@ -144,7 +144,7 @@ curl -fsSL .../deploy.sh | sudo bash -s -- --uninstall --keep-data
 - 装到别处也能卸：它从 systemd unit 的 `ExecStart` **反查真实安装路径**，
   不依赖你记着当初用了哪个 `--prefix`。
 - 会一并清掉 frps/frpc 二进制、`.prev` 备份、以及面板被强杀时残留的 frps 子进程
-  （否则重装会撞 7000 端口，而且报错完全指不到它）。
+  （否则重装会撞 27900 端口，而且报错完全指不到它）。
 - 拒绝在 `/`、`/opt`、`/usr` 这类过浅路径上执行，防手滑。
 - 防火墙/安全组的放行规则**不会**自动撤销（删别人的规则风险太大），需要你自己去清。
 

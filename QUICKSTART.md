@@ -31,13 +31,13 @@ go build -o frpeasy-panel.exe ./cmd/panel
 go build -o frpeasy-agent.exe  ./cmd/agent
 
 # 2) 起面板（数据落在 ./data）
-./frpeasy-panel.exe --data ./data --listen :8080
+./frpeasy-panel.exe --data ./data --listen :28080
 ```
 
 （根目录 `make build` 等价于上面三步。没装 Node 也可以用 `--ui-dir` 指向已有的
 `internal/webui/dist`，或者接受页面提示「前端未构建」—— 此时接口是全好的。）
 
-浏览器打开 <http://127.0.0.1:8080>，用 `admin` / `admin` 登录。
+浏览器打开 <http://127.0.0.1:28080>，用 `admin` / `admin` 登录。
 
 **登录后第一件事：去「设置」改口令。** 页面顶部会有一条红色告警提醒你。
 
@@ -50,13 +50,13 @@ go build -o frpeasy-agent.exe  ./cmd/agent
 2. 面板里点「新建隧道」，客户端选空（本地还没有 agent），本地服务地址手填 `127.0.0.1:8000`。
 3. 本地体验可以直接在**本机**装 agent：
    ```bash
-   ./frpeasy-agent.exe --server http://127.0.0.1:8080 --token <面板给出的 install_token> --data ./agent-data
+   ./frpeasy-agent.exe --server http://127.0.0.1:28080 --token <面板给出的 install_token> --data ./agent-data
    ```
    令牌在面板「设置」页或安装命令里都能拿到。
 4. 回到面板，等 frps 状态变成运行中（首次会从 GitHub/镜像拉 frps，几十秒到几分钟）。
 5. 浏览器访问 `http://127.0.0.1:<面板分配的公网端口>`，应该能看到你那个 8000 端口的目录列表。
 
-**本地体验时「公网地址」可以留空** —— 面板会自动用你当前访问它的地址（127.0.0.1:8080）。
+**本地体验时「公网地址」可以留空** —— 面板会自动用你当前访问它的地址（127.0.0.1:28080）。
 
 ### 本地体验验证不了什么
 
@@ -124,7 +124,7 @@ curl -fsSL .../deploy.sh | sudo bash -s -- --uninstall --yes
 - **路径不靠你记**：优先从 systemd unit 的 `ExecStart` 反查真实安装位置与 `--data`，
   所以哪怕当初 `--prefix /srv/xxx` 装到别处，也照样卸得干净。
 - **连 frp 子进程一起收**：面板正常收到 SIGTERM 会自己停 frps；但被 SIGKILL
-  （systemd 超时）时来不及，会留下仍监听 7000 的孤儿进程 —— 重装就撞端口，
+  （systemd 超时）时来不及，会留下仍监听 27900 的孤儿进程 —— 重装就撞端口，
   而且报错完全指不到它。所以按可执行文件路径精确认领并清理。
 - **`--keep-data` 时不会误删**：数据目录默认就在程序目录里面，
   所以这种情况下是逐项清理程序目录、跳过 `data`，而不是 `rm -rf` 整个目录。
@@ -148,7 +148,7 @@ ls -d /opt/frpeasy
 
 ```bash
 FRPEASY_UPDATE_BASE='https://github.com/1370339317/frpeasy/releases/latest/download' \
-  ./frpeasy-panel --data ./data --listen :8080
+  ./frpeasy-panel --data ./data --listen :28080
 ```
 
 没配也能用，只是「检查更新」会显示「未配置更新源」—— 那不是故障，只是没告诉它去哪找。
@@ -225,7 +225,7 @@ arm64-v8a → `linux/arm64`，armeabi-v7a → `linux/arm`，frp 官方也是这�
 
 1. **忘记改默认口令**：面板暴露公网 + `admin/admin`，等于把内网送人。页面有红条提醒，别忽略。
 2. **端口没放开**：隧道建好了但访问超时，99% 是安全组/防火墙没开那个端口（面板端口、
-   frps 的 7000、隧道分到的公网端口，三个里少一个都连不通）。见
+   frps 的 27900、隧道分到的公网端口，三个里少一个都连不通）。见
    [README 端口表](README.md#装完以后开哪几个端口访问什么地址)。
 3. **没填公网地址又用内网 IP 访问面板**：面板会用你访问的地址（如 192.168.x.x）生成安装命令，客户端在公网侧连不上。公网部署请显式填公网地址。
 4. **国内拉 frps/frpc 慢**：面板设置里配镜像，别硬等。
@@ -235,7 +235,7 @@ arm64-v8a → `linux/arm64`，armeabi-v7a → `linux/arm`，frp 官方也是这�
    - 正确姿势：根目录 `make build`（先建前端再编 Go），或手动 `cd web && npm run build && cd .. && go build ./cmd/panel`；
    - 换掉旧进程再启动新二进制（`taskkill /F /IM frpeasy-panel.exe`，或先 Ctrl+C）；
    - 看侧栏左下角的 `版本 · 构建时间`，时间没变就是没换上新二进制；
-   - 改样式时用 `make web-dev`（Vite HMR，改完浏览器自动刷新，接口代理到 8080），完全不用编译 Go；
+   - 改样式时用 `make web-dev`（Vite HMR，改完浏览器自动刷新，接口代理到 28080），完全不用编译 Go；
    - `index.html` 已强制 `no-store`，`/assets/` 下带 hash 的文件长缓存 —— 升级必生效，重复访问不重复下载。
 
 ---
@@ -250,7 +250,7 @@ arm64-v8a → `linux/arm64`，armeabi-v7a → `linux/arm`，frp 官方也是这�
 | 项 | 说明 |
 |---|---|
 | 公网 IP | 云服务器需要公网 IP,且不是 NAT 后面 |
-| 端口 | 要放开哪几个,见 [README 的端口表](README.md#装完以后开哪几个端口访问什么地址) —— 简言之 8080(面板)、7000(agent 接入)、隧道分到的公网端口 |
+| 端口 | 要放开哪几个,见 [README 的端口表](README.md#装完以后开哪几个端口访问什么地址) —— 简言之 28080(面板)、27900(agent 接入)、隧道分到的公网端口 |
 | Alpine 版本 | 任意。产物静态链接(无 PT_INTERP),musl 直接跑 |
 | 拉取通路 | 服务器要能拉到 GitHub;拉不动就在面板设置里填镜像前缀(如 `https://ghfast.top/`) |
 
@@ -281,12 +281,12 @@ scp bin/frpeasy-panel-linux-amd64 root@你的服务器:/opt/frpeasy/frpeasy-pane
 ```bash
 # 在仓库根目录执行，把 unit 渲染好推到服务器
 sed -e 's|@@PREFIX@@|/opt/frpeasy|g' \
-    -e 's|@@LISTEN@@|:8080|g' \
+    -e 's|@@LISTEN@@|:28080|g' \
     -e 's|@@UPDATE_BASE@@|https://github.com/1370339317/frpeasy/releases/latest/download|g' \
     scripts/frpeasy.service | ssh root@你的服务器 'cat > /etc/systemd/system/frpeasy.service && systemctl daemon-reload && systemctl enable --now frpeasy'
 ```
 
-浏览器打开 `http://你的服务器IP:8080`，`admin`/`admin` 登录 → **先改口令** → 设置里填：
+浏览器打开 `http://你的服务器IP:28080`，`admin`/`admin` 登录 → **先改口令** → 设置里填：
 
 - **公网地址**：你的服务器公网 IP（或域名）。填了它，安装命令和 agent 连 frps 都用它。
 - **镜像前缀**：国内建议 `https://ghfast.top/`（实测约 483KB/s，直连 GitHub 约 20KB/s）
@@ -330,7 +330,7 @@ frpeasy/
 # 终端 1：起后端
 make build-go && ./frpeasy-panel --data ./data
 
-# 终端 2：起前端（HMR，/api 自动代理到 8080）
+# 终端 2：起前端（HMR，/api 自动代理到 28080）
 make web-dev
 ```
 

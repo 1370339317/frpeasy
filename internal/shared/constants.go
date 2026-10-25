@@ -8,17 +8,37 @@ const (
 	APIHeartbeat = "/api/agent/heartbeat"
 	APIAgentBin  = "/api/agent/bin"
 
+	// 面板 Web 监听端口默认值（--listen 的默认）。
+	//
+	// 不用 8080：那是 Web 代理/开发服务器最常被占的端口（宝塔、各种反代、本地 dev
+	// server 都爱用它），装在一台已经有服务的机器上很容易撞。28080 保留了 80 结尾
+	// 的辨识度，又不在常见占用列表里。
+	//
+	// scripts/deploy.sh 的 PORT 默认值必须与这里一致，否则一键部署和管理端口会打架。
+	DefaultPanelPort = 28080
+
 	// frp 相关
-	FRPRepo             = "fatedier/frp"
-	DefaultFRPSBindPort = 7000
+	FRPRepo = "fatedier/frp"
+	// frps 的客户端接入端口。
+	//
+	// 不用 frp 官方默认的 7000：那台机器上只要还跑着另一个 frp 就必然撞，
+	// 而撞了的症状是 frps 起不来、面板看着正常但所有隧道连不上，很难指认。
+	// 27900 避开 flexlm(27000-27009)、mongo(27017)、webmin(10000)、usermin(20000)，
+	// 且不在 Linux 临时端口段（32768-60999）内 —— 在那一带绑定可能被系统临时连接抢占。
+	DefaultFRPSBindPort = 27900
 	DefaultFRPVersion   = "latest" // 拉取 GitHub latest release
 
 	// frps dashboard（只监听 127.0.0.1，供面板读取真实代理状态，不对外暴露）
-	DefaultDashboardPort = 7500
+	// 不对外，撞了也无害，取 27 段的 27500 与 frps 端口同一族，便于记忆。
+	DefaultDashboardPort = 27500
 
 	// 公网端口池默认范围（端口访问模式）
-	DefaultPortRangeStart = 10000
-	DefaultPortRangeEnd   = 20000
+	//
+	// 避开 10000(Webmin)、11211(memcached)、15672(rabbitmq)、18080 这些常见占用，
+	// 同时整段都在临时端口段之外。池里若有服务常驻占用，NextFreePort 会跳过
+	// 系统实际绑不上的端口，不会把死端口分给用户。
+	DefaultPortRangeStart = 21000
+	DefaultPortRangeEnd   = 26000
 
 	// Agent 心跳间隔（秒）
 	HeartbeatIntervalSec = 15

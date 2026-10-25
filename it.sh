@@ -71,7 +71,7 @@ say "== 6) 空 local + 指定 agent -> 自动选探测主服务 =="
 T1=$(curl -s -b cj.txt -X POST $B/api/tunnels -H 'Content-Type: application/json' -d "{\"name\":\"自动探测\",\"agent_id\":\"$AGID\"}")
 T1ID=$(echo "$T1" | jget "d['tunnel']['id']")
 chk "自动填充 127.0.0.1:8123" "127.0.0.1:8123" "$(echo "$T1" | jget "d['tunnel']['local_addr']")"
-chk "自动分配端口 10000" 10000 "$(echo "$T1" | jget "d['tunnel']['public_port']")"
+chk "自动分配端口 21000" 21000 "$(echo "$T1" | jget "d['tunnel']['public_port']")"
 chk "created_at 非零值" 0 "$(echo "$T1" | jget "1 if d['tunnel']['created_at'].startswith('0001') else 0")"
 
 say "== 7) 手填 local + 不指定机器（唯一 agent 自动绑定） =="
@@ -96,14 +96,14 @@ chk "重新绑回成功" "$AGID" "$(curl -s -b cj.txt -X PUT $B/api/tunnels/$T2I
 say "== 10) Agent 配置只含本机隧道 =="
 CFG=$(curl -s "$B/api/agent/config?agent_id=$AGID&token=$AGTOK")
 chk "config 含 2 条" 2 "$(echo "$CFG" | jget "len(d['tunnels'])")"
-chk "config 端口集合 {10000,10001}" "10000,10001" "$(echo "$CFG" | jget "','.join(str(p) for p in sorted(t['public_port'] for t in d['tunnels']))")"
+chk "config 端口集合 {21000,21001}" "21000,21001" "$(echo "$CFG" | jget "','.join(str(p) for p in sorted(t['public_port'] for t in d['tunnels']))")"
 chk "config 错令牌被拒 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$B/api/agent/config?agent_id=$AGID&token=bad")"
 
 say "== 11) 空 local + 不存在的 agent -> 期望 400 =="
 chk "无探测可用的 agent 被拒" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/tunnels -H 'Content-Type: application/json' -d '{"name":"y","agent_id":"nope"}')"
 
-say "== 12) 端口冲突（改成另一条隧道的 10001） -> 期望 400 =="
-chk "端口冲突被拒" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X PUT $B/api/tunnels/$T1ID -H 'Content-Type: application/json' -d '{"manual_port":10001}')"
+say "== 12) 端口冲突（改成另一条隧道的 21001） -> 期望 400 =="
+chk "端口冲突被拒" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X PUT $B/api/tunnels/$T1ID -H 'Content-Type: application/json' -d '{"manual_port":21001}')"
 
 say "== 13) 删除隧道 =="
 chk "删除 ok" True "$(curl -s -b cj.txt -X DELETE $B/api/tunnels/$T2ID | jget "d['ok']")"
@@ -144,21 +144,21 @@ say "== 18) 端口 / 防火墙清单 =="
 chk "未登录取端口被拦 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/ports)"
 PORTJ=$(curl -s -b cj.txt $B/api/ports)
 chk "清单含面板端口 18080" 1 "$(echo "$PORTJ" | jget "1 if 18080 in (d['required_ports'] or []) else 0")"
-chk "清单含 frps 端口 7000" 1 "$(echo "$PORTJ" | jget "1 if 7000 in (d['required_ports'] or []) else 0")"
-chk "清单含隧道公网端口 10000" 1 "$(echo "$PORTJ" | jget "1 if 10000 in (d['required_ports'] or []) else 0")"
+chk "清单含 frps 端口 27900" 1 "$(echo "$PORTJ" | jget "1 if 27900 in (d['required_ports'] or []) else 0")"
+chk "清单含隧道公网端口 21000" 1 "$(echo "$PORTJ" | jget "1 if 21000 in (d['required_ports'] or []) else 0")"
 chk "dashboard 出现在清单但不要求放行" 1 "$(echo "$PORTJ" | jget "1 if any(i['purpose']=='internal' and not i['required'] for i in d['items']) else 0")"
-chk "已删除隧道的端口不在清单里" 1 "$(echo "$PORTJ" | jget "1 if 10001 not in (d['required_ports'] or []) else 0")"
+chk "已删除隧道的端口不在清单里" 1 "$(echo "$PORTJ" | jget "1 if 21001 not in (d['required_ports'] or []) else 0")"
 chk "识别防火墙字段存在" 1 "$(echo "$PORTJ" | jget "1 if d['firewall'].get('type') else 0")"
 chk "给出放行命令" 1 "$(echo "$PORTJ" | jget "1 if len(d['commands'] or [])>0 else 0")"
-chk "放行命令覆盖隧道端口" 1 "$(echo "$PORTJ" | jget "1 if any('10000' in c['cmd'] for c in d['commands']) else 0")"
+chk "放行命令覆盖隧道端口" 1 "$(echo "$PORTJ" | jget "1 if any('21000' in c['cmd'] for c in d['commands']) else 0")"
 chk "命令标了推荐项（识别到的防火墙那套）" 1 "$(echo "$PORTJ" | jget "1 if (d['firewall']['type'] not in ('ufw','firewalld','iptables','nftables')) or any(c['recommended'] for c in d['commands']) else 0")"
 chk "推荐项排在最前" 1 "$(echo "$PORTJ" | jget "1 if (d['firewall']['type'] not in ('ufw','firewalld','iptables','nftables')) or d['commands'][0]['recommended'] else 0")"
 
 say "== 19) 端口可达性检测（不启外部回访，避免慢/限流） =="
-CHK=$(curl -s -b cj.txt -X POST $B/api/ports/check -H 'Content-Type: application/json' -d '{"ports":[7000,10000,18080],"external":false}')
+CHK=$(curl -s -b cj.txt -X POST $B/api/ports/check -H 'Content-Type: application/json' -d '{"ports":[27900,21000,18080],"external":false}')
 chk "返回 3 条结果" 3 "$(echo "$CHK" | jget "len(d['results'])")"
 chk "面板端口本机在监听" 1 "$(echo "$CHK" | jget "1 if [r for r in d['results'] if r['port']==18080][0]['listening'] else 0")"
-chk "未监听的隧道端口判 no_service" "no_service" "$(echo "$CHK" | jget "[r for r in d['results'] if r['port']==10000][0]['state']")"
+chk "未监听的隧道端口判 no_service" "no_service" "$(echo "$CHK" | jget "[r for r in d['results'] if r['port']==21000][0]['state']")"
 chk "公网地址是环回时判 unknown 而非可达" "unknown" "$(echo "$CHK" | jget "[r for r in d['results'] if r['port']==18080][0]['state']")"
 
 say "== 20) 设置公网地址后，探测目标随之改变 =="
@@ -166,7 +166,7 @@ curl -s -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d
 PORTJ2=$(curl -s -b cj.txt $B/api/ports)
 chk "探测目标变成公网地址" "1.2.3.4" "$(echo "$PORTJ2" | jget "d['access_host']")"
 chk "允许外部回访" "True" "$(echo "$PORTJ2" | jget "d['probe_host_ok']")"
-chk "端口清单不受公网地址影响" 1 "$(echo "$PORTJ2" | jget "1 if 10000 in (d['required_ports'] or []) else 0")"
+chk "端口清单不受公网地址影响" 1 "$(echo "$PORTJ2" | jget "1 if 21000 in (d['required_ports'] or []) else 0")"
 
 kill $PANEL_PID 2>/dev/null || true
 # Windows 上 kill 只作用于 bash 的作业，原生 exe 会留下来继续心跳（并锁住 exe），

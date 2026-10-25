@@ -14,7 +14,7 @@
 # 可覆盖的参数（环境变量或命令行），都有合理默认值：
 #   BASE=https://...   更新源。默认指向本仓库最新 Release，可换镜像或自建静态目录
 #   PREFIX=/opt/frpeasy   安装目录
-#   PORT=8080          面板网页端口
+#   PORT=28080         面板网页端口
 #   DATA=$PREFIX/data  数据目录
 #   NO_SERVICE=1       不注册 systemd，只放二进制并前台提示怎么跑
 #   SERVICE_NAME=frpeasy   unit 名
@@ -36,10 +36,10 @@ SET_PREFIX=0; SET_PORT=0; SET_LISTEN=0; SET_DATA=0
 
 BASE=${BASE:-$DEFAULT_BASE}
 PREFIX=${PREFIX:-/opt/frpeasy}
-PORT=${PORT:-8080}
+PORT=${PORT:-28080}
 NO_SERVICE=${NO_SERVICE:-0}
 SERVICE_NAME=${SERVICE_NAME:-frpeasy}
-# 监听地址：默认只听所有地址的 PORT。只想要本机访问就 LISTEN=127.0.0.1:8080
+# 监听地址：默认只听所有地址的 PORT。只想要本机访问就 LISTEN=127.0.0.1:28080
 LISTEN=${LISTEN:-:$PORT}
 # DATA 的默认值依赖 PREFIX，而 PREFIX 可能被下面的命令行参数改掉，
 # 所以这里先留空，等参数解析完再兜底。

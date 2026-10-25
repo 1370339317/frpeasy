@@ -3,6 +3,7 @@ package panel
 import (
 	"database/sql"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -13,8 +14,19 @@ import (
 
 // --- Tunnels ---
 
-// NextFreePort 从端口池中取一个未被占用的公网端口。
-func (db *DB) NextFreePort() (int, error) {
+// NextFreePort 从端口池中取一个「没被隧道占用、且系统当前真能绑定」的公网端口。
+//
+// 只查 tunnels 表是不够的：池里可能有别的服务常驻占用（memcached、另一个 frp、
+// 用户自己跑的进程）。那种端口分下去后，frps 起 proxy 时会 bind 失败，现象是
+// 「隧道建好了、面板显示正常，但公网访问不通」，日志里只有 frps 一行报错 ——
+// 这是最难自行诊断的一类故障。所以对候选端口真做一次 bind 探测，绑不上就跳过。
+//
+// 探测用的是 0.0.0.0 而非 127.0.0.1：frps 对外监听所有地址，只测回环会漏掉
+// 「别的进程占了 0.0.0.0:PORT」的情况。
+//
+// protocol 决定探 TCP 还是 UDP（UDP 隧道必须确认 UDP 端口可用，
+// 而 TCP/UDP 是各自独立的端口空间，不能互相代表）。
+func (db *DB) NextFreePort(protocol string) (int, error) {
 	start, _ := strconv.Atoi(db.GetSetting("port_range_start"))
 	end, _ := strconv.Atoi(db.GetSetting("port_range_end"))
 	if start <= 0 || end <= 0 || end < start {
@@ -34,11 +46,37 @@ func (db *DB) NextFreePort() (int, error) {
 		used[p] = true
 	}
 	for p := start; p <= end; p++ {
-		if !used[p] {
-			return p, nil
+		if used[p] {
+			continue
 		}
+		if !portBindable(protocol, p) {
+			continue
+		}
+		return p, nil
 	}
 	return 0, fmt.Errorf("端口池已耗尽(%d-%d)", start, end)
+}
+
+// portBindable 探测本机此刻能否绑定该端口，绑完立刻释放。
+//
+// 只能排除「已经被占死」的端口。从探测到 frps 真正 bind 之间仍有窗口，
+// 但这个窗口只有毫秒级，而常驻服务占用的端口是长期存在的 —— 挡掉后者已足够。
+func portBindable(protocol string, port int) bool {
+	addr := "0.0.0.0:" + strconv.Itoa(port)
+	if strings.EqualFold(protocol, "udp") {
+		conn, err := net.ListenPacket("udp", addr)
+		if err != nil {
+			return false
+		}
+		_ = conn.Close()
+		return true
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = ln.Close()
+	return true
 }
 
 
@@ -54,7 +92,7 @@ func (db *DB) CreateTunnel(name, localAddr, protocol string, manualPort int, age
 	var port int
 	var err error
 	if manualPort > 0 {
-		// 校验占用
+		// 校验占用：先看有没有别的隧道占着，再看本机此刻能不能绑
 		var cnt int
 		if err := db.QueryRow("SELECT COUNT(*) FROM tunnels WHERE public_port=?", manualPort).Scan(&cnt); err != nil {
 			return nil, err
@@ -62,9 +100,13 @@ func (db *DB) CreateTunnel(name, localAddr, protocol string, manualPort int, age
 		if cnt > 0 {
 			return nil, fmt.Errorf("端口 %d 已被占用", manualPort)
 		}
+		if !portBindable(protocol, manualPort) {
+			return nil, fmt.Errorf("端口 %d 在本机已被其它服务监听（比如 nginx、另一个 frp），"+
+				"frps 绑不上它 —— 换一个端口，或先停掉占用它的服务", manualPort)
+		}
 		port = manualPort
 	} else {
-		port, err = db.NextFreePort()
+		port, err = db.NextFreePort(protocol)
 		if err != nil {
 			return nil, err
 		}
@@ -114,6 +156,12 @@ func (db *DB) UpdateTunnel(id int64, name, localAddr, protocol, agentID string, 
 		}
 		if cnt > 0 {
 			return fmt.Errorf("端口 %d 已被占用", manualPort)
+		}
+		// 新端口必须是本机真能绑的：换到一个已被 nginx 之类占着的端口，
+		// 改的时候一切正常，等 frps 重载才失败，那时已经很难联想到是端口冲突。
+		// 注意只在端口变化时检查 —— 端口没变时它正被 frps 自己监听，必然绑不上。
+		if !portBindable(t.Protocol, manualPort) {
+			return fmt.Errorf("端口 %d 在本机已被其它服务监听，frps 无法使用 —— 换一个端口", manualPort)
 		}
 		t.PublicPort = manualPort
 	}
