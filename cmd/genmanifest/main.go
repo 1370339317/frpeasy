@@ -32,7 +32,21 @@ func main() {
 	notes := flag.String("notes", "", "本次更新说明")
 	minAgent := flag.String("min-agent", "", "客户端最低可升级版本（可选）")
 	out := flag.String("out", "", "输出路径（默认 <dir>/manifest.json）")
+	verify := flag.Bool("verify", false, "只校验已有清单与目录文件是否一致（发布前守卫），不重新生成")
 	flag.Parse()
+
+	// 发布前守卫。存在的理由：交叉编译完某个平台后单独重建过一次，
+	// 清单里的 sha256 就与实际文件对不上了 —— 而客户端拿到文件后会校验
+	// sha256，不匹配就抛错不装，表现为「升级一直失败」，且面板侧看起来
+	// 一切正常（清单版本比客户端新，于是不停下发）。这种事故在发布现场
+	// 极难定位，必须在发布前拦住。
+	if *verify {
+		if err := verifyManifest(*dir, *out); err != nil {
+			fmt.Fprintln(os.Stderr, "校验失败:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *version == "" {
 		fmt.Fprintln(os.Stderr, "缺少 -version（例：-version 0.4.0）")
@@ -135,6 +149,96 @@ func main() {
 	if !haveAgent {
 		fmt.Printf("警告：清单里没有 %s/%s 的 agent 资产，本机客户端升级会 404\n", selfOS, selfArch)
 	}
+}
+
+// verifyManifest 校验已有清单与目录里的二进制是否严格一致。
+//
+// 检查四件事：
+//  1. 清单登记的每个文件都在目录里
+//  2. 每个文件的大小与 sha256 都与清单一致
+//  3. 目录里没有清单未登记的平台产物（漏发=别人下不到）
+//  4. 清单没有重复登记同一个文件
+//
+// 只看「版本号对不对」是不够的：版本号相同而二进制不同完全可能（重编译一次
+// 就会变），而客户端校验的是 sha256。
+func verifyManifest(dir, out string) error {
+	if out == "" {
+		out = filepath.Join(dir, "manifest.json")
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		return fmt.Errorf("读清单失败（还没生成过？先不带 -verify 跑一次）: %w", err)
+	}
+	var m shared.Manifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return fmt.Errorf("解析清单失败: %w", err)
+	}
+	if len(m.Assets) == 0 {
+		return fmt.Errorf("清单里没有任何资产")
+	}
+
+	listed := map[string]bool{}
+	var problems []string
+	for _, a := range m.Assets {
+		if listed[a.File] {
+			problems = append(problems, a.File+": 清单重复登记")
+			continue
+		}
+		listed[a.File] = true
+
+		path := filepath.Join(dir, a.File)
+		st, err := os.Stat(path)
+		if err != nil {
+			problems = append(problems, a.File+": 清单里有但文件不存在")
+			continue
+		}
+		if st.Size() != a.Size {
+			problems = append(problems, fmt.Sprintf("%s: 大小不符（清单 %d，实际 %d）", a.File, a.Size, st.Size()))
+			continue
+		}
+		sha, err := shared.FileSHA256(path)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s: 计算哈希失败: %v", a.File, err))
+			continue
+		}
+		if sha != a.SHA256 {
+			problems = append(problems, fmt.Sprintf("%s: sha256 不符（清单 %s，实际 %s）",
+				a.File, short(a.SHA256), short(sha)))
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("读目录失败: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "frpeasy-") {
+			continue
+		}
+		if _, _, _, ok := parseAssetName(e.Name()); !ok {
+			continue
+		}
+		if !listed[e.Name()] {
+			problems = append(problems, e.Name()+": 目录里有但清单未登记")
+		}
+	}
+
+	if len(problems) > 0 {
+		for _, p := range problems {
+			fmt.Fprintln(os.Stderr, "  FAIL "+p)
+		}
+		return fmt.Errorf("%d 处不一致，重跑 genmanifest 重算清单", len(problems))
+	}
+	fmt.Printf("清单一致：%s（版本 %s，%d 个资产全部匹配）\n", out, m.Version, len(m.Assets))
+	return nil
+}
+
+// short 取哈希前 12 位用于人眼比对，完整值在清单里。
+func short(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 // parseAssetName 拆 frpeasy-<kind>-<os>-<arch>[.exe]。

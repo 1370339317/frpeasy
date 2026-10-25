@@ -23,7 +23,14 @@ BUILD_TIME    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
 
-.PHONY: all build stage-local web web-install web-dev dev-ui build-alpine build-alpine-amd64 build-alpine-arm64 build-arm build-386 build-windows build-android stage-agent manifest dist run tidy clean
+# -trimpath 剥掉构建目录的绝对路径。两个作用：
+#  1. 不把 C:\Users\<你>\... 这种本机路径泄漏进发布的二进制；
+#  2. 同一份源码在不同目录构建出**字节相同**的产物，别人才能用
+#     `sha256sum` 核对发布包和自己重建的结果。少了它，manifest 里的
+#     哈希只对「我这台机器这一次构建」成立。
+BUILD_FLAGS := -trimpath
+
+.PHONY: all build stage-local web web-install web-dev dev-ui build-alpine build-alpine-amd64 build-alpine-arm64 build-arm build-386 build-windows build-android stage-agent manifest check-manifest dist run tidy clean
 
 all: build
 
@@ -51,12 +58,16 @@ web-dev:
 build-go: build-panel build-agent stage-local
 
 build-panel:
-	go build -ldflags "$(LDFLAGS)" -o $(BINARY_PANEL) ./cmd/panel
+	go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY_PANEL) ./cmd/panel
 
 build-agent:
-	go build -ldflags "$(LDFLAGS)" -o $(BINARY_AGENT) ./cmd/agent
+	go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY_AGENT) ./cmd/agent
 
 # 把本机平台的 agent 按面板要求的文件名放进 bin/（面板同级 bin/ 会被自动查找）。
+#
+# 注意：本机的 windows/amd64 agent 与 bin/ 里交叉编译的**同名**，这一步会覆盖它。
+# make build 顺手改了 bin/ 却不动 manifest.json —— 这正是清单哈希过期最常见的来源。
+# 发布前务必 make manifest 再 make check-manifest。
 stage-local: build-agent
 	@mkdir -p $(BIN_DIR)
 	@cp $(BINARY_AGENT) $(LOCAL_AGENT_ASSET)
@@ -66,24 +77,24 @@ stage-local: build-agent
 build-alpine: build-alpine-amd64 build-alpine-arm64 build-arm build-386 build-windows
 
 build-alpine-amd64:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_PANEL)-linux-amd64 ./cmd/panel
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-linux-amd64 ./cmd/agent
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_PANEL)-linux-amd64 ./cmd/panel
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-linux-amd64 ./cmd/agent
 
 build-alpine-arm64:
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_PANEL)-linux-arm64 ./cmd/panel
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-linux-arm64 ./cmd/agent
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_PANEL)-linux-arm64 ./cmd/panel
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-linux-arm64 ./cmd/agent
 
 # 32 位 arm（armv7 / armeabi-v7a）与 386：老 Android 设备、树莓派 2、x86 工控机。
 # 面板端这两个产物只用于客户端下发，部署面板仍用 amd64/arm64。
 build-arm:
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-linux-arm ./cmd/agent
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-linux-arm ./cmd/agent
 
 build-386:
-	CGO_ENABLED=0 GOOS=linux GOARCH=386 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-linux-386 ./cmd/agent
+	CGO_ENABLED=0 GOOS=linux GOARCH=386 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-linux-386 ./cmd/agent
 
 build-windows:
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-windows-amd64.exe ./cmd/agent
-	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-windows-arm64.exe ./cmd/agent
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-windows-amd64.exe ./cmd/agent
+	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-windows-arm64.exe ./cmd/agent
 
 # Android 客户端：Go 没有 GOOS=android 的可执行构建，android 的 arm64-v8a /
 # armeabi-v7a 直接跑 linux 静态二进制（frp 官方对 Android 也是这么发的）。
@@ -126,11 +137,26 @@ dev-ui: build-go web
 manifest:
 	go run ./cmd/genmanifest -dir $(BIN_DIR) -version $(VERSION) -notes "$(NOTES)"
 
+# 发布前守卫：清单里的 sha256/size 必须与 bin/ 里的文件严格一致。
+#
+# 为什么需要它：清单生成本身不报错，错的是「生成之后又动过文件」。
+# 只要在 make dist 之后单独重建过任何一个平台（很常见：临时改一行代码
+# 验证某个平台），清单里的哈希就过期了。客户端下载后会校验 sha256，
+# 不匹配就抛错不装 —— 表现是「升级一直失败」，而面板侧看起来完全正常
+# （清单版本比客户端新，于是不停下发）。这种事故在发布现场极难定位。
+#
+# 用 `nothing` 代替默认的"先重算再校验"：重算完必然一致，那样校验就是假绿。
+check-manifest:
+	go run ./cmd/genmanifest -dir $(BIN_DIR) -verify
+
 # 一条命令做出可发布的目录：全部平台产物 + 清单
 dist: build-alpine manifest
 	@echo ""
-	@echo "发布目录 $(BIN_DIR)/ 已就绪（含 manifest.json）。"
+	@$(MAKE) --no-print-directory check-manifest
+	@echo "发布目录 $(BIN_DIR)/ 已就绪（含 manifest.json，已校验）。"
 	@echo "上传后把更新源填成：https://<你的静态地址>/  （目录即可，不必写文件名）"
+	@echo ""
+	@echo "注意：上传前若又重建过任何产物，务必重跑 make manifest && make check-manifest。"
 
 tidy:
 	go mod tidy
