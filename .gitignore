@@ -89,3 +89,6 @@ Thumbs.db
 
 # 提交信息临时文件（不要入库）
 .commitmsg.tmp
+
+# 本地预览截图/脚本（不参与构建，不入库）
+/.preview/
