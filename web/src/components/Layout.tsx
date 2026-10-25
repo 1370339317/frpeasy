@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { useApp } from '../store'
 import { fmtBuildTime } from '../lib/format'
 import { Button, IconButton, Led, cx } from './ui'
-import { VIEW_ITEMS, VIEW_TITLES, type View } from '../views'
+import { VIEW_GROUPS, VIEW_TITLES, type View } from '../views'
 
 /**
  * 应用外壳：左侧导航 + 顶栏 + 内容区。
@@ -37,22 +37,35 @@ export function Layout({
           <span className="max-[820px]:hidden">frpeasy</span>
         </div>
 
-        <nav className="flex flex-col gap-0.5 px-2.5 py-2.5">
-          {VIEW_ITEMS.map((it) => (
-            <button
-              key={it.key}
-              onClick={() => onNavigate(it.key)}
-              data-view={it.key}
-              className={cx(
-                'flex w-full cursor-pointer items-center gap-2.5 rounded-[9px] border-none px-3 py-[9px] text-left text-[13.5px] transition',
-                view === it.key
-                  ? 'bg-accent-dim font-semibold text-accent-fg'
-                  : 'bg-transparent text-muted hover:bg-card2 hover:text-fg',
-              )}
-            >
-              <span className="w-[18px] text-center text-sm opacity-90">{it.icon}</span>
-              <span className="max-[820px]:hidden">{it.label}</span>
-            </button>
+        {/* 分组渲染 + 可滚动：条目以后只会更多，窗口不高时不能让下面的
+            组直接掉出屏幕（那会变成「菜单怎么不见了」）。窄屏只留图标时
+            分组标题隐藏，但 title 属性保证悬停仍能看清是什么。 */}
+        <nav className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-2.5 py-2.5">
+          {VIEW_GROUPS.map((g) => (
+            <div key={g.key}>
+              <div className="mb-1 px-3 text-[10.5px] font-semibold tracking-[0.1em] text-dim uppercase max-[820px]:hidden">
+                {g.title}
+              </div>
+              <div className="flex flex-col gap-0.5">
+                {g.items.map((it) => (
+                  <button
+                    key={it.key}
+                    onClick={() => onNavigate(it.key)}
+                    data-view={it.key}
+                    title={it.label}
+                    className={cx(
+                      'flex w-full cursor-pointer items-center gap-2.5 rounded-[9px] border-none px-3 py-[9px] text-left text-[13.5px] transition',
+                      view === it.key
+                        ? 'bg-accent-dim font-semibold text-accent-fg'
+                        : 'bg-transparent text-muted hover:bg-card2 hover:text-fg',
+                    )}
+                  >
+                    <span className="w-[18px] text-center text-sm opacity-90">{it.icon}</span>
+                    <span className="max-[820px]:hidden">{it.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
 

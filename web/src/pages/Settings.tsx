@@ -11,7 +11,6 @@ import {
   Input,
 } from '../components/ui'
 import type { MirrorTestResult, SettingsBody, SettingsSaveResult } from '../types'
-import { VersionCard } from './VersionCard'
 
 const MIRROR_PRESETS: { label: string; value: string; note?: string }[] = [
   { label: 'GitHub 官方', value: '' },
@@ -322,9 +321,17 @@ export function SettingsPage() {
           />
         </Field>
       </Card>
-      {/* 版本与更新独立成组件：它有自己的轮询与重启检测，塞进本页会让
-          表单状态和"面板正在重启"互相干扰 */}
-      <VersionCard />
+      {/* 版本与更新、以及各种二进制文件，都搬到了「这台服务器 → 文件与更新」。
+          两处分开时，用户看到「有新版」却要去另一页看文件是否就绪，很别扭。
+          这里只留一个入口，别在这里再挂一份（挂了就会出现两个更新按钮，
+          状态还各自轮询、互相打架）。 */}
+      <Hint>
+        面板与客户端的版本、以及 frps / frpc / agent 各平台的二进制文件，都在左侧{' '}
+        <a className="cursor-pointer font-semibold text-accent-fg underline" onClick={() => (window.location.hash = '#/files')}>
+          这台服务器 → 文件与更新
+        </a>
+        。
+      </Hint>
       <div className="flex flex-wrap gap-2.5">
         <Button onClick={() => void save()} disabled={saving}>
           {saving ? '保存中…' : '保存设置'}

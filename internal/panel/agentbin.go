@@ -94,7 +94,7 @@ func (p *Panel) ensureAgentBin(osName, arch string) (string, error) {
 			return path, nil
 		}
 		return "", fmt.Errorf("面板上没有 %s，且未配置「更新源」，无法自动拉取。"+
-			"到面板「设置 → 版本与更新」填上更新源（如本仓库的 releases/latest/download），"+
+			"到面板「文件与更新」页填上更新源（如本仓库的 releases/latest/download），"+
 			"或手工把该文件放进 %s", name, p.dataDir+"/bin")
 	}
 

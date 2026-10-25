@@ -236,7 +236,7 @@ func (p *Panel) collectVersions(force bool) versionResponse {
 		default:
 			// 既没有本机产物，也拿不到清单 —— 这才是真的发不出去。
 			resp.Agent.Error = "面板没有可下发的 agent，且取不到更新源清单；客户端将无法安装。" +
-				"到「设置 → 版本与更新」填写更新源即可。"
+				"到「文件与更新」页填写更新源即可。"
 		}
 	}
 

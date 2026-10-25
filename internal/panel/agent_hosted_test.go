@@ -105,7 +105,8 @@ func TestAgentHostedErrorOnlyWhenNothingAvailable(t *testing.T) {
 	if r.Agent.Error == "" {
 		t.Fatal("既无产物又无清单时必须报错，否则用户以为一切正常")
 	}
-	if !strings.Contains(r.Agent.Error, "设置") {
+	// 指向现在真正填更新源的地方（0.7.0 起从「设置」搬到「文件与更新」页）
+	if !strings.Contains(r.Agent.Error, "文件与更新") {
 		t.Fatalf("错误信息要指向可操作的位置：%q", r.Agent.Error)
 	}
 	if strings.Contains(r.Agent.Error, "make ") {

@@ -50,7 +50,7 @@ func (p *Panel) panelUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if manifest == nil {
-		fail(http.StatusBadRequest, "尚未配置更新源。到「设置 → 版本与更新」填写更新源地址后再试")
+		fail(http.StatusBadRequest, "尚未配置更新源。到「文件与更新」页填写更新源地址后再试")
 		return
 	}
 	asset, err := manifest.SelectAsset(shared.AssetPanel, runtime.GOOS, runtime.GOARCH)

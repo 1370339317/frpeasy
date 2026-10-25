@@ -3,6 +3,7 @@ import { useApp } from '../store'
 import { api } from '../lib/api'
 import { fmtBytes } from '../lib/format'
 import { Alert, Badge, Button, Card, Empty, Hint, Table, Td, type Tone } from '../components/ui'
+import { VersionCard } from './VersionCard'
 import type { FileKind, FilesResponse, HostedFile } from '../types'
 
 const KIND_LABEL: Record<FileKind, string> = {
@@ -105,6 +106,11 @@ export function Files() {
   return (
     <div className="grid gap-3.5">
       {err && <Alert tone="bad">{err}</Alert>}
+
+      {/* 版本与更新原来在「设置」里，而托管文件在这一页 —— 同一件事（这台机器上
+          有哪些二进制、都是什么版本）被拆成两处，找更新的人得先去设置、再回来
+          对比文件。现在合到一页：先看版本，再看具体文件。 */}
+      <VersionCard />
 
       <Card
         title="面板托管的文件"
