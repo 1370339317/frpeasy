@@ -44,6 +44,7 @@ for f in "$BIN"/frpeasy-panel-linux-*; do
   chmod 0755 "$stage/frpeasy-panel"
 
   sed -e "s|@@PREFIX@@|/opt/frpeasy|g" \
+      -e "s|@@DATA@@|/opt/frpeasy/data|g" \
       -e "s|@@LISTEN@@|:8080|g" \
       -e "s|@@UPDATE_BASE@@|$BASE_ESC|g" \
       "$unit_src" > "$stage/frpeasy.service"

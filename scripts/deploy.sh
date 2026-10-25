@@ -26,6 +26,14 @@ set -eu
 
 # ---- 默认参数 ----
 DEFAULT_BASE="https://github.com/1370339317/frpeasy/releases/latest/download"
+# 记下哪些值来自用户（环境变量或命令行）。升级时只有「用户没指定过」的项
+# 才允许从已有安装继承 —— 否则用户这次的意图会被旧配置覆盖掉。
+SET_PREFIX=0; SET_PORT=0; SET_LISTEN=0; SET_DATA=0
+[ -n "${PREFIX:-}" ] && SET_PREFIX=1
+[ -n "${PORT:-}" ] && SET_PORT=1
+[ -n "${LISTEN:-}" ] && SET_LISTEN=1
+[ -n "${DATA:-}" ] && SET_DATA=1
+
 BASE=${BASE:-$DEFAULT_BASE}
 PREFIX=${PREFIX:-/opt/frpeasy}
 PORT=${PORT:-8080}
@@ -49,10 +57,10 @@ UNIT_DIR=${UNIT_DIR:-/etc/systemd/system}
 while [ $# -gt 0 ]; do
   case "$1" in
     --base) BASE=$2; shift 2 ;;
-    --prefix) PREFIX=$2; shift 2 ;;
-    --port) PORT=$2; LISTEN=":$2"; shift 2 ;;
-    --listen) LISTEN=$2; shift 2 ;;
-    --data) DATA=$2; shift 2 ;;
+    --prefix) PREFIX=$2; SET_PREFIX=1; shift 2 ;;
+    --port) PORT=$2; LISTEN=":$2"; SET_PORT=1; SET_LISTEN=1; shift 2 ;;
+    --listen) LISTEN=$2; SET_LISTEN=1; shift 2 ;;
+    --data) DATA=$2; SET_DATA=1; shift 2 ;;
     --no-service) NO_SERVICE=1; shift ;;
     --service-name) SERVICE_NAME=$2; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
@@ -64,8 +72,8 @@ while [ $# -gt 0 ]; do
     *) echo "未知参数: $1（-h 看用法）" >&2; exit 2 ;;
   esac
 done
-# --prefix 改了之后 data 要跟着走（除非用户显式指定过）
-if [ -z "$DATA" ]; then DATA=$PREFIX/data; fi
+# DATA 的兜底推迟到 inherit_existing 之后：如果已经有安装，要用它记录的
+# 数据目录，而不是 $PREFIX/data —— 否则升级会读到空库，看起来像配置全丢了。
 BASE=${BASE%/}
 
 say()  { printf '%s\n' "$*"; }
@@ -88,6 +96,37 @@ die()  { printf '\n错误：%s\n' "$*" >&2; exit 1; }
 unit_exec() { sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$1" 2>/dev/null | head -1; }
 # 从 unit 里取 --data 的参数值
 unit_data() { sed -n 's/.*--data[[:space:]][[:space:]]*\([^ ]*\).*/\1/p' "$1" 2>/dev/null | head -1; }
+# 从 unit 里取 --listen 的参数值
+unit_listen() { sed -n 's/.*--listen[[:space:]][[:space:]]*\([^ ]*\).*/\1/p' "$1" 2>/dev/null | head -1; }
+
+# ==== 沿用已有安装的位置（升级的前提）====
+# 用户当初可能是 `--prefix /srv/frpeasy --data /data/frpeasy` 装的。升级时若只跑
+# `curl ... | sudo bash`，默认值会把它装到 /opt/frpeasy，起一个读空库的新实例：
+# 表现为「升级完口令、隧道、客户端全没了，又要重新设一遍」，而旧实例还占着端口。
+# 所以先按 unit 里的 ExecStart 反查出真实位置，只继承用户这次没显式指定的项。
+inherit_existing() {
+  local unit="$UNIT_DIR/$SERVICE_NAME.service"
+  [ -f "$unit" ] || return 0
+
+  local exe realp reald reallisten
+  exe=$(unit_exec "$unit")
+  realp=""
+  [ -n "$exe" ] && realp=$(dirname "$exe")
+  reald=$(unit_data "$unit")
+  reallisten=$(unit_listen "$unit")
+
+  if [ "$SET_PREFIX" -eq 0 ] && [ -n "$realp" ] && [ "$realp" != "$PREFIX" ]; then
+    say "    检测到已有安装：沿用安装目录 $realp（默认是 $PREFIX）"
+    PREFIX=$realp
+  fi
+  if [ "$SET_DATA" -eq 0 ] && [ -n "$reald" ]; then
+    DATA=$reald
+  fi
+  if [ "$SET_LISTEN" -eq 0 ] && [ -n "$reallisten" ]; then
+    LISTEN=$reallisten
+    [ "$SET_PORT" -eq 0 ] && PORT=${reallisten##*:}
+  fi
+}
 
 # 防止手滑把 /opt 甚至 / 删掉。至少要求「/父/子」两层。
 refuse_path() {
@@ -228,6 +267,11 @@ case "$(uname -s)" in
   *) die "本脚本只支持 Linux。Windows 请直接下载 frpeasy-panel-windows-*.exe 双击运行。" ;;
 esac
 
+# 先沿用已有安装的位置：升级要装回原处，卸载也要知道当初装在哪。
+inherit_existing
+# DATA 兜底放在继承之后，否则会把已有安装的数据目录覆盖成 $PREFIX/data。
+if [ -z "$DATA" ]; then DATA=$PREFIX/data; fi
+
 # 卸载放在架构判断之前：卸载不需要架构匹配（面板装的是哪个平台都该能卸）。
 [ "$UNINSTALL" -eq 1 ] && do_uninstall
 
@@ -323,7 +367,7 @@ if ! "$TMP/panel" --build >/dev/null 2>&1; then
 fi
 
 # ---- 4. 停掉正在运行的实例 ----
-SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+SERVICE_FILE="$UNIT_DIR/$SERVICE_NAME.service"
 if [ -f "$SERVICE_FILE" ] && command -v systemctl >/dev/null; then
   step "停止已有服务 $SERVICE_NAME"
   systemctl stop "$SERVICE_NAME" 2>/dev/null || true
@@ -369,6 +413,7 @@ step "配置 systemd 服务 $SERVICE_NAME"
 fetch "$BASE/frpeasy.service" "$TMP/frpeasy.service" || die "拉不到 frpeasy.service 模板"
 esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
 sed -e "s|@@PREFIX@@|$(esc "$PREFIX")|g" \
+    -e "s|@@DATA@@|$(esc "$DATA")|g" \
     -e "s|@@LISTEN@@|$(esc "$LISTEN")|g" \
     -e "s|@@UPDATE_BASE@@|$(esc "$BASE")|g" \
     "$TMP/frpeasy.service" > "$SERVICE_FILE"

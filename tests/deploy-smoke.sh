@@ -202,6 +202,36 @@ else
     bad "错误信息没说清原因"; tail -5 "$WORK/run3.log"; }
 fi
 
+echo "=== 9. 升级时沿用已有安装的目录 / 数据目录 / 端口（不变成重装）==="
+# 恢复第 8 步被篡改的产物，继承测试需要真下载
+cp bin/frpeasy-panel-linux-amd64 "$REL/"
+UPG="$WORK/upg-prefix"
+UPGDATA="$WORK/upg-data"
+mkdir -p "$UPG" "$UPGDATA" "$WORK/units2"
+echo "db" > "$UPGDATA/frpeasy.db"
+cat > "$WORK/units2/frpeasy.service" <<UNIT
+[Unit]
+Description=frpeasy (upgrade test)
+[Service]
+ExecStart=$UPG/frpeasy-panel --data $UPGDATA --listen :7777
+[Install]
+WantedBy=multi-user.target
+UNIT
+# 不指定 PREFIX/DATA/LISTEN —— 脚本必须从 unit 反查继承，否则会装到 /opt/frpeasy
+# 读一个空库，表现为「升级完配置全丢了」。
+if BASE="$BASE" UNIT_DIR="$WORK/units2" NO_SERVICE=1 bash "$REL/deploy.sh" >"$WORK/upg.log" 2>&1; then
+  ok "升级执行退出码 0"
+else
+  bad "升级失败"; cat "$WORK/upg.log"
+fi
+grep -q "沿用安装目录" "$WORK/upg.log" && ok "日志说明沿用了原安装目录" \
+  || { bad "没提示沿用目录"; tail -6 "$WORK/upg.log"; }
+[ -x "$UPG/frpeasy-panel" ] && ok "二进制装回原目录 $UPG" || bad "没装回原目录"
+grep -q -- "--data $UPGDATA" "$WORK/upg.log" && ok "数据目录沿用 $UPGDATA（不会读空库）" \
+  || bad "数据目录没沿用：$(grep -o -- '--data[^ ]*' "$WORK/upg.log" | head -1)"
+grep -q -- "--listen :7777" "$WORK/upg.log" && ok "监听端口沿用 :7777" || bad "端口没沿用"
+[ -f "$UPGDATA/frpeasy.db" ] && ok "原数据库完好" || bad "原数据库被动过"
+
 echo ""
 if [ "$FAIL" -eq 0 ]; then
   echo "deploy-smoke 全部通过"

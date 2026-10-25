@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=@@PREFIX@@
-ExecStart=@@PREFIX@@/frpeasy-panel --data @@PREFIX@@/data --listen @@LISTEN@@
+ExecStart=@@PREFIX@@/frpeasy-panel --data @@DATA@@ --listen @@LISTEN@@
 Environment=FRPEASY_SERVICE=frpeasy.service
 Environment=FRPEASY_UPDATE_BASE=@@UPDATE_BASE@@
 
