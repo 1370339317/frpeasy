@@ -187,6 +187,19 @@ chk "探测目标变成公网地址" "1.2.3.4" "$(echo "$PORTJ2" | jget "d['acce
 chk "允许外部回访" "True" "$(echo "$PORTJ2" | jget "d['probe_host_ok']")"
 chk "端口清单不受公网地址影响" 1 "$(echo "$PORTJ2" | jget "1 if 21000 in (d['required_ports'] or []) else 0")"
 
+say "== 21) 文件页：托管文件清单 / 删除保护 =="
+FILESJ=$(curl -s -b cj.txt $B/api/files)
+chk "文件接口可用" 200 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt $B/api/files)"
+chk "每个支持平台都有 agent 条目" 6 "$(echo "$FILESJ" | jget "len([i for i in d['items'] if i['kind']=='agent'])")"
+chk "每个支持平台都有 frpc 条目" 6 "$(echo "$FILESJ" | jget "len([i for i in d['items'] if i['kind']=='frpc'])")"
+chk "三类都列出" "agent,frpc,frps" "$(echo "$FILESJ" | jget "','.join(sorted({i['kind'] for i in d['items']}))")"
+chk "未下载的项不可删除" 0 "$(echo "$FILESJ" | jget "1 if any(i['can_delete'] and not i['present'] for i in d['items']) else 0")"
+chk "删除不存在的文件 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X DELETE "$B/api/files?kind=frpc&os=linux&arch=amd64")"
+chk "kind 非法 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X DELETE "$B/api/files?kind=xx&os=linux&arch=amd64")"
+# frpc 托管接口必须存在。上游没有该架构时应回 502（而不是 404）——
+# 客户端按 5xx 决定回退直连，404 会被理解成"这个平台本来就没有"。
+chk "frpc 托管接口存在（上游缺该架构时 502）" 502 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 $B/api/frpc/bin/linux/riscv64)"
+
 kill $PANEL_PID 2>/dev/null || true
 # Windows 上 kill 只作用于 bash 的作业，原生 exe 会留下来继续心跳（并锁住 exe），
 # 下一轮就构建失败。按镜像名兜底清理，保证脚本可反复执行。

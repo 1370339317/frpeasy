@@ -3,6 +3,8 @@ package agent
 import (
 	"crypto/sha256"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +27,17 @@ type FrpcManager struct {
 
 	pullCooldownUntil time.Time // 拉取失败后的冷却截止时间
 	lastPullErr       error
+
+	// panelBase 面板地址。非空时优先从面板取 frpc（/api/frpc/bin/…），
+	// 取不到再回退直连 GitHub/镜像。留空 = 只用直连（自检、单元测试）。
+	panelBase string
+}
+
+// SetPanelBase 设置面板地址（由 NewClient 注入）。
+func (m *FrpcManager) SetPanelBase(base string) {
+	m.mu.Lock()
+	m.panelBase = strings.TrimRight(strings.TrimSpace(base), "/")
+	m.mu.Unlock()
 }
 
 // pullRetryCooldown 拉取失败后等待多久再重试，避免疯狂重下几十 MB。
@@ -91,7 +104,20 @@ func (m *FrpcManager) EnsureBinary(version, mirror string) (string, error) {
 		}
 		return "", err
 	}
+	panelBase := m.panelBase
 	m.mu.Unlock()
+
+	// 先向面板要。理由：内网机器往往能连面板、却连不上 GitHub；
+	// 面板那边拉一次就缓存住，后面所有同平台客户端都从面板拿，还顺带
+	// 让镜像配置只需在面板做一次。面板没有这个接口（老版本）或上游不通时，
+	// 再按原来的方式直连 —— 回退保证兼容。
+	if panelBase != "" {
+		if p, err := m.downloadFromPanel(panelBase); err == nil {
+			return p, nil
+		} else {
+			m.lastPullErr = err
+		}
+	}
 
 	keyword := shared.PlatformKeyword(runtime.GOOS, runtime.GOARCH)
 	url, tag, err := shared.ResolveAssetURL(shared.FRPRepo, version, keyword, mirror)
@@ -108,6 +134,59 @@ func (m *FrpcManager) EnsureBinary(version, mirror string) (string, error) {
 	m.lastPullErr = err
 	m.mu.Unlock()
 	return "", err
+}
+
+// downloadFromPanel 从面板取 frpc 裸二进制。
+//
+// 面板返回的是可执行文件本身（不是压缩包），所以这里不用解包；但必须做一次
+// 基本校验 —— 502 的错误文本、反代登录页 HTML 都可能被原样存成"frpc"，
+// 那种文件执行时报 exec format error，排查方向会被彻底带偏。
+func (m *FrpcManager) downloadFromPanel(base string) (string, error) {
+	u := base + "/api/frpc/bin/" + runtime.GOOS + "/" + runtime.GOARCH
+	if err := os.MkdirAll(m.binDir, 0o755); err != nil {
+		return "", err
+	}
+	tmp := filepath.Join(m.binDir, "frpc.part")
+	_ = os.Remove(tmp)
+	defer os.Remove(tmp)
+
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Get(u)
+	if err != nil {
+		return "", fmt.Errorf("面板取 frpc 失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return "", fmt.Errorf("面板取 frpc 返回 %d：%s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	f, err := os.Create(tmp)
+	if err != nil {
+		return "", err
+	}
+	n, copyErr := io.Copy(f, resp.Body)
+	closeErr := f.Close()
+	if copyErr != nil {
+		return "", copyErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	// 各平台 frpc 都在 10MB 以上；小于 1MB 必然是错误页或被截断
+	const minFrpcSize = 1 << 20
+	if n < minFrpcSize {
+		return "", fmt.Errorf("面板返回的 frpc 只有 %d 字节，疑似错误页或内容被截断", n)
+	}
+	dst := m.binaryPath()
+	_ = os.Chmod(tmp, 0o755)
+	if err := os.Rename(tmp, dst); err != nil {
+		return "", fmt.Errorf("保存 frpc 失败: %w", err)
+	}
+	// 面板知道这份文件的版本，写在响应头里；有就记下，省掉一次 `frpc -v` 探测
+	if v := strings.TrimSpace(resp.Header.Get("X-FRPC-Version")); v != "" {
+		_ = os.WriteFile(m.versionPath(), []byte(v), 0o644)
+	}
+	return dst, nil
 }
 
 // GenerateConfig 依据面板下发的配置生成 frpc.toml，返回路径与配置哈希。

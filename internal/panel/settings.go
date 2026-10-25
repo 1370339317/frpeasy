@@ -75,6 +75,15 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 			if v == "1" || v == "0" {
 				_ = p.db.SetSetting(k, v)
 			}
+		case "prefetch_all":
+			if v == "1" || v == "0" {
+				_ = p.db.SetSetting(k, v)
+				if v == "1" {
+					// 刚打开就立刻补一次：用户按下开关时的预期就是"现在开始准备"，
+					// 而不是等下一次检查更新。重复调用是幂等的。
+					p.prefetchAllAsync()
+				}
+			}
 		case "dashboard_port":
 			_ = p.db.SetSetting(k, v)
 			needFrpsRestart = true

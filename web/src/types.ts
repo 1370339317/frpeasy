@@ -347,3 +347,33 @@ export interface SettingsSaveResult {
   frps_restarting?: boolean
   frps_bind_port?: number
 }
+
+/** 「文件」页：面板托管的二进制（frps / frpc / agent）现状。 */
+
+export type FileKind = 'frps' | 'frpc' | 'agent'
+
+export interface HostedFile {
+  kind: FileKind
+  os: string
+  arch: string
+  name: string
+  path: string
+  present: boolean
+  version: string
+  size: number
+  /** builtin = 随发布包内置；cache = 运行时拉取的缓存 */
+  source: string
+  note: string
+  can_delete: boolean
+}
+
+export interface FilesResponse {
+  items: HostedFile[]
+  bin_dir: string
+  data_dir: string
+  used_bytes: number
+  prefetch_all: boolean
+  frp_version: string
+  update_base: string
+  mirror_base: string
+}

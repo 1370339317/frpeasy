@@ -133,6 +133,9 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("GET /api/agent/bin/{os}/{arch}", func(w http.ResponseWriter, r *http.Request) {
 		p.agentBinHandler(w, r, r.PathValue("os"), r.PathValue("arch"))
 	})
+	// frpc 同样由面板托管：内网机器只要能连面板就能建隧道，
+	// 不必各自去 GitHub 拉。客户端取不到会回退直连（见 agent/frpc.go）。
+	mux.HandleFunc("GET /api/frpc/bin/{os}/{arch}", p.frpcBinHandler)
 
 	// 客户端一键安装脚本（无需登录）
 	mux.HandleFunc("GET /install", p.installHandler)
@@ -178,6 +181,11 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("GET /api/version", p.requireAuth(p.versionHandler))
 	mux.HandleFunc("POST /api/version/check", p.requireAuth(p.versionCheckHandler))
 	mux.HandleFunc("POST /api/panel/update", p.requireAuth(p.panelUpdateHandler))
+
+	// 文件：面板托管了哪些二进制（frps / frpc / agent）、占多少、预存或删除
+	mux.HandleFunc("GET /api/files", p.requireAuth(p.filesHandler))
+	mux.HandleFunc("POST /api/files/fetch", p.requireAuth(p.filesFetchHandler))
+	mux.HandleFunc("DELETE /api/files", p.requireAuth(p.filesDeleteHandler))
 
 	// 内嵌静态 UI（或 --ui-dir 指定的磁盘目录）
 	//

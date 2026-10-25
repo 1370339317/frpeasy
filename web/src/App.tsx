@@ -10,6 +10,7 @@ import { Overview } from './pages/Overview'
 import { Tunnels } from './pages/Tunnels'
 import { Clients } from './pages/Clients'
 import { Frps } from './pages/Frps'
+import { Files } from './pages/Files'
 import { Ports } from './pages/Ports'
 import { SettingsPage } from './pages/Settings'
 
@@ -95,6 +96,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       {view === 'clients' && <Clients />}
       {view === 'server' && <Frps />}
       {view === 'ports' && <Ports />}
+      {view === 'files' && <Files />}
       {view === 'settings' && <SettingsPage />}
     </Layout>
   )

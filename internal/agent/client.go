@@ -49,14 +49,17 @@ func NewClient(server, installTok, name, dataDir string) (*Client, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, err
 	}
-	return &Client{
+	c := &Client{
 		server:     server,
 		installTok: installTok,
 		name:       name,
 		dataDir:    dataDir,
 		frpc:       NewFrpcManager(dataDir),
 		httpClient: &http.Client{Timeout: 20 * time.Second},
-	}, nil
+	}
+	// 让 frpc 优先从面板取（内网机器连不上 GitHub 时这是唯一通路）
+	c.frpc.SetPanelBase(server)
+	return c, nil
 }
 
 func (c *Client) statePath() string {

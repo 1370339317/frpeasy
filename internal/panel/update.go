@@ -266,5 +266,9 @@ func (p *Panel) versionHandler(w http.ResponseWriter, r *http.Request) {
 
 // versionCheckHandler POST /api/version/check —— 强制重新拉清单。
 func (p *Panel) versionCheckHandler(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(p.collectVersions(true))
+	resp := p.collectVersions(true)
+	// 开了「全平台预存」的话，用户点检查更新就等于同意把新版本备好。
+	// 放后台，别让这个请求等着下几十 MB。
+	p.maybePrefetch()
+	json.NewEncoder(w).Encode(resp)
 }
