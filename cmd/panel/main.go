@@ -33,6 +33,7 @@ func main() {
 	handoffTarget := flag.String("handoff-target", "", "内部使用：要替换成的正式二进制路径")
 	handoffNew := flag.String("handoff-new", "", "内部使用：已校验的新版二进制路径")
 	handoffVersion := flag.String("handoff-version", "", "内部使用：期望新版本报告的版本号")
+	handoffService := flag.String("handoff-service", "", "内部使用：systemd unit 名（非空时用 systemctl 启停，而不是自己 spawn）")
 	flag.Parse()
 
 	if *showBuild {
@@ -56,6 +57,7 @@ func main() {
 			NewExe:      *handoffNew,
 			SelfExe:     self,
 			WantVersion: *handoffVersion,
+			Service:     *handoffService,
 		})
 		if err != nil {
 			fmt.Println("[handoff] 失败:", err)

@@ -78,6 +78,14 @@ type HandoffOptions struct {
 	// SelfExe 交接器自己的路径 —— 它是**旧版的副本**，不是新版。
 	// 这个区别是本模块最关键的修正，见 startHandoff 的注释。
 	SelfExe string
+	// Service 非空表示面板由 systemd 托管，值是 unit 名（如 frpeasy.service）。
+	//
+	// 为什么必须区分：systemd unit 用 Restart=on-failure，面板交接时以 exit 0
+	// 主动退出，systemd 因此**不会**自动重启（这是有意的 —— 让交接器从容换文件）。
+	// 所以换完文件后必须由交接器显式 systemctl start，否则服务就停在那儿了。
+	// 不区分的话，Restart=on-failure 与 Restart=always 两种策略都要么抢端口、
+	// 要么留下一个停掉的服务。
+	Service string
 }
 
 func updateDir(dataDir string) string {
@@ -222,6 +230,59 @@ func spawnDetached(exe string, args []string, logPath string) (*exec.Cmd, error)
 	return cmd, nil
 }
 
+// runSystemctl 调用 systemctl。抽成变量是为了让测试能替换它 ——
+// 交接器在 systemd 模式下的正确性（先 stop 再回滚再 start）必须能离线验证，
+// 不能依赖测试机器上真的有这个 unit。
+var runSystemctl = func(args ...string) ([]byte, error) {
+	return exec.Command("systemctl", args...).CombinedOutput()
+}
+
+// startTarget 把目标二进制拉起来。
+//
+// 两种模式，区别不只是"怎么启动"，而是**谁负责生命周期**：
+//   - 裸运行（systemd 之外：绿色包、宝塔、nohup、docker 前台）：
+//     面板是唯一的管理者，交接器必须自己 spawn，否则没人会拉起它。
+//   - systemd 托管（o.Service 非空）：unit 配置 Restart=on-failure，面板交接时
+//     以 exit 0 主动退出，systemd 因此不重启 —— 于是换完文件后必须显式
+//     systemctl start，而且必须由 systemd 拉起（不是交接器 spawn），否则
+//     起来的进程不在 unit 的 cgroup 里，systemctl status/stop 都管不到它，
+//     下次重启就变成两份进程抢端口。
+//
+// 返回的 *exec.Cmd 只有裸运行模式有值，systemd 模式返回 nil（停止走 stopTarget）。
+func startTarget(o HandoffOptions, logf func(string, ...any)) (*exec.Cmd, error) {
+	if o.Service != "" {
+		out, err := runSystemctl("start", o.Service)
+		if err != nil {
+			return nil, fmt.Errorf("systemctl start %s 失败: %v（输出：%s）",
+				o.Service, err, strings.TrimSpace(string(out)))
+		}
+		logf("已通过 systemd 启动 %s", o.Service)
+		return nil, nil
+	}
+	args := []string{"--listen", o.Listen, "--data", o.DataDir}
+	return spawnDetached(o.TargetExe, args, handoffLogPath(o.DataDir))
+}
+
+// stopTarget 停掉 startTarget 拉起的进程。语义与 startTarget 对称。
+//
+// systemd 模式下必须用 systemctl stop 而不是杀 pid：直接 kill 会让 systemd
+// 认为服务异常退出（Restart=on-failure 会立刻把它拉回来），而我们正打算
+// 回滚文件 —— 那个被拉起来的进程就会读到半替换状态。
+func stopTarget(o HandoffOptions, cmd *exec.Cmd) {
+	if o.Service != "" {
+		if out, err := runSystemctl("stop", o.Service); err != nil {
+			// 停不掉不阻断流程：Linux 上允许替换正在运行的文件，
+			// 回滚仍能完成，只是那个进程会不会占着端口由 systemd 决定。
+			fmt.Printf("[handoff] systemctl stop %s 失败: %v（输出：%s）\n",
+				o.Service, err, strings.TrimSpace(string(out)))
+		}
+		return
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
 // healthProbe 单次探测健康检查接口。
 type healthProbe struct {
 	OK      bool   `json:"ok"`
@@ -308,12 +369,11 @@ func RunHandoff(o HandoffOptions) error {
 	logf("二进制已替换")
 
 	// ---- 3. 启动新版本 ----
-	args := []string{"--listen", o.Listen, "--data", o.DataDir}
 	WriteUpdateState(o.DataDir, UpdateState{
 		Stage: "starting", To: o.WantVersion,
 		Detail: "启动新版本 " + o.WantVersion,
 	})
-	cmd, err := spawnDetached(o.TargetExe, args, handoffLogPath(o.DataDir))
+	cmd, err := startTarget(o, logf)
 	if err != nil {
 		logf("启动新版本失败: %v", err)
 		rollback()
@@ -323,14 +383,16 @@ func RunHandoff(o HandoffOptions) error {
 		}
 		WriteUpdateState(o.DataDir, st)
 		// 回滚后必须把服务拉回来，否则用户面对的是一个彻底停掉的面板
-		if c2, e2 := spawnDetached(o.TargetExe, args, handoffLogPath(o.DataDir)); e2 == nil {
-			logf("已回滚并重新启动旧版本 (pid=%d)", c2.Process.Pid)
+		if _, e2 := startTarget(o, logf); e2 == nil {
+			logf("已回滚并重新启动旧版本")
 		} else {
 			logf("回滚后启动旧版本也失败: %v", e2)
 		}
 		return err
 	}
-	logf("新版本进程已拉起 pid=%d", cmd.Process.Pid)
+	if cmd != nil {
+		logf("新版本进程已拉起 pid=%d", cmd.Process.Pid)
+	}
 
 	// ---- 4. 健康检查（比对版本）----
 	url := healthURL(o.Listen)
@@ -340,8 +402,8 @@ func RunHandoff(o HandoffOptions) error {
 	})
 	if err := waitHealthy(url, o.WantVersion, 25*time.Second); err != nil {
 		logf("新版本未通过健康检查: %v", err)
-		// 先杀掉这个起不来的子进程，否则回滚后的旧版抢不到端口
-		_ = cmd.Process.Kill()
+		// 先停掉这个起不来的进程，否则回滚后的旧版抢不到端口
+		stopTarget(o, cmd)
 		time.Sleep(500 * time.Millisecond)
 		rollback()
 		WriteUpdateState(o.DataDir, UpdateState{
@@ -349,11 +411,11 @@ func RunHandoff(o HandoffOptions) error {
 			Detail: "新版本未通过健康检查，已回滚",
 			Error:  err.Error(),
 		})
-		if c2, e2 := spawnDetached(o.TargetExe, args, handoffLogPath(o.DataDir)); e2 == nil {
+		if _, e2 := startTarget(o, logf); e2 == nil {
 			if h2 := waitHealthy(url, "", 20*time.Second); h2 != nil {
 				logf("回滚后旧版本也没起来: %v", h2)
 			} else {
-				logf("已回滚，旧版本恢复正常 (pid=%d)", c2.Process.Pid)
+				logf("已回滚，旧版本恢复正常")
 			}
 		} else {
 			logf("回滚后启动旧版本失败: %v", e2)
@@ -395,6 +457,9 @@ func startHandoff(o HandoffOptions) error {
 		"--handoff-version=" + o.WantVersion,
 		"--listen", o.Listen,
 		"--data", o.DataDir,
+	}
+	if o.Service != "" {
+		args = append(args, "--handoff-service="+o.Service)
 	}
 	cmd := exec.Command(o.SelfExe, args...)
 	cmd.Env = append(os.Environ(), handoffEnv+"=1")

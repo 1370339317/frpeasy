@@ -175,6 +175,10 @@ func (p *Panel) doPanelUpdate(manifest *shared.Manifest, asset *shared.Asset, ex
 		NewExe:      newPath,
 		WantVersion: to,
 		SelfExe:     handoffExe,
+		// 由 systemd unit 的 Environment 注入。非空时交接器改用 systemctl 启停，
+		// 因为 unit 配的是 Restart=on-failure，面板 exit 0 退出后 systemd 不会
+		// 自动重启 —— 必须有人显式 start，否则服务就停在那儿了。
+		Service: strings.TrimSpace(os.Getenv(shared.EnvService)),
 	}); err != nil {
 		_ = os.Remove(newPath)
 		stage("failed", "拉起交接进程失败", err.Error())

@@ -1,0 +1,41 @@
+[Unit]
+Description=frpeasy - frp 可视化面板
+Documentation=https://github.com/1370339317/frpeasy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@@PREFIX@@
+ExecStart=@@PREFIX@@/frpeasy-panel --data @@PREFIX@@/data --listen @@LISTEN@@
+Environment=FRPEASY_SERVICE=frpeasy.service
+Environment=FRPEASY_UPDATE_BASE=@@UPDATE_BASE@@
+
+# Restart=on-failure 而不是 always —— 这不是风格选择，是自更新的前提。
+#
+# 面板点「更新」后，旧进程会把交接器拉起来然后自己 exit 0 退出。用 on-failure 时
+# systemd 认为「正常退出」不重启，交接器于是有一段干净的时间去替换二进制；
+# 换完它再 systemctl start 把新版本拉起来，并轮询 /api/healthz 比对版本号，
+# 起不来就换回 .prev 再 start。
+#
+# 改成 always 会怎样：systemd 立刻重启一份，和交接器拉起的那份抢同一个端口，
+# 必有一个 bind 失败；更坏的情况是旧版本抢先占住端口，交接器把新版本的启动
+# 失败误判成「新版本有问题」，于是回滚 —— 更新永远升不上去，日志还会说是
+# 新版本的错。
+Restart=on-failure
+RestartSec=2
+
+# KillMode=process 同样是为了自更新。
+#
+# 交接器是面板的子进程，和面板在同一个 cgroup 里。默认策略（control-group）
+# 在服务停止时会把整个 cgroup 清掉，正好在「面板已退出、交接器准备换文件」
+# 这个最脆弱的时刻把交接器一起杀掉 —— 结果是面板消失且没人负责恢复。
+#
+# 代价是 systemctl stop 不会连带清理面板自己拉起的 frps 子进程，
+# 所以面板的 Shutdown 必须自己停 frps（它确实会）。
+KillMode=process
+
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

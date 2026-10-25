@@ -21,7 +21,43 @@ Android（arm64-v8a / armeabi-v7a，复用 linux 静态产物）。
 ## 快速开始
 
 完整步骤见 [QUICKSTART.md](QUICKSTART.md)（本地体验 → 实机部署 → 客户端安装与升级）。
-最短路径：
+
+### 方式一：一条命令装到服务器（Alpine / Debian / Ubuntu / 群晖）
+
+```bash
+curl -fsSL https://github.com/1370339317/frpeasy/releases/latest/download/deploy.sh | sudo bash
+```
+
+它会拉最新版、校验 sha256、装到 `/opt/frpeasy`、注册 systemd 并启动，
+同时把更新源写进服务环境变量 —— 之后在面板里点「更新」就能自动升级。
+
+改端口或目录：
+
+```bash
+curl -fsSL .../deploy.sh | sudo PORT=9000 bash
+curl -fsSLO .../deploy.sh && sudo bash deploy.sh --port 9000 --prefix /srv/frpeasy
+```
+
+### 方式二：下载绿色包手动跑
+
+在 [Releases](https://github.com/1370339317/frpeasy/releases) 里按平台下载
+`frpeasy-panel-<版本>-linux-<架构>.tar.gz`，解压得到三样东西：
+
+```
+frpeasy-panel     静态编译的可执行文件，不依赖运行库
+frpeasy.service   systemd unit（已填好 /opt/frpeasy 和 :8080）
+README.txt        怎么跑、端口要开哪些
+```
+
+```bash
+tar xzf frpeasy-panel-*-linux-amd64.tar.gz
+chmod +x frpeasy-panel
+./frpeasy-panel --data ./data --listen :8080
+```
+
+Windows 直接下 `frpeasy-panel-windows-amd64.exe`，双击就跑。
+
+### 方式三：从源码构建
 
 ```bash
 cd web && npm ci && npm run build && cd ..   # 前端产物不入库，首次必须构建
@@ -87,3 +123,17 @@ bash agent-update-e2e.sh     # 17 条客户端自更新断言
    （清单版本比客户端新，于是不停下发）。`make build` 里的 `stage-local`
    就会覆盖 `bin/` 里同平台的 agent 而不更新清单——这是最常见的失配来源。
    所有 `go build` 都带 `-trimpath`，保证同一源码在不同目录构建出字节相同的产物。
+9. **更新源的初始值来自 `FRPEASY_UPDATE_BASE`，但只在数据库里该值为空时生效。**
+   `update_base` 为空串的语义是「不检查更新」，所以一键部署脚本靠这个环境变量
+   把面板接到 Release 上；而用户在设置页手改过之后，DB 里有值，重启不再覆盖他。
+   这条链断了不会报错，只会表现为「点检查更新什么都不发生」。
+10. **systemd 托管时，交接器必须用 `systemctl` 启停，不能自己 spawn。**
+    配套的 unit 必须是 `Restart=on-failure` + `KillMode=process`：
+    - `on-failure`：面板交接时 exit 0 主动退出，systemd 不重启，
+      给交接器一段干净的时间换文件；用 `always` 会和交接器抢端口，
+      更坏的情况是旧版抢先占端口，导致升级被误判失败而永远回滚。
+    - `process`：交接器是面板的子进程、同一 cgroup，默认策略会在服务停止时
+      把它一起清掉——正好在「面板已退出、交接器要换文件」这个最脆弱的时刻。
+    - 反过来，交接器若自己 `spawn`，起来的进程不在 unit 的 cgroup 里，
+      `systemctl status/stop` 管不到，下次重启就两份进程抢端口。
+   `startTarget`/`stopTarget` 与三个测试守着这条。

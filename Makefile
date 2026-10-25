@@ -14,7 +14,13 @@ GOARCH_LOCAL      := $(shell go env GOARCH)
 EXE_SUFFIX        := $(if $(filter windows,$(GOOS_LOCAL)),.exe,)
 LOCAL_AGENT_ASSET := $(BIN_DIR)/$(BINARY_AGENT)-$(GOOS_LOCAL)-$(GOARCH_LOCAL)$(EXE_SUFFIX)
 DATA_DIR      ?= ./data
-VERSION       ?= 0.4.1
+VERSION       ?= 0.5.0
+
+# 发布相关的仓库信息。改仓库就要改这里 —— 它同时决定：
+#   - 绿色包 systemd unit 里写死的更新源（FRPEASY_UPDATE_BASE）
+#   - 一键部署脚本 deploy.sh 里嵌的默认下载地址
+REPO_SLUG     ?= 1370339317/frpeasy
+UPDATE_BASE   ?= https://github.com/$(REPO_SLUG)/releases/latest/download
 
 # 构建时间注入二进制：面板侧栏会显示它。
 # go:embed 是编译期把 UI 打进二进制，改了前端却没重新 build 时页面会一直是旧的，
@@ -30,7 +36,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
 #     哈希只对「我这台机器这一次构建」成立。
 BUILD_FLAGS := -trimpath
 
-.PHONY: all build stage-local web web-install web-dev dev-ui build-alpine build-alpine-amd64 build-alpine-arm64 build-arm build-386 build-windows build-android stage-agent manifest check-manifest dist run tidy clean
+.PHONY: all build stage-local web web-install web-dev dev-ui build-alpine build-alpine-amd64 build-alpine-arm64 build-arm build-386 build-windows build-android stage-agent manifest check-manifest bundle dist run tidy clean
 
 all: build
 
@@ -92,9 +98,15 @@ build-arm:
 build-386:
 	CGO_ENABLED=0 GOOS=linux GOARCH=386 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-linux-386 ./cmd/agent
 
+# Windows 产物。面板也发 Windows 版：
+# 很多人是「下载 exe 双击就跑」，不给 panel 产物，他就只能看到客户端而装不上服务端。
+# 自更新在 Windows 同样可用 —— swapBinary 用的是 rename，
+# Windows 允许重命名正在运行的 exe（但不允许覆盖）。
 build-windows:
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-windows-amd64.exe ./cmd/agent
 	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_AGENT)-windows-arm64.exe ./cmd/agent
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_PANEL)-windows-amd64.exe ./cmd/panel
+	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build $(BUILD_FLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_PANEL)-windows-arm64.exe ./cmd/panel
 
 # Android 客户端：Go 没有 GOOS=android 的可执行构建，android 的 arm64-v8a /
 # armeabi-v7a 直接跑 linux 静态二进制（frp 官方对 Android 也是这么发的）。
@@ -149,11 +161,17 @@ manifest:
 check-manifest:
 	go run ./cmd/genmanifest -dir $(BIN_DIR) -verify
 
-# 一条命令做出可发布的目录：全部平台产物 + 清单
-dist: build-alpine manifest
+# 绿色包：每个 linux 面板产物打一个 tar.gz（二进制 + systemd unit + 使用说明）。
+# 人手动下载时用这个；裸二进制留给一键脚本和自更新。
+bundle:
+	bash tools/make_bundle.sh $(BIN_DIR) $(VERSION) $(BIN_DIR)/bundles "$(UPDATE_BASE)"
+
+# 一条命令做出可发布的目录：全部平台产物 + 清单 + 绿色包
+dist: build-alpine manifest bundle
 	@echo ""
 	@$(MAKE) --no-print-directory check-manifest
 	@echo "发布目录 $(BIN_DIR)/ 已就绪（含 manifest.json，已校验）。"
+	@echo "绿色包在 $(BIN_DIR)/bundles/（人下载用）；裸二进制给脚本和自更新用。"
 	@echo "上传后把更新源填成：https://<你的静态地址>/  （目录即可，不必写文件名）"
 	@echo ""
 	@echo "注意：上传前若又重建过任何产物，务必重跑 make manifest && make check-manifest。"

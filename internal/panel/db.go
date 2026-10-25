@@ -3,7 +3,9 @@ package panel
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"strconv"
+	"strings"
 
 	"frpeasy/internal/shared"
 
@@ -122,6 +124,22 @@ func (db *DB) initSettings() error {
 		_ = db.QueryRow("SELECT COUNT(*) FROM settings WHERE key=?", k).Scan(&cnt)
 		if cnt == 0 {
 			if _, err := db.Exec("INSERT INTO settings(key,value) VALUES(?,?)", k, v); err != nil {
+				return err
+			}
+		}
+	}
+	// 环境变量只作为「库里没有值时」的初始值，不覆盖用户已保存的设置。
+	//
+	// 存在的理由：一键部署脚本（scripts/deploy.sh）装 systemd 服务时会把
+	// 仓库的 Release 地址写进 Environment。没有这段，面板装完 update_base 是空串
+	// —— 而空串的语义是「不检查更新」，于是用户在面板里点「检查更新」什么都不会
+	// 发生，看起来像功能坏了，其实只是没告诉它去哪找。
+	//
+	// 之所以不直接 override：用户在设置页手动改过源之后，DB 里就有值了，
+	// 重启不该把他的手改冲掉。想换源就改 DB 里的值，而不是改 systemd。
+	if v := strings.TrimSpace(os.Getenv(shared.EnvUpdateBase)); v != "" {
+		if db.GetSetting("update_base") == "" {
+			if err := db.SetSetting("update_base", v); err != nil {
 				return err
 			}
 		}

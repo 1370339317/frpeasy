@@ -246,40 +246,116 @@ bash agent-update-e2e.sh     # 17 条客户端自更新断言：下载校验替�
 
 ---
 
-## 八、发布版本（面板 / 客户端自动更新都依赖它）
+## 八、装到服务器（三种方式，任选其一）
+
+### 方式 A：一条命令（推荐）
+
+Alpine / Debian / Ubuntu / 群晖都能用：
+
+```bash
+curl -fsSL https://github.com/1370339317/frpeasy/releases/latest/download/deploy.sh | sudo bash
+```
+
+它依次做：拉最新版的 `manifest.json` → 挑出本机平台的面板产物 → 下载 →
+**校验 sha256 与文件大小** → 跑一次 `--build` 预检确认这份二进制真能执行 →
+停掉旧实例 → 装到 `/opt/frpeasy` → 写 systemd unit 并启动 → 轮询
+`/api/healthz` 确认真的起来了。
+
+默认可改（环境变量或命令行都行）：
+
+```bash
+# 换端口
+curl -fsSL .../deploy.sh | sudo PORT=9000 bash
+
+# 换目录 + 换端口（先落盘再执行，参数写法更顺）
+curl -fsSLO https://github.com/1370339317/frpeasy/releases/latest/download/deploy.sh
+sudo bash deploy.sh --port 9000 --prefix /srv/frpeasy
+
+# 不注册 systemd，只放二进制
+curl -fsSL .../deploy.sh | sudo NO_SERVICE=1 bash
+```
+
+**重复执行就是升级**：二进制换掉，`data` 目录（含数据库）原样保留，
+旧二进制备份成 `frpeasy-panel.prev`，新版起不来可以立刻换回去。
+
+### 方式 B：绿色包（不想跑脚本 / 想自己控制进程）
+
+在 Releases 页按平台下载 `frpeasy-panel-<版本>-linux-<架构>.tar.gz`，解压得到：
+
+```
+frpeasy-panel     静态编译，不依赖运行库
+frpeasy.service   systemd unit（已填好 /opt/frpeasy 和 :8080）
+README.txt        怎么跑、要开哪些端口
+```
+
+```bash
+tar xzf frpeasy-panel-*-linux-amd64.tar.gz
+chmod +x frpeasy-panel
+./frpeasy-panel --data ./data --listen :8080     # 直接前台跑
+```
+
+要开机自启就把 `frpeasy.service` 拷到 `/etc/systemd/system/` 后
+`systemctl enable --now frpeasy`。
+
+Windows 下 `frpeasy-panel-windows-amd64.exe` 双击即可（单文件，配置落在旁边的 `data/`）。
+
+### 方式 C：源码构建
+
+见本文第一、二节。
+
+### 装完之后：更新源是自动配好的
+
+方式 A 会把仓库的 Release 地址写进 systemd unit 的
+`Environment=FRPEASY_UPDATE_BASE=...`。面板启动时读取它 —— **仅当数据库里
+该值为空时生效**，所以你在设置页手改过之后，重启不会把你的改动冲掉。
+
+如果用的是方式 B 裸跑，启动时带上这个变量即可：
+
+```bash
+FRPEASY_UPDATE_BASE='https://github.com/1370339317/frpeasy/releases/latest/download'   ./frpeasy-panel --data ./data --listen :8080
+```
+
+没配也能用，只是「检查更新」会显示「未配置更新源」——那不是故障，
+只是没告诉它去哪找。
+
+---
+
+## 九、发布新版本（维护者看）
 
 更新源就是一个**放 `manifest.json` 加各平台二进制的静态目录**，不需要 API、
 不需要 token、不会被限流。GitHub Release、自己 nginx、对象存储都行。
 
-### 一条命令打包
+### 打 tag 就自动发（已配好 GitHub Actions）
 
 ```bash
-make dist VERSION=0.4.2 NOTES="这次改了什么"
+git tag v0.5.1 && git push origin v0.5.1
 ```
 
-它做三件事：交叉编译全部平台到 `bin/` → 生成 `bin/manifest.json`（含每个文件的
-sha256）→ **立刻校验清单与文件是否严格一致**。任何一步不过都会非 0 退出。
+`.github/workflows/release.yml` 会自动：构建前端 → 跑单元测试 →
+交叉编译 10 个产物 → 生成清单 → 打绿色包 → 算 SHA256SUMS →
+建 Release 并上传全部资产。用的是仓库内置 token，不用配 secret。
 
-### 上传到 GitHub Release
+**别手工往 Release 里拖文件**，漏传一个 `manifest.json` 就会让所有客户端
+和面板都升不上去，而且没有任何报错。
+
+### 想本地打一遍
 
 ```bash
-git tag v0.4.2 && git push origin v0.4.2
+make dist VERSION=0.5.1 NOTES="这次改了什么"
 ```
 
-然后在 GitHub 网页建 Release、选这个 tag，把 `bin/` 下的 **9 个文件**
-（8 个平台产物 + `manifest.json`）全部作为 Assets 上传。
+交叉编译全部平台到 `bin/` → 生成 `bin/manifest.json`（含每个文件的 sha256）→
+打绿色包到 `bin/bundles/` → **立刻校验清单与文件是否严格一致**。
+任何一步不过都会非 0 退出。
 
-更新源填这一行就够（`latest` 永远指向最新 Release）：
-
-```
-https://github.com/<你>/frpeasy/releases/latest/download
-```
-
-自建静态目录同理，填目录本身，不要填到文件名：
+### 更新源填什么
 
 ```
-https://example.com/frpeasy/
+https://github.com/1370339317/frpeasy/releases/latest/download
 ```
+
+`latest` 永远指向最新 Release，以后发版都不用改这个地址。
+自建静态目录就填目录本身，不要填到文件名。
 
 ### 发布前的两条硬规矩
 
@@ -289,15 +365,24 @@ https://example.com/frpeasy/
    覆盖进 `bin/` 且不更新清单。上传前养成习惯：
 
 ```bash
-make manifest VERSION=0.4.2 && make check-manifest
+make manifest VERSION=0.5.1 && make check-manifest
 ```
 
 `check-manifest` 会逐个核对 sha256 与大小，并检查目录里有没有清单未登记的产物。
-它报错时**不要**跳过——客户端拿到哈希不符的包会抛错拒装，现象是「升级一直失败」，
+它报错时**不要**跳过：客户端拿到哈希不符的包会抛错拒装，现象是「升级一直失败」，
 而面板侧看起来一切正常（清单版本比客户端新，于是不停下发）。
 
-### 首次发布的特殊情况
+### 客户端自更新的自举限制
 
-客户端自更新有自举限制：**装着的版本若早于「支持自更新的那一版」，它不认识
-心跳里的 `agent_update` 字段，只能靠重跑一次安装命令进入自动更新通道。**
-面板「客户端」页把这种显示为「旧版（未上报版本）」，不是故障。
+装着的版本若早于「支持自更新的那一版」，它不认识心跳里的 `agent_update` 字段，
+**只能靠重跑一次安装命令**进入自动更新通道。面板「客户端」页把这种显示为
+「旧版（未上报版本）」，不是故障。
+
+### CI 会跑什么
+
+每次推 main：构建前端 → `go test` → `make dist` → `tests/deploy-smoke.sh`
+（在 ubuntu runner 上用一个本地静态目录冒充 Release，真跑一遍一键部署：
+安装、启动、healthz、重复执行幂等、篡改产物必须被拒）。
+
+`it.sh` / `e2e.sh` 还没进 CI —— 它们里面有给 Windows 开发机写的进程清理，
+在 Linux 上未实测过，不想让 CI 因为无关原因变红。

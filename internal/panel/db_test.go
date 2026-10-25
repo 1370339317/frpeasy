@@ -182,3 +182,49 @@ func TestAgentVersionPersisted(t *testing.T) {
 		t.Fatalf("列表里的 agent 版本不对: %q", list[0].AgentVersion)
 	}
 }
+
+// TestUpdateBaseFromEnv 覆盖一键部署脚本依赖的语义：
+// 环境变量只在库里**没有值**时提供初始值，绝不覆盖用户手动保存的设置。
+//
+// 这条链断了不会报错，只会表现为「面板里点检查更新什么都不发生」
+// （update_base 为空 = 不检查更新），所以必须有测试守着。
+func TestUpdateBaseFromEnv(t *testing.T) {
+	const want = "https://github.com/o/r/releases/latest/download"
+
+	t.Run("首次安装用环境变量", func(t *testing.T) {
+		t.Setenv(shared.EnvUpdateBase, want)
+		db := newTestDB(t)
+		if got := db.GetSetting("update_base"); got != want {
+			t.Fatalf("update_base = %q, 期望环境变量的值 %q", got, want)
+		}
+	})
+
+	t.Run("已有设置不被覆盖", func(t *testing.T) {
+		// 先在无环境变量时建库（= 用户装完什么也没填）
+		db := newTestDB(t)
+		if got := db.GetSetting("update_base"); got != "" {
+			t.Fatalf("初始值应为空串，得到 %q", got)
+		}
+		// 用户手动填了一个源
+		const manual = "https://example.com/frpeasy/"
+		if err := db.SetSetting("update_base", manual); err != nil {
+			t.Fatal(err)
+		}
+		// 之后 systemd 注入环境变量再重启 —— 不能把用户的手改冲掉
+		t.Setenv(shared.EnvUpdateBase, want)
+		if err := db.initSettings(); err != nil {
+			t.Fatal(err)
+		}
+		if got := db.GetSetting("update_base"); got != manual {
+			t.Fatalf("手动设置被覆盖: %q -> %q", manual, got)
+		}
+	})
+
+	t.Run("环境变量为空时保持空串", func(t *testing.T) {
+		t.Setenv(shared.EnvUpdateBase, "")
+		db := newTestDB(t)
+		if got := db.GetSetting("update_base"); got != "" {
+			t.Fatalf("应为空串（=不检查更新），得到 %q", got)
+		}
+	})
+}

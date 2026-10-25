@@ -23,3 +23,18 @@ const (
 	// Agent 心跳间隔（秒）
 	HeartbeatIntervalSec = 15
 )
+
+// 环境变量名。面板与部署脚本（scripts/deploy.sh）、systemd unit 之间的显式契约，
+// 改这里就必须同步改那两个地方，否则一键部署装完「点更新」会静默无效。
+const (
+	// EnvUpdateBase 提供 update_base 的初始值。
+	// 仅当数据库里该值为空时生效，不覆盖用户在面板里手动保存过的设置。
+	EnvUpdateBase = "FRPEASY_UPDATE_BASE"
+
+	// EnvService 是 systemd unit 名（如 frpeasy.service），由 unit 的 Environment 注入。
+	//
+	// 非空意味着「本进程归 systemd 管」，交接器于是改用 systemctl 启停，
+	// 而不是自己 spawn —— 否则起来的进程不在 unit 的 cgroup 里，
+	// systemctl status/stop 管不到它，下次重启就两份进程抢端口。
+	EnvService = "FRPEASY_SERVICE"
+)

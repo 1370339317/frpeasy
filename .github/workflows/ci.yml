@@ -1,0 +1,44 @@
+name: ci
+
+# 每次推到 main 都跑一遍完整验证。
+# 重点是 deploy-smoke：一键部署脚本和自更新只在 Linux 上才真正跑得起来，
+# 而日常开发在 Windows 上 —— 没有这条流水线，那段代码永远是「写完没验过」。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建前端
+        run: cd web && npm ci && npm run build
+
+      - name: 单元测试
+        run: go test ./... -count=1
+
+      - name: 构建发布产物 + 清单 + 绿色包
+        run: make dist VERSION=0.0.0-ci NOTES="CI 构建（非发布）"
+
+      - name: 一键部署脚本端到端冒烟
+        run: bash tests/deploy-smoke.sh
+
+      # it.sh / e2e.sh 暂不进 CI：它们里面有为 Windows 开发机写的进程清理
+      # （taskkill 之类），在 ubuntu runner 上虽有 `|| true` 兜底没炸过，
+      # 但没实测过。等这两个脚本真正跨平台化之后再接进来，
+      # 免得 CI 变红而原因和本次改动无关。

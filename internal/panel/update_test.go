@@ -622,3 +622,84 @@ func TestPanelBaseAppendsListenPort(t *testing.T) {
 		}
 	}
 }
+
+// --- 交接器在 systemd 下的行为 ---
+
+// TestStartTargetSystemdMode 验证 systemd 托管时走 systemctl 而不是自己 spawn。
+//
+// 这条分支错了不会编译失败、也不会在裸运行时出错，只在「一键部署到服务器后
+// 点更新」那一刻暴露：单元配的是 Restart=on-failure，面板 exit 0 退出后
+// systemd 不会重启，而交接器若还不 systemctl start，服务就永久停在那儿。
+func TestStartTargetSystemdMode(t *testing.T) {
+	var calls []string
+	old := runSystemctl
+	runSystemctl = func(args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return nil, nil
+	}
+	defer func() { runSystemctl = old }()
+
+	o := HandoffOptions{
+		Service:   "frpeasy.service",
+		TargetExe: filepath.Join(t.TempDir(), "not-there"),
+		Listen:    "127.0.0.1:0",
+		DataDir:   t.TempDir(),
+	}
+	cmd, err := startTarget(o, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("systemd 模式启动失败: %v", err)
+	}
+	if cmd != nil {
+		t.Error("systemd 模式不该返回 *exec.Cmd（进程由 systemd 拉起，我们拿不到句柄）")
+	}
+	if len(calls) != 1 || calls[0] != "start frpeasy.service" {
+		t.Fatalf("systemctl 调用序列 = %v，期望 [start frpeasy.service]", calls)
+	}
+
+	stopTarget(o, nil)
+	if len(calls) != 2 || calls[1] != "stop frpeasy.service" {
+		t.Fatalf("stop 调用序列 = %v，期望追加一条 stop frpeasy.service", calls)
+	}
+}
+
+// TestStartTargetBareModeSkipsSystemctl 验证没配 Service 时绝不碰 systemctl。
+// 裸运行（绿色包 / 宝塔 / docker 前台）的机器上可能根本没有 systemd。
+func TestStartTargetBareModeSkipsSystemctl(t *testing.T) {
+	var calls []string
+	old := runSystemctl
+	runSystemctl = func(args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return nil, nil
+	}
+	defer func() { runSystemctl = old }()
+
+	// 目标不存在，spawn 必然失败 —— 这里只关心「有没有走 systemctl 分支」
+	_, _ = startTarget(HandoffOptions{
+		TargetExe: filepath.Join(t.TempDir(), "not-there"),
+		Listen:    "127.0.0.1:0",
+		DataDir:   t.TempDir(),
+	}, func(string, ...any) {})
+
+	if len(calls) != 0 {
+		t.Fatalf("裸运行模式不该调用 systemctl，实际调用了 %v", calls)
+	}
+}
+
+// TestStartTargetSystemctlErrorSurfaced 验证 systemctl 失败时把它的输出带出来。
+// 只回一句 "exit status 1" 会让人无从下手，而 stderr 里通常写着原因
+// （unit 不存在 / 权限不足 / 依赖失败）。
+func TestStartTargetSystemctlErrorSurfaced(t *testing.T) {
+	old := runSystemctl
+	runSystemctl = func(args ...string) ([]byte, error) {
+		return []byte("Failed to start frpeasy.service: Unit not found."), fmt.Errorf("exit status 5")
+	}
+	defer func() { runSystemctl = old }()
+
+	_, err := startTarget(HandoffOptions{Service: "frpeasy.service"}, func(string, ...any) {})
+	if err == nil {
+		t.Fatal("systemctl 失败时必须返回错误")
+	}
+	if !strings.Contains(err.Error(), "Unit not found") {
+		t.Errorf("错误里应包含 systemctl 的原始输出，实际: %v", err)
+	}
+}
