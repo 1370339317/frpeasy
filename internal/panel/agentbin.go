@@ -2,6 +2,7 @@ package panel
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -250,8 +251,20 @@ func (p *Panel) agentBinFor(path string) *agentBinInfo {
 	info := &agentBinInfo{Path: path, Size: st.Size(), ModTime: st.ModTime()}
 	// 版本探测：安装脚本在替换旧二进制前也是这么做的，能同时验证
 	// "文件完整、架构匹配、有可执行权限"三件事。
+	//
+	// 但**跨平台探测注定失败**：Linux 面板上放着 windows 的 .exe，exec 一定报错。
+	// 这时退到下载时写下的版本戳（<name>.fromver）—— 否则版本恒为空，
+	// 面板既算不出"几台落后"，也说不清"能下发哪一版"，前面就踩过两次。
+	// 戳只由 ensureAgentBin 在下载成功后写入，手工放置的文件没有戳，仍走探测。
 	if ver, verr := probeAgentVersion(path); verr != nil {
-		info.Err = "无法取 agent 版本（" + verr.Error() + "）"
+		if stamp, serr := os.ReadFile(path + cacheStampSuffix); serr == nil {
+			if v := strings.TrimSpace(string(stamp)); v != "" {
+				info.Version = v
+			}
+		}
+		if info.Version == "" {
+			info.Err = "无法取 agent 版本（" + verr.Error() + "）"
+		}
 	} else {
 		info.Version = ver
 	}
@@ -259,6 +272,14 @@ func (p *Panel) agentBinFor(path string) *agentBinInfo {
 		info.SHA256 = sha
 	} else if info.Err == "" {
 		info.Err = "计算 agent 哈希失败: " + serr.Error()
+	}
+	// 最后一步求证：手工放进来的文件没有版本戳，但字节与清单里某项完全一致时，
+	// 版本就等于清单登记的版本。只用**已缓存**的清单，绝不在这条路径上出网。
+	if info.Version == "" && info.SHA256 != "" {
+		if v, ok := p.versionBySHA(info.SHA256); ok {
+			info.Version = v
+			info.Err = ""
+		}
 	}
 
 	p.agentBinMu.Lock()
@@ -271,6 +292,63 @@ func (p *Panel) agentBinFor(path string) *agentBinInfo {
 }
 
 // ---- 客户端（agent）升级 ----
+
+// cachedManifest 只读已缓存的清单，绝不触发网络请求。
+//
+// 心跳路径（agentUpdateFor）绝对不能因为拉清单而阻塞：客户端 15 秒一次心跳，
+// 卡住一次就可能被判离线。需要新鲜清单的地方走 currentManifest(force)。
+func (p *Panel) cachedManifest() *shared.Manifest {
+	p.manifestMu.Lock()
+	defer p.manifestMu.Unlock()
+	if p.manifestInfo == nil {
+		return nil
+	}
+	return p.manifestInfo.Manifest
+}
+
+// versionBySHA 用文件哈希向清单求证版本。拿不到清单或没匹配上返回 false。
+func (p *Panel) versionBySHA(sha string) (string, bool) {
+	m := p.cachedManifest()
+	if m == nil || sha == "" {
+		return "", false
+	}
+	for _, a := range m.Assets {
+		if strings.EqualFold(a.SHA256, sha) {
+			return m.Version, true
+		}
+	}
+	return "", false
+}
+
+// agentCacheBehind 缓存里的那份是否落后于清单登记的版本。
+func (p *Panel) agentCacheBehind(osName, arch string) bool {
+	m := p.cachedManifest()
+	if m == nil {
+		return false
+	}
+	if _, err := m.SelectAsset(shared.AssetAgent, osName, arch); err != nil {
+		return false
+	}
+	path := p.resolveAgentBin(osName, arch)
+	if path == "" {
+		return false
+	}
+	v := p.agentBinFor(path).Version
+	return v != "" && shared.IsNewer(m.Version, v)
+}
+
+// refreshAgentCacheAsync 后台把某平台的缓存刷新到清单版本。
+//
+// 放后台的原因：心跳 15 秒一次，不能为了下 6MB 而把它卡住；刷好之后
+// 下一次心跳自然会把升级指令带出去。ensureAgentBin 内部有全局锁，
+// 多个心跳同时触发也只会真正下一次。
+func (p *Panel) refreshAgentCacheAsync(osName, arch string) {
+	go func() {
+		if _, err := p.ensureAgentBin(osName, arch); err != nil {
+			log.Printf("[agent] 刷新 %s/%s 缓存失败: %v", osName, arch, err)
+		}
+	}()
+}
 
 // resolveAgentBin 按客户端上报的平台找到面板要下发的那个文件。
 //
@@ -291,6 +369,14 @@ func (p *Panel) agentUpdateFor(r *http.Request, ag *shared.Agent) *shared.AgentU
 	}
 	path := p.resolveAgentBin(ag.Os, ag.Arch)
 	if path == "" {
+		return nil
+	}
+	// 缓存可能落后于清单（面板刚发版，还没有客户端来取过新文件）。
+	// 这时候必须先换缓存再下发：拿新版本号配旧文件的 sha/大小，客户端下完
+	// --version 对不上，会失败并退避 30 分钟；而什么都不做则老客户端永远停在旧版。
+	// 刷新放后台，这一轮不下发，文件换好后的下一次心跳自然会带上升级指令。
+	if p.agentCacheBehind(ag.Os, ag.Arch) {
+		p.refreshAgentCacheAsync(ag.Os, ag.Arch)
 		return nil
 	}
 	// 版本号必须取自**这份将要下发的文件**，不能取面板本机平台那份：
