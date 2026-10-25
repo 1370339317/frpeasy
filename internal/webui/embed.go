@@ -16,9 +16,14 @@ import (
 	"strings"
 )
 
-// dist 必须存在，否则 go:embed 直接编译失败。仓库里保留了一份占位
-// index.html（内容提示「前端未构建」），这样没跑过 npm build 也能编译通过，
-// 只是打开页面会看到明确提示，而不是一个空白页或者构建错误。
+// dist 必须存在，否则 go:embed 直接编译失败。仓库里提交了一个空的
+// dist/.keep 占位：这样别人 clone 下来还没跑 npm build 也能 go build 通过，
+// 只是启动后根路径会返回一段「先跑 npm run build」的说明页
+// （见 panel/server.go 的 ui_source == "none" 分支），而不是构建错误或空白页。
+//
+// 注意 .keep 必须真的入库：它被 .gitignore 的 /internal/webui/dist/* 规则
+// 覆盖，只靠下一行的 ! 例外放行。删掉它或忘了提交，干净克隆就编不过，
+// 而本地因为目录里有构建产物，完全看不出问题 —— 这类缺陷只有 clone 才暴露。
 //
 //go:embed all:dist
 var distFS embed.FS
