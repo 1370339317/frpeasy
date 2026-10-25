@@ -227,9 +227,10 @@ fi
 grep -q "沿用安装目录" "$WORK/upg.log" && ok "日志说明沿用了原安装目录" \
   || { bad "没提示沿用目录"; tail -6 "$WORK/upg.log"; }
 [ -x "$UPG/frpeasy-panel" ] && ok "二进制装回原目录 $UPG" || bad "没装回原目录"
-grep -q -- "--data $UPGDATA" "$WORK/upg.log" && ok "数据目录沿用 $UPGDATA（不会读空库）" \
-  || bad "数据目录没沿用：$(grep -o -- '--data[^ ]*' "$WORK/upg.log" | head -1)"
-grep -q -- "--listen :7777" "$WORK/upg.log" && ok "监听端口沿用 :7777" || bad "端口没沿用"
+# NO_SERVICE 分支的提示行是 --data '/path'（带单引号），断言要连引号一起匹配
+grep -q -- "data '$UPGDATA'" "$WORK/upg.log" && ok "数据目录沿用 $UPGDATA（不会读空库）" \
+  || bad "数据目录没沿用：$(grep -o -- "--data[^ ]*" "$WORK/upg.log" | head -1)"
+grep -q -- "listen ':7777'" "$WORK/upg.log" && ok "监听端口沿用 :7777" || bad "端口没沿用"
 [ -f "$UPGDATA/frpeasy.db" ] && ok "原数据库完好" || bad "原数据库被动过"
 
 echo ""
