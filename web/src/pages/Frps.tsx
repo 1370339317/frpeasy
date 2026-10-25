@@ -182,6 +182,20 @@ export function Frps() {
           </span>
         </div>
 
+        {frps?.last_error && (
+          <div className="mt-3 rounded-[10px] border border-alert-bad-bd bg-bad-dim px-3.5 py-3 text-[12.5px] leading-[1.6] text-alert-bad-fg">
+            <div className="mb-1 font-semibold">
+              上次启动失败
+              {frps.last_error_at ? `（${new Date(frps.last_error_at).toLocaleString()}）` : ''}
+            </div>
+            <div className="break-all font-mono">{frps.last_error}</div>
+            <div className="mt-1.5 opacity-80">
+              常见原因：拉不到 frps（更新源 / 镜像不通）、frps 端口被别的进程占着、二进制版本不匹配。
+              改完点「启动」重试，成功后这条会消失。
+            </div>
+          </div>
+        )}
+
         <Hint>
           在线判定以 frps 自身的代理状态为准（通过只监听 127.0.0.1 的 dashboard 读取），不是靠客户端猜；dashboard
           不可用时才回退到「公网端口探活」。

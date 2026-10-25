@@ -76,6 +76,9 @@ export interface FrpsStatus {
   dashboard_ok: boolean
   dashboard_port: number | string
   dashboard_error: string
+  /** 最近一次启动失败的原因，成功启动后会清空 */
+  last_error?: string
+  last_error_at?: string
 }
 
 /** settings 是键值 map，后端直接把整张表返回（令牌已脱敏） */

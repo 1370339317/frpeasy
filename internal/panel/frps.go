@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,6 +46,20 @@ type FrpsManager struct {
 	stoppedByUser bool
 	logPath       string
 
+	// 最近一次「启动失败」的原因，供面板直接展示。
+	// 原来只写进 systemd 日志：用户在页面上只能看到一个永远转的「拉取中」，
+	// 必须 SSH 上去翻 journalctl 才知道是更新源不通、还是端口被占。
+	lastErr   string
+	lastErrAt time.Time
+
+	// CurrentVersion 的探测缓存。Status() 会被前端每 3 秒轮询一次，而
+	// CurrentVersion 在缺少 frps.version 文件时要 fork+exec `frps -v`；
+	// 不缓存就等于每 3 秒 fork 一个进程，且 exec 一旦挂住，整个状态接口
+	// 连同 Start() 一起永久阻塞（用户看到的就是「一直拉取中」）。
+	verMu  sync.Mutex
+	verKey string // 缓存键：二进制的 size+modtime，换过二进制就失效
+	verVal string
+
 	// dashboard（127.0.0.1）凭据与端口，用于读取真实代理状态
 	dashPort int
 
@@ -76,6 +91,10 @@ func (m *FrpsManager) versionPath() string {
 }
 
 // CurrentVersion 返回当前已安装的 frps 二进制版本。
+//
+// 三条路径，从快到慢：frps.version 文本 → 内存缓存 → 真的执行 `frps -v`。
+// 最后一步必须带超时：Status() 会被前端高频轮询，一旦这个 exec 挂住，
+// 状态接口和 Start() 就一起卡死，UI 永远停在「拉取中」。
 func (m *FrpsManager) CurrentVersion() string {
 	if b, err := os.ReadFile(m.versionPath()); err == nil {
 		v := strings.TrimSpace(string(b))
@@ -84,18 +103,38 @@ func (m *FrpsManager) CurrentVersion() string {
 		}
 	}
 	bin := m.binaryPath()
-	if fileExists(bin) {
-		out, err := exec.Command(bin, "-v").Output()
-		if err == nil {
-			v := strings.TrimSpace(string(out))
-			if v != "" {
-				_ = os.WriteFile(m.versionPath(), []byte(v), 0o644)
-				return v
-			}
-		}
+	st, err := os.Stat(bin)
+	if err != nil {
+		return ""
+	}
+	key := fmt.Sprintf("%d:%d", st.Size(), st.ModTime().UnixNano())
+	m.verMu.Lock()
+	if m.verKey == key && m.verVal != "" {
+		v := m.verVal
+		m.verMu.Unlock()
+		return v
+	}
+	m.verMu.Unlock()
+
+	// 5 秒足够任何正常二进制打印版本；超时就杀掉子进程并放弃探测，
+	// 返回 "ready"（有二进制但版本未知），绝不重下 —— 断网时把一份
+	// 能用的二进制"升级"掉，比版本号显示不准严重得多。
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, "-v").Output()
+	if err != nil {
+		log.Printf("[frps] 探测版本失败（%v），按「已就绪但版本未知」处理", err)
 		return "ready"
 	}
-	return ""
+	v := strings.TrimSpace(string(out))
+	if v == "" {
+		return "ready"
+	}
+	_ = os.WriteFile(m.versionPath(), []byte(v), 0o644)
+	m.verMu.Lock()
+	m.verKey, m.verVal = key, v
+	m.verMu.Unlock()
+	return v
 }
 
 // EnsureBinary 确保 frps 二进制存在且版本匹配，不存在或版本不一致则从 GitHub（可经镜像）拉取。
@@ -218,18 +257,24 @@ webServer.password = %q
 
 // Start 拉取二进制、生成配置并启动 frps 子进程。
 // 注意：下载可能耗时数分钟，期间不持锁，避免 Status()/面板 API 被阻塞。
-func (m *FrpsManager) Start() error {
+func (m *FrpsManager) Start() (err error) {
 	m.mu.Lock()
 	if m.running || m.starting {
 		m.mu.Unlock()
 		return nil
 	}
 	m.starting = true
+	m.lastErr, m.lastErrAt = "", time.Time{}
 	m.mu.Unlock()
 
 	defer func() {
 		m.mu.Lock()
 		m.starting = false
+		// 失败原因留在内存里给 UI 看：否则页面上只有一个转不完的「拉取中」，
+		// 用户只能 SSH 翻 journalctl 才知道到底卡在哪一步。
+		if err != nil {
+			m.lastErr, m.lastErrAt = err.Error(), time.Now()
+		}
 		m.mu.Unlock()
 	}()
 
@@ -336,6 +381,8 @@ func (m *FrpsManager) Status() map[string]any {
 	m.mu.Lock()
 	running := m.running
 	starting := m.starting
+	lastErr := m.lastErr
+	lastErrAt := m.lastErrAt
 	m.mu.Unlock()
 	bindPort, _ := strconv.Atoi(m.db.GetSetting("frps_bind_port"))
 	alive := false
@@ -347,7 +394,7 @@ func (m *FrpsManager) Status() map[string]any {
 		}
 	}
 	info := m.DashboardInfo()
-	return map[string]any{
+	st := map[string]any{
 		"running":         running,
 		"starting":        starting,
 		"port_alive":      alive,
@@ -360,6 +407,11 @@ func (m *FrpsManager) Status() map[string]any {
 		"dashboard_port":  info["port"],
 		"dashboard_error": info["error"],
 	}
+	if lastErr != "" {
+		st["last_error"] = lastErr
+		st["last_error_at"] = lastErrAt.Format(time.RFC3339)
+	}
+	return st
 }
 
 // TailLog 返回 frps 日志末尾最多 maxBytes 字节，供面板排障查看。
