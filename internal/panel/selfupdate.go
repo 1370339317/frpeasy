@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"frpeasy/internal/shared"
 )
 
 // 面板自我替换 —— 整个项目里唯一「失败就等于服务消失」的操作，因此代码刻意写得啰嗦。
@@ -459,3 +461,41 @@ func looksLikePanelExe(p string) bool {
 	base := strings.ToLower(filepath.Base(p))
 	return strings.Contains(base, "panel")
 }
+
+// healthzHandler GET /api/healthz（无需登录）
+//
+// 供交接进程与外部监控探活。必须如实回答两件事：我是什么版本、我是不是正在退出。
+// 交接进程靠 version 判断"响应我的到底是新进程还是还没退干净的旧进程"，
+// 少了这个字段，更新可能被误判为成功。
+func (p *Panel) healthzHandler(w http.ResponseWriter, r *http.Request) {
+	status := "ok"
+	if p.isShuttingDown() {
+		status = "shutting-down"
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"ok":      true,
+		"status":  status,
+		"version": p.version,
+		"built":   buildStamp,
+	})
+}
+
+// probeAgentVersion 执行 `<agent> --version` 并取出版本号。
+//
+// 抽成变量是为了可测：真实实现要 fork 一个平台二进制，测试里没法伪造
+// "一个能在这台机器上跑、又自报 0.4.0 的 agent"。注入假实现后，
+// agentUpdateFor 的判定逻辑（该不该下发、下发什么）才能被完整覆盖。
+var probeAgentVersion = func(path string) (string, error) {
+	out, err := exec.Command(path, "--version").Output()
+	if err != nil {
+		return "", err
+	}
+	f := strings.Fields(string(out))
+	if len(f) < 2 {
+		return "", fmt.Errorf("--version 输出格式异常: %s", strings.TrimSpace(string(out)))
+	}
+	return f[1], nil
+}
+
+// fetchFRPVersions 拉取 frp 可用版本列表（可替换，测试里避免出网）。
+var fetchFRPVersions = shared.FetchAvailableFRPVersions

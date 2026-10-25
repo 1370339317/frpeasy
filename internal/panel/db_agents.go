@@ -1,0 +1,234 @@
+package panel
+
+import (
+	"database/sql"
+	"encoding/json"
+	"time"
+
+	"frpeasy/internal/shared"
+)
+
+
+// --- Agents ---
+
+// 注：这里曾有一个 GetAgentByInstallToken（按 install_token 查已注册客户端），
+// 已删除。注册流程现在做两件事：
+//  1. 用 settings 里的**全局** install_token 比对（见 agentapi.go），
+//     所以不需要"按令牌反查是哪台机器"；
+//  2. 复用既有记录靠 FindAgentToReuse（名称 + 平台 + 内网 IP 交集），
+//     这比按令牌查更准 —— 客户端重装会换令牌，但机器名与 IP 不变。
+//
+// agents.install_token 列保留：已有部署的库里该列有值，删列要走迁移，
+// 收益不足以抵消风险。新写入时它只是留痕，不再参与任何判定。
+
+
+// FindAgentToReuse 找一个可以接管的既有客户端记录。判据：同名 + 同平台 +
+// 上报的内网 IP 有交集。加 IP 交集是为了避免「两台机器恰好同名」时互相顶掉。
+//
+// 为什么需要：Windows 客户端重装会删掉 ProgramData 下的状态文件，agent 于是重新
+// 注册；面板不接管就会不断堆出同名僵尸记录，且旧记录因为没人再发心跳而状态失真。
+func (db *DB) FindAgentToReuse(name, osName, arch string, ips []string) (*shared.Agent, bool) {
+	if len(ips) == 0 {
+		return nil, false
+	}
+	rows, err := db.Query("SELECT id, ips FROM agents WHERE name=? AND os=? AND arch=? ORDER BY COALESCE(last_seen,created_at) DESC", name, osName, arch)
+	if err != nil {
+		return nil, false
+	}
+	defer rows.Close()
+	newSet := make(map[string]bool, len(ips))
+	for _, ip := range ips {
+		newSet[ip] = true
+	}
+	for rows.Next() {
+		var id, ipsJSON string
+		if err := rows.Scan(&id, &ipsJSON); err != nil {
+			continue
+		}
+		for _, ip := range parseStringList(ipsJSON) {
+			if newSet[ip] {
+				return &shared.Agent{ID: id}, true
+			}
+		}
+	}
+	return nil, false
+}
+
+
+// ReattachAgent 用新注册发放的凭据接管既有记录（保留 id 与它绑定的隧道）。
+func (db *DB) ReattachAgent(a *shared.Agent) error {
+	ipsB, _ := json.Marshal(a.IPs)
+	_, err := db.Exec(
+		"UPDATE agents SET os=?, arch=?, install_token=?, agent_token=?, online=1, last_seen=CURRENT_TIMESTAMP, ips=?, frp_version=?, agent_version=? WHERE id=?",
+		a.Os, a.Arch, a.InstallToken, a.AgentToken, string(ipsB), a.FRPVersion, a.AgentVersion, a.ID,
+	)
+	return err
+}
+
+
+// DeleteAgent 删除客户端记录，并把它绑定的隧道解绑为草稿
+// （隧道名/公网端口在 frps 上是全局唯一的，留着悬空 agent_id 只会变成永远不部署的死隧道）。
+func (db *DB) DeleteAgent(id string) error {
+	// 解绑写空串而不是 NULL：表定义 agent_id 默认为 ''，「未绑定」的既有语义就是空串，
+	// 写 NULL 会让列表接口的 string 扫描直接报 converting NULL to string。
+	if _, err := db.Exec("UPDATE tunnels SET agent_id='' WHERE agent_id=?", id); err != nil {
+		return err
+	}
+	_, err := db.Exec("DELETE FROM agents WHERE id=?", id)
+	return err
+}
+
+
+func (db *DB) CreateAgent(a *shared.Agent) error {
+	ipsB, _ := json.Marshal(a.IPs)
+	_, err := db.Exec(
+		"INSERT INTO agents(id,name,os,arch,install_token,agent_token,online,created_at,services,ips,frp_version,agent_version) VALUES(?,?,?,?,?,?,1,CURRENT_TIMESTAMP,'',?,?,?)",
+		a.ID, a.Name, a.Os, a.Arch, a.InstallToken, a.AgentToken, string(ipsB), a.FRPVersion, a.AgentVersion,
+	)
+	return err
+}
+
+
+// UpdateAgentServices 持久化 Agent 最近一次探测到的本机服务。
+func (db *DB) UpdateAgentServices(id string, svcs []shared.DiscoveredService) error {
+	b, _ := json.Marshal(svcs)
+	_, err := db.Exec("UPDATE agents SET services=? WHERE id=?", string(b), id)
+	return err
+}
+
+
+// GetAgentServices 读取 Agent 探测到的本机服务列表。
+func (db *DB) GetAgentServices(id string) ([]shared.DiscoveredService, error) {
+	var s string
+	if err := db.QueryRow("SELECT services FROM agents WHERE id=?", id).Scan(&s); err != nil {
+		return nil, err
+	}
+	return parseServices(s), nil
+}
+
+
+func parseServices(s string) []shared.DiscoveredService {
+	if s == "" {
+		return nil
+	}
+	var out []shared.DiscoveredService
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+
+func parseStringList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+
+func (db *DB) GetAgent(id string) (*shared.Agent, error) {
+	a := &shared.Agent{}
+	var svc, ips, ver, aver string
+	var online int
+	var lastSeen, createdAt sql.NullTime
+	err := db.QueryRow("SELECT id,name,os,arch,install_token,agent_token,online,last_seen,created_at,services,ips,frp_version,agent_version FROM agents WHERE id=?",
+		id).Scan(&a.ID, &a.Name, &a.Os, &a.Arch, &a.InstallToken, &a.AgentToken, &online, &lastSeen, &createdAt, &svc, &ips, &ver, &aver)
+	if err != nil {
+		return nil, err
+	}
+	a.Online = online == 1
+	if lastSeen.Valid {
+		a.LastSeen = lastSeen.Time
+	}
+	if createdAt.Valid {
+		a.CreatedAt = createdAt.Time
+	}
+	a.Services = parseServices(svc)
+	a.IPs = parseStringList(ips)
+	a.FRPVersion = ver
+	a.AgentVersion = aver
+	applyAgentTTL(a)
+	return a, nil
+}
+
+
+// UpdateAgentHeartbeat 记录心跳。ips 与 frp_version 各自独立更新：
+// 老实现是「两者都为空就整条不更新」，一旦客户端某次上报取不到（例如 frpc 尚未
+// 下载完、或在 SYSTEM 账户下拿不到网卡），该列就永远停在注册时的空值上，
+// 面板里表现为「版本/IP 一直是空的」，且没有任何错误提示。
+func (db *DB) UpdateAgentHeartbeat(id string, ips []string, frpVersion, agentVersion string) error {
+	if len(ips) > 0 {
+		ipsB, _ := json.Marshal(ips)
+		if _, err := db.Exec("UPDATE agents SET online=1, last_seen=CURRENT_TIMESTAMP, ips=? WHERE id=?", string(ipsB), id); err != nil {
+			return err
+		}
+	}
+	if frpVersion != "" {
+		if _, err := db.Exec("UPDATE agents SET online=1, last_seen=CURRENT_TIMESTAMP, frp_version=? WHERE id=?", frpVersion, id); err != nil {
+			return err
+		}
+	}
+	if agentVersion != "" {
+		if _, err := db.Exec("UPDATE agents SET online=1, last_seen=CURRENT_TIMESTAMP, agent_version=? WHERE id=?", agentVersion, id); err != nil {
+			return err
+		}
+	}
+	_, err := db.Exec("UPDATE agents SET online=1, last_seen=CURRENT_TIMESTAMP WHERE id=?", id)
+	return err
+}
+
+
+func (db *DB) ListAgents() ([]shared.Agent, error) {
+	rows, err := db.Query("SELECT id,name,os,arch,online,last_seen,created_at,services,ips,frp_version,agent_version FROM agents ORDER BY created_at DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []shared.Agent
+	for rows.Next() {
+		a := shared.Agent{}
+		var svc, ips, ver, aver string
+		var online int
+		var lastSeen, createdAt sql.NullTime
+		if err := rows.Scan(&a.ID, &a.Name, &a.Os, &a.Arch, &online, &lastSeen, &createdAt, &svc, &ips, &ver, &aver); err != nil {
+			return nil, err
+		}
+		a.Online = online == 1
+		if lastSeen.Valid {
+			a.LastSeen = lastSeen.Time
+		}
+		if createdAt.Valid {
+			a.CreatedAt = createdAt.Time
+		}
+		a.Services = parseServices(svc)
+		a.IPs = parseStringList(ips)
+		a.FRPVersion = ver
+		a.AgentVersion = aver
+		applyAgentTTL(&a)
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// agentOfflineAfter 超过这个时间没收到心跳就判定离线。
+// 心跳间隔是 15 秒，取 4 个周期，留出抖动与短时网络故障的余量。
+const agentOfflineAfter = 60 * time.Second
+
+
+// applyAgentTTL 把「心跳已过期」的客户端标成离线。
+//
+// 没有这条规则时 online 只会被心跳置 1、永远不会回到 0：客户端被卸载、宕机、
+// 或换成另一台机器后，面板会一直显示「在线」，与真实状态不符。
+func applyAgentTTL(a *shared.Agent) {
+	if !a.Online {
+		return
+	}
+	if a.LastSeen.IsZero() || time.Since(a.LastSeen) > agentOfflineAfter {
+		a.Online = false
+	}
+}

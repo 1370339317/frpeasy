@@ -2,7 +2,9 @@
 # frpeasy 真实端到端穿透测试（隔离运行：独立端口 + 独立数据目录，可重复执行不互相污染）
 #   下载并启动真实 frps -> 真实 agent 下载 frpc -> 建隧道 -> 通过公网端口实际访问本地服务
 # 可用环境变量：MIRROR=镜像前缀（默认 ghfast.top，直连 GitHub 太慢时用）
-cd /c/Users/13703/WorkBuddy/frpeasy || exit 1
+# 切到脚本所在目录：脚本里所有路径（数据目录、产物、结果文件）都相对于仓库根，
+# 写死绝对路径会让别人 clone 下来直接跑不了。
+cd "$(dirname "$0")" || exit 1
 
 # 强制用当前源码重新构建被测二进制：否则很容易跑到「上次构建的过期 exe」，
 # 排查半天以为是业务逻辑坏了（真实踩过：旧 agent 里"每 15s 无谓重启 frpc"的
@@ -10,6 +12,10 @@ cd /c/Users/13703/WorkBuddy/frpeasy || exit 1
 # 构建到独立文件名：Windows 上正在运行的同名 exe 无法被覆盖。
 PBIN=./e2e-panel-bin.exe
 ABIN=./e2e-agent-bin.exe
+# 上一轮若是被 Ctrl-C / 关窗口打断，trap 可能来不及跑，残留实例会抢占端口。
+# 这两个名字是本脚本专属，按名清理不会误伤用户已安装的客户端。
+taskkill //IM e2e-agent-bin.exe //F >/dev/null 2>&1
+taskkill //IM e2e-panel-bin.exe //F >/dev/null 2>&1
 go build -trimpath -ldflags "-s -w" -o $PBIN ./cmd/panel || { echo "构建 panel 失败"; exit 1; }
 go build -trimpath -ldflags "-s -w" -o $ABIN ./cmd/agent || { echo "构建 agent 失败"; exit 1; }
 
@@ -24,7 +30,7 @@ ADATA=./e2e-agent-$STAMP
 WWW=./e2e-www-$STAMP
 
 PASS=0; FAIL=0
-R=/c/Users/13703/WorkBuddy/frpeasy/e2e-result.txt
+R=./e2e-result.txt
 : > "$R"
 say() { echo "$*" | tee -a "$R"; }
 chk() { if [ "$2" = "$3" ]; then say "  PASS  $1"; PASS=$((PASS+1)); else say "  FAIL  $1 (期望 [$2] 实际 [$3])"; FAIL=$((FAIL+1)); fi; }
@@ -38,9 +44,34 @@ WWW_PID=$!
 # 无论怎么退出（含被强杀）都要收掉子进程：残留的 python http.server 会一直占着
 # 端口，下一次运行就会连到「旧目录」上，表现为 frpc 明明 start proxy success，
 # 公网端口却取不到预期页面（真实踩过，排查了很久）。
+#
+# 两个容易漏的点：
+#  1. 必须先用 taskkill //T 杀**进程树**，再兜底 kill。
+#     顺序反了就废了：agent 先死，它拉起的 frpc 立刻变成孤儿，
+#     之后只能按镜像名 frpc.exe 去杀 —— 那会连用户自己在 ProgramData 下
+#     装的那份一起杀掉。//T 只有在父子都还活着的时候才能级联。
+#  2. Windows 上 bash 的 kill 只作用于作业表，原生 exe 会活下来：
+#     它锁着 exe、继续心跳，还留着自己的 frpc 子进程。
+#     残留的 frpc 会一直连着 frps，下次运行就出现「两个客户端抢同一个代理名」，
+#     症状是随机端口不通，极难定位。
 cleanup() {
-  kill $A 2>/dev/null; kill $P 2>/dev/null; kill $WWW_PID 2>/dev/null
-  wait $A $P $WWW_PID 2>/dev/null
+  CLEAN_RC=$?
+  taskkill //PID "${A:-0}" //T //F >/dev/null 2>&1
+  taskkill //PID "${P:-0}" //T //F >/dev/null 2>&1
+  taskkill //PID "${WWW_PID:-0}" //T //F >/dev/null 2>&1
+  kill ${A:-} ${P:-} ${WWW_PID:-} 2>/dev/null
+  wait ${A:-} ${P:-} ${WWW_PID:-} 2>/dev/null
+  taskkill //IM e2e-agent-bin.exe //T //F >/dev/null 2>&1
+  taskkill //IM e2e-panel-bin.exe //T //F >/dev/null 2>&1
+  # 等句柄真正释放：Windows 上进程收到 taskkill 后不会立刻退出，
+  # 此时 rm 会因为文件被占用而失败（目录删掉一半，下次运行更乱）。
+  sleep 1
+  # 全部通过才清现场；有失败就保留目录，方便事后翻日志。
+  if [ "$CLEAN_RC" -eq 0 ] && [ "${FAIL:-1}" -eq 0 ]; then
+    rm -rf "$DATA" "$ADATA" "$WWW" 2>/dev/null
+  else
+    echo "（保留现场供排查：$DATA $ADATA $WWW）"
+  fi
 }
 trap cleanup EXIT
 

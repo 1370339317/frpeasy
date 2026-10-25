@@ -1,10 +1,12 @@
 package panel
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -414,3 +416,41 @@ func trimToken(t string) string {
 	}
 	return "******"
 }
+// frpsLogHandler GET /api/frps/log —— 返回 frps 日志尾部，便于在面板内排障。
+func (p *Panel) frpsLogHandler(w http.ResponseWriter, r *http.Request) {
+	n, _ := strconv.Atoi(r.URL.Query().Get("bytes"))
+	if n <= 0 {
+		n = 8192
+	}
+	json.NewEncoder(w).Encode(map[string]any{"log": p.frps.TailLog(n)})
+}
+
+// frpsControlHandler POST /api/frps/start | /api/frps/stop ；GET /api/frps/status
+func (p *Panel) frpsControlHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		json.NewEncoder(w).Encode(p.frps.Status())
+	case http.MethodPost:
+		action := r.URL.Query().Get("action")
+		var err error
+		switch action {
+		case "start":
+			err = p.frps.Start()
+		case "stop":
+			err = p.frps.Stop()
+		case "restart":
+			err = p.frps.Restart()
+		default:
+			http.Error(w, "unknown action", http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(p.frps.Status())
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+

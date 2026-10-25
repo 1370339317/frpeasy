@@ -45,11 +45,31 @@ chk() { [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
 say() { printf '\n\033[36m== %s\033[0m\n' "$1"; }
 
 cleanup() {
-  [ -n "${AGPID:-}" ] && taskkill //PID "$AGPID" //F >/dev/null 2>&1
+  # 面板：//T 连带子进程，避免残留的 frps 占着端口
+  [ -n "${PANELPID:-}" ] && taskkill //PID "$PANELPID" //T //F >/dev/null 2>&1
+  [ -n "${PANELPID:-}" ] && kill "$PANELPID" 2>/dev/null
+  # 脚本启动的那个 agent
+  [ -n "${AGPID:-}" ] && taskkill //PID "$AGPID" //T //F >/dev/null 2>&1
+  # 自更新交接出来的新进程必须单独收：旧 agent 拉起新版本后自己退出，
+  # 新 agent 因此成了孤儿，//T 沿着父进程链根本够不到它。
+  # 它跑在 $LIVE_DIR 下，路径是唯一能把它与用户真装的那份
+  # （C:\ProgramData\frpeasy-agent\frpeasy-agent.exe）区分开的依据 ——
+  # 按镜像名杀会把用户正在用的客户端一起干掉。
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # taskkill 的 //FI 不支持按路径过滤，只能借 PowerShell 精确认领。
+      # 匹配 $LIVE_DIR 前缀 —— 绝不能改成按镜像名杀，
+      # 那样会把用户 ProgramData 下正在用的客户端一并干掉。
+      LIVE_WIN=$(cygpath -w "$LIVE_DIR" 2>/dev/null || echo "$LIVE_DIR")
+      powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='frpeasy-agent.exe'\" | Where-Object { \$_.ExecutablePath -like '$LIVE_WIN*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }" >/dev/null 2>&1
+      ;;
+    *)
+      pkill -f "$LIVE_DIR" 2>/dev/null
+      ;;
+  esac
   for p in $(netstat -ano 2>/dev/null | grep LISTENING | grep ":$PORT " | awk '{print $5}' | sort -u); do
     taskkill //PID "$p" //F >/dev/null 2>&1
   done
-  [ -n "${PANELPID:-}" ] && kill "$PANELPID" 2>/dev/null
   sleep 0.5
 }
 trap cleanup EXIT

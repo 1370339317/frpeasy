@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # frpeasy 端到端集成测试：真 panel + 真 agent 二进制 + 真实 HTTP 调用。
 # 每条断言输出 PASS/FAIL，末尾统计；有任何 FAIL 则退出码非 0。
-cd /c/Users/13703/WorkBuddy/frpeasy || exit 1
+# 切到脚本所在目录：脚本里所有路径都相对于仓库根，
+# 写死绝对路径会让别人 clone 下来直接跑不了。
+cd "$(dirname "$0")" || exit 1
 
 # 用当前源码重新构建被测二进制（独立文件名，避免与正在运行的实例抢文件锁），
 # 防止跑到过期的本地 exe 上得出错误结论。
@@ -22,7 +24,7 @@ go build -trimpath -ldflags "-s -w" -o $PBIN ./cmd/panel || { echo "构建 panel
 go build -trimpath -ldflags "-s -w" -o $ABIN ./cmd/agent || { echo "构建 agent 失败"; exit 1; }
 
 PASS=0; FAIL=0
-R=/c/Users/13703/WorkBuddy/frpeasy/it-result.txt
+R=./it-result.txt
 : > "$R"
 say() { echo "$*" | tee -a "$R"; }
 chk() { # chk <描述> <期望> <实际>
