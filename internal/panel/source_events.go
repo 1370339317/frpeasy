@@ -2,6 +2,7 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -115,36 +116,111 @@ func truncateText(s string, max int) string {
 	return s[:cut] + "…"
 }
 
+// probeCandidateList 决定这次测哪些源。
+//
+// 请求带了列表（界面上的当前值，可能还没保存）就以它为准 —— 用户点的是那张
+// 列表下面的按钮，测的就必须是那张列表。没带才回落到库里的设置。
+//
+// 解析错误**直接返回错误**而不是悄悄退回默认列表：认不出的 token 会让
+// 「我加了三个只测了两个」重新变成没人能解释的现象。
+func (p *Panel) probeCandidateList(side, raw string) ([]shared.Source, error) {
+	if strings.TrimSpace(raw) == "" {
+		if side == sideClient {
+			return p.clientSources(), nil
+		}
+		return p.serverSources(), nil
+	}
+	list, err := shared.ParseSources(raw)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]shared.Source, 0, len(list))
+	for _, s := range list {
+		// 面板不能给自己中继：服务端列表里出现 panel 是配置错误，说清楚而不是
+		// 像 SourcesForPanel 那样静默丢掉（那样界面会显示两项、实际只测一项）。
+		// 客户端列表里 panel 是合法的（它就是"经面板转发"），由调用方跳过不测。
+		if s.IsPanel() && side != sideClient {
+			return nil, errPanelNotAllowed
+		}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil, errNoServerSource
+	}
+	return out, nil
+}
+
+var (
+	errPanelNotAllowed = errors.New("服务端列表里不能有「面板中继」：面板不能给自己中继，客户端列表里才可以有")
+	errNoServerSource  = errors.New("至少要有一个源：github 或一个镜像前缀")
+)
+
 // sourcesProbeHandler POST /api/sources/probe
 //
-// 手动测速并（可选）直接按实测结果重排。
+// 手动测速；服务端侧可选直接按实测结果重排。
 //
 // 与 /api/system/mirror-test 的区别：那个是"测一个前缀快不快"（单个、不排序、不落库），
 // 这个是"把当前列表整个测一遍、排出顺序、留下记录" —— 也就是自动择优手动触发一次。
 //
-// 只服务端侧：面板测不到客户端那台机器的网络，让它替客户端排序等于凭空造一个
-// 和真实情况无关的顺序。客户端侧要排序就用自动择优，它在客户端本地测。
+// **两侧都能测，但含义不同**：
+//   - 服务端侧（side=server）：面板自己取二进制，测完可以直接重排（就是这张列表本身）；
+//   - 客户端侧（side=client）：面板测的是**自己到该前缀**的链路，只能回答
+//     「这个前缀能不能把文件取下来」（最常见的失败是 404，前缀配错）。
+//     它不能代表客户端那台机器的速度，所以**不重排** —— 排序交给客户端的自动择优。
+//
+// 以前这里直接 400 拒绝客户端侧，理由是"面板测不到客户端的网络"。技术上没错，
+// 但用户加了一个前缀想验证它能不能用，却只得到一句拒绝 —— 而"前缀 404"这种
+// 错误恰恰面板就能查出来。能查的部分要查，查不了的部分要说清楚。
+//
+// **候选集必须由请求带来（sources 字段）**，不能只读库里的设置。
+// 这个按钮就在列表正下方，用户点了「+ ghfast」再点测速时，库里还是上一版列表：
+// 只测库里的那一两项，然后拿结果把界面上的列表覆盖掉 —— 用户看到的是
+// 「只测了一个源」，而他刚加的那项直接消失（0.7.22 的真实缺陷）。
+// 库里那份只在请求没带列表时兜底。
 func (p *Panel) sourcesProbeHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Side  string `json:"side"`
-		Apply bool   `json:"apply"`
+		Side    string `json:"side"`
+		Apply   bool   `json:"apply"`
+		Sources string `json:"sources"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if req.Side == "" {
 		req.Side = sideServer
 	}
-	if req.Side == sideClient {
-		http.Error(w, "面板测不到客户端的网络：客户端侧的排序请在「自动择优」下由客户端自己完成，或手动调整顺序", http.StatusBadRequest)
+	if req.Side != sideServer && req.Side != sideClient {
+		http.Error(w, "side 只能是 server 或 client", http.StatusBadRequest)
+		return
+	}
+	clientSide := req.Side == sideClient
+	// 客户端侧只做可用性诊断，永远不改顺序。
+	apply := req.Apply && !clientSide
+
+	list, err := p.probeCandidateList(req.Side, req.Sources)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	list := p.serverSources()
+	// panel 源（只有客户端列表里会有）没有可测的地址：它的"地址"就是面板自己。
+	// 直接标成 skipped，别让它以 0KB/s 或"不可用"的形式误导用户。
+	results := make([]shared.ProbeResult, 0, len(list))
 	targets := make([]shared.ProbeTarget, 0, len(list))
 	for _, s := range list {
+		if s.IsPanel() {
+			results = append(results, shared.ProbeResult{
+				Token: s.Token(), Label: s.Label(), Skipped: true, OK: true,
+			})
+			continue
+		}
 		targets = append(targets, shared.ProbeTarget{Source: s, URL: frpProbeURL(p.db, s)})
 	}
-	results := probeAll(targets)
-	order := shared.OrderByProbe(list, results)
+	results = append(results, probeAll(targets)...)
+
+	// 客户端侧不改顺序：面板测出来的快慢不代表客户端那台机器。
+	order := list
+	if !clientSide {
+		order = shared.OrderByProbe(list, results)
+	}
 
 	labels := make([]string, 0, len(order))
 	for _, s := range order {
@@ -153,7 +229,7 @@ func (p *Panel) sourcesProbeHandler(w http.ResponseWriter, r *http.Request) {
 	summary := shared.ProbeSummary(results)
 	ordered := strings.Join(labels, " → ")
 
-	if req.Apply {
+	if apply {
 		if err := p.db.SetSetting(settingServerSources, shared.FormatSources(order)); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -161,22 +237,35 @@ func (p *Panel) sourcesProbeHandler(w http.ResponseWriter, r *http.Request) {
 		p.syncMirrorBase()
 		// 顺序变了，旧的排优缓存（按旧列表签名存的）已经没用。
 		p.ranks = newRankCache()
+		// 但**这一次**的结果要留下：新列表的签名正是刚排好的顺序，
+		// 按它存一份，界面「上次测速」与 10 分钟内的自动择优都还能看见它。
+		// 原来这里直接清空，表现是「点完应用，测速结果全没了」。
+		sig := shared.FormatSources(order)
+		p.ranks.put(sideServer, sig,
+			&sourceRank{At: time.Now(), Sig: sig, Order: order, Results: results})
 	} else {
-		p.ranks.put(sideServer, shared.FormatSources(list),
+		p.ranks.put(req.Side, shared.FormatSources(list),
 			&sourceRank{At: time.Now(), Sig: shared.FormatSources(list), Order: order, Results: results})
 	}
 
+	what := "手动测速"
+	if clientSide {
+		what = "手动测速（客户端列表）"
+	}
 	detail := summary
-	if req.Apply {
+	switch {
+	case apply:
 		detail = "手动测速并应用：" + summary
-	} else {
+	case clientSide:
+		detail = "手动测速（客户端列表，按面板网络判可用性、不排序）：" + summary
+	default:
 		detail = "手动测速：" + summary
 	}
 	if rec := p.recorder(); rec != nil {
 		rec(SourceEvent{
-			Side:   sideServer,
+			Side:   req.Side,
 			Kind:   "rank",
-			What:   "手动测速",
+			What:   what,
 			Source: ordered,
 			OK:     true,
 			Detail: detail,
@@ -188,6 +277,14 @@ func (p *Panel) sourcesProbeHandler(w http.ResponseWriter, r *http.Request) {
 		"results": results,
 		"order":   sourceTokens(order),
 		"summary": summary,
-		"applied": req.Apply,
+		"applied": apply,
+		"side":    req.Side,
+		// 客户端侧的结论以面板网络为准，界面必须把这句说出来。
+		"caveat": func() string {
+			if clientSide {
+				return "这是面板到该前缀的链路：能判「前缀能不能取出文件」，不代表客户端那台机器的速度"
+			}
+			return ""
+		}(),
 	})
 }

@@ -185,7 +185,7 @@ func (m *FrpcManager) EnsureBinary(version string) (string, error) {
 
 	// 顺序由策略决定：manual 用面板下发的顺序；auto 先在本地测一遍再排。
 	// 放在锁外：测速要几秒，占着锁会把心跳与配置下发一起拖住。
-	order := m.orderedFor(version)
+	order := m.orderedFor(frpcTarget(version))
 
 	// 按来源链依次尝试，**每次失败的明细都留着**。
 	//

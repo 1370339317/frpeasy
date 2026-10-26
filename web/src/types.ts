@@ -196,6 +196,8 @@ export interface ProbeResult {
   url: string
   /** 至少一轮成功并拿到数据 */
   ok: boolean
+  /** 没有可测的地址（客户端列表里的「面板中继」）：显示"不用测"，不是"不可用" */
+  skipped?: boolean
   /** 测了几轮 / 其中几轮失败 —— 失败过就不是稳定链路 */
   attempts: number
   failures: number

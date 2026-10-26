@@ -227,16 +227,25 @@ chk "非法策略被拒 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj
 curl -s -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d '{"source_mode":"auto"}' >/dev/null
 chk "策略可保存" "auto" "$(curl -s -b cj.txt $B/api/settings | jget "d['source_mode']")"
 chk "config 下发策略" "auto" "$(curl -s "$B/api/agent/config?agent_id=$AGID&token=$AGTOK" | jget "d['source_mode']")"
-# 面板测不到客户端的网络，不能替它排序
-chk "客户端侧测速被拒 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/sources/probe -H 'Content-Type: application/json' -d '{"side":"client"}')"
-# 空列表必须是 [] 而不是 null（否则前端会保留旧记录）
+# 空列表必须是 [] 而不是 null（否则前端会保留旧记录）——这条要在写记录之前查
 chk "事件列表是空数组" "[]" "$(curl -s -b cj.txt "$B/api/sources/events?side=client" | jget "d['events']")"
+# 客户端列表也能测：只判「前缀能不能取出文件」，且不重排（面板的网络不代表客户端）：
+# 面板中继没有可测地址，必须标 skipped 而不是伪装成不可用。
+PROBE_OUT=$(curl -s -b cj.txt -X POST $B/api/sources/probe -H 'Content-Type: application/json' -d '{"side":"client","sources":"panel"}' -w '\n%{http_code}')
+PROBEJ=$(echo "$PROBE_OUT" | sed '$d')
+chk "客户端侧可测" 200 "$(echo "$PROBE_OUT" | tail -1)"
+chk "客户端侧不重排" "False" "$(echo "$PROBEJ" | jget "d['applied']")"
+chk "面板中继标成不用测" 1 "$(echo "$PROBEJ" | jget "1 if d['results'][0].get('skipped') else 0")"
+chk "客户端侧带说明" 1 "$(echo "$PROBEJ" | jget "1 if '面板' in (d.get('caveat') or '') else 0")"
+chk "非法 side 被拒 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/sources/probe -H 'Content-Type: application/json' -d '{"side":"nonsense"}')"
+# 认不出的 token 要当场拒绝，不能静默退回默认列表
+chk "测速认不出的源被拒 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/sources/probe -H 'Content-Type: application/json' -d '{"side":"server","sources":"nosuchsrc"}')"
 # 客户端上报的排优与下载记录要能查到，且带失败原因
 curl -s -X POST $B/api/agent/source-event -H 'Content-Type: application/json' \
   -d "{\"agent_id\":\"$AGID\",\"agent_token\":\"$AGTOK\",\"kind\":\"download\",\"what\":\"frpc\",\"source\":\"https://ghfast.top\",\"ok\":true,\"elapsed_ms\":2300}" >/dev/null
 curl -s -X POST $B/api/agent/source-event -H 'Content-Type: application/json' \
   -d "{\"agent_id\":\"$AGID\",\"agent_token\":\"$AGTOK\",\"kind\":\"download\",\"what\":\"frpc\",\"source\":\"panel\",\"ok\":false,\"error\":\"面板中继超时\"}" >/dev/null
-chk "客户端上报被记录" 2 "$(curl -s -b cj.txt "$B/api/sources/events?side=client" | jget "len(d['events'])")"
+chk "客户端上报被记录" 3 "$(curl -s -b cj.txt "$B/api/sources/events?side=client" | jget "len(d['events'])")"
 chk "失败原因能查到" 1 "$(curl -s -b cj.txt "$B/api/sources/events?side=client" | jget "d['events'][0]['error']" | grep -c '超时')"
 chk "记录带机器名" 1 "$(curl -s -b cj.txt "$B/api/sources/events?side=client" | jget "d['events'][0]['agent_name']" | grep -c .)"
 # 错误凭据不能写诊断数据

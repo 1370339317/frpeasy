@@ -67,6 +67,7 @@ function SourceListEditor({
 }) {
   const list = parseSources(value)
   const set = (next: string[]) => onChange(next.join(','))
+  const { toast } = useApp()
   const move = (i: number, d: number) => {
     const next = [...list]
     const j = i + d
@@ -75,6 +76,22 @@ function SourceListEditor({
     set(next)
   }
   const remove = (i: number) => set(list.filter((_, k) => k !== i))
+  // 加一项时当场拦下两种"加了但没生效"：重复的源（服务端会去重，界面却显示两行）
+  // 和缺协议的写法（旧代码直接 return，点了什么提示都没有）。
+  const add = (raw: string): boolean => {
+    const v = raw.trim().replace(/\/+$/, '')
+    if (!v) return false
+    if (!/^https?:\/\//.test(v)) {
+      toast('前缀要写完整，以 http:// 或 https:// 开头，例如 https://ghfast.top', 'bad')
+      return false
+    }
+    if (list.includes(v)) {
+      toast('这个源已经在列表里了', 'bad')
+      return false
+    }
+    set([...list, v])
+    return true
+  }
   const [custom, setCustom] = useState('')
   const addable = SOURCE_PRESETS.filter(
     (p) => (allowPanel || p.token !== 'panel') && !list.includes(p.token),
@@ -110,17 +127,21 @@ function SourceListEditor({
                 <span
                   className={cx(
                     'ml-auto shrink-0 whitespace-nowrap text-[11.5px] tabular-nums',
-                    r.ok ? 'text-dim' : 'text-bad-fg',
+                    r.ok || r.skipped ? 'text-dim' : 'text-bad-fg',
                   )}
                   title={
-                    r.ok
-                      ? `${r.label}：首字节 ${r.ttfb_ms}ms，速度 ${Math.round(r.speed_kbps)}KB/s，抖动 ${r.jitter}，评分 ${r.score}`
-                      : `${r.label}：${r.error || '不可用'}`
+                    r.skipped
+                      ? `${r.label}：走面板自己，没有可测的外部地址`
+                      : r.ok
+                        ? `${r.label}：首字节 ${r.ttfb_ms}ms，速度 ${Math.round(r.speed_kbps)}KB/s，抖动 ${r.jitter}，评分 ${r.score}`
+                        : `${r.label}：${r.error || '不可用'}`
                   }
                 >
-                  {r.ok
-                    ? `${Math.round(r.speed_kbps)}KB/s · ${r.ttfb_ms}ms · 抖${r.jitter} · ${r.score}分`
-                    : '不可用'}
+                  {r.skipped
+                    ? '不用测'
+                    : r.ok
+                      ? `${Math.round(r.speed_kbps)}KB/s · ${r.ttfb_ms}ms · 抖${r.jitter} · ${r.score}分`
+                      : '不可用'}
                 </span>
               )}
               <span className="ml-auto flex shrink-0 items-center gap-1">
@@ -150,10 +171,7 @@ function SourceListEditor({
           size="sm"
           disabled={!custom.trim()}
           onClick={() => {
-            const v = custom.trim().replace(/\/+$/, '')
-            if (!/^https?:\/\//.test(v)) return
-            set([...list, v])
-            setCustom('')
+            if (add(custom)) setCustom('')
           }}
         >
           添加
@@ -209,9 +227,11 @@ export function SettingsPage() {
   // 两个源列表（有序、逗号分隔）。以前的单值 mirror_base 已被它们取代。
   const [serverSources, setServerSources] = useState('github')
   const [clientSources, setClientSources] = useState('panel')
-  // 逐项测速结果，key 是源 token。面板测得到自己的网络，测不到客户端的，
-  // 所以只有服务端列表能测。
+  // 逐项测速结果，key 是源 token。两个列表各一份 ——
+  // ① 是面板自己的链路，测完可以据此重排；② 测的是"这个前缀能不能取出文件"，
+  // 结论以面板网络为准，**不重排**（排序交给客户端按自己的网络测）。
   const [probe, setProbe] = useState<Record<string, ProbeResult>>({})
+  const [clientProbe, setClientProbe] = useState<Record<string, ProbeResult>>({})
   // 下载策略。auto = 每次真要下载前临时测速排优（推荐）；manual = 严格按列表顺序。
   const [mode, setMode] = useState('manual')
   // 最近一次排优结果 + 最近的排优/下载记录。都是"事后追查"用的，
@@ -226,6 +246,7 @@ export function SettingsPage() {
   const [pass, setPass] = useState('')
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [testingClient, setTestingClient] = useState(false)
 
   // 表单只在「第一次拿到设置」时回填一次。
   //
@@ -370,31 +391,80 @@ export function SettingsPage() {
   // 这是"自动择优"的手动版：同一套探测（可用性 / 稳定性 / 速度），
   // 区别只在排序结果要不要立刻写回列表。面板只测服务端侧 ——
   // 客户端那台机器的网络面板看不到，替它排序等于凭空造一个顺序。
+  //
+  // **必须把界面上这份列表一起发过去**：按钮就在列表正下方，用户常常是先
+  // 「+ 一个源」再点测速，此时库里还是上一版列表。原来服务端只读库，
+  // 于是只测了库里的那一项，再拿结果覆盖表单 —— 刚加的那项直接消失。
   async function probeAndRank() {
     if (testing) return
+    if (parseSources(serverSources).length === 0) {
+      toast('先加一个源再测速（github 或镜像前缀）', 'bad')
+      return
+    }
     setTesting(true)
     try {
       const r = await api<{ results: ProbeResult[]; order: string[]; summary: string; applied: boolean }>(
         'POST',
         '/api/sources/probe',
-        { side: 'server', apply: true },
+        { side: 'server', apply: true, sources: serverSources },
       )
       const next: Record<string, ProbeResult> = {}
       for (const x of r.results ?? []) next[x.token] = x
       setProbe(next)
+      // 返回的顺序就是刚测过的那份列表的排序，用它回填等于"重排"，
+      // 不会多出或丢掉任何一项。
       setServerSources(r.order.join(','))
       await Promise.all([loadSettings(), loadSourceLog()])
       const bad = (r.results ?? []).filter((x) => !x.ok)
       toast(
         bad.length
-          ? `已按实测重排；${bad.length} 个源不可用（${bad.map((x) => x.label).join('、')}）`
-          : '已按实测速度与稳定性重排',
+          ? `测了 ${r.results.length} 个源并已按实测重排；${bad.length} 个不可用（${bad.map((x) => x.label).join('、')}）`
+          : `测了 ${r.results.length} 个源，已按速度与稳定性重排并保存`,
         'ok',
       )
     } catch (e) {
       toast((e as Error).message, 'bad')
     } finally {
       setTesting(false)
+    }
+  }
+
+  // 测客户端列表里的前缀：只判"能不能把文件取下来"（404 = 前缀配错），
+  // 不排序、不写库。面板测不到客户端那台机器的速度，但"前缀是死的"这种错误
+  // 面板能查出来，就不该让用户等到客户端装不上才发现。
+  async function probeClientSources() {
+    if (testingClient) return
+    if (parseSources(clientSources).length === 0) {
+      toast('先加一个源再测速（面板中继 / github / 镜像前缀）', 'bad')
+      return
+    }
+    setTestingClient(true)
+    try {
+      const r = await api<{
+        results: ProbeResult[]
+        order: string[]
+        summary: string
+        applied: boolean
+        caveat?: string
+      }>('POST', '/api/sources/probe', { side: 'client', sources: clientSources })
+      const next: Record<string, ProbeResult> = {}
+      for (const x of r.results ?? []) next[x.token] = x
+      setClientProbe(next)
+      await loadSourceLog()
+      const real = (r.results ?? []).filter((x) => !x.skipped)
+      const bad = real.filter((x) => !x.ok)
+      toast(
+        bad.length
+          ? `${bad.length} 个前缀取不到文件（${bad.map((x) => x.label).join('、')}）：检查前缀拼得对不对`
+          : real.length
+            ? `${real.length} 个前缀都能取出文件（速度是面板这边的，不代表客户端）`
+            : '这份列表只有面板中继，不需要测',
+        bad.length ? 'bad' : 'ok',
+      )
+    } catch (e) {
+      toast((e as Error).message, 'bad')
+    } finally {
+      setTestingClient(false)
     }
   }
 
@@ -502,7 +572,7 @@ export function SettingsPage() {
         />
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <Button size="sm" disabled={testing} onClick={() => void probeAndRank()}>
-            {testing ? '测速中…' : '测速并按结果重排'}
+            {testing ? '测速中…' : '测这份列表并按实测重排'}
           </Button>
           <span className="text-xs text-dim">
             实下 512KB × 2 轮：能看出「能不能下」「多快」「稳不稳」，只测一次的峰值会骗人
@@ -511,6 +581,8 @@ export function SettingsPage() {
         <Hint>
           这是<b>面板这台机器</b>自己出网取二进制时的顺序（frps、frpc 缓存、agent 缓存、面板自更新）。
           没有 panel 选项：面板不能给自己中继。
+          <br />
+          测速测的就是<b>上面这份列表（含你刚加、还没点保存的项）</b>，测完按实测顺序重排并保存。
         </Hint>
 
         <div className="mb-2 mt-6 text-[13px] font-semibold text-fg">② 客户端取 agent / frpc</div>
@@ -518,16 +590,26 @@ export function SettingsPage() {
           value={clientSources}
           onChange={setClientSources}
           allowPanel
-          probe={{}}
+          probe={clientProbe}
         />
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Button size="sm" disabled={testingClient} onClick={() => void probeClientSources()}>
+            {testingClient ? '测速中…' : '测这份列表能不能取到文件'}
+          </Button>
+          <span className="text-xs text-dim">
+            面板会经每个前缀真下一段文件：404 = 前缀拼错了
+          </span>
+        </div>
         <Hint>
           这是<b>客户端那台机器</b>从哪儿取。两种通道：
           <b>面板中继</b>（客户端只连面板，由面板转发；任何环境都能用，但占面板出口带宽）
           和<b>镜像前缀</b>（客户端经该前缀自己取 GitHub 上的文件，不占面板带宽，要求它能出网）。
           最后一项可以是「GitHub 直连」——没配任何前缀时它最慢。
           <br />
-          这里测不了速：面板测不到客户端那台机器的网络。选「自动择优」后由客户端自己测；
-          它的实测结果会随心跳回到面板，显示在客户端卡片的「二进制来源」里。
+          上面那个测速<b>按面板这条链路算</b>：能判「这个前缀是不是死的、拼没拼错」，
+          但速度不代表客户端那台机器，也<b>不会替你排序</b>。排序由客户端自己来 ——
+          选「自动择优」后它每次下载前在本地测一遍，结果随心跳回到面板，
+          显示在客户端卡片的「二进制来源」里。
           <br />
           改完下一轮心跳就生效，<b>不用重装客户端</b>。安装那一步固定经面板（装的时候 agent
           还没跑起来、这份顺序还没下发，而且装不上比走慢一点的通道严重得多）。

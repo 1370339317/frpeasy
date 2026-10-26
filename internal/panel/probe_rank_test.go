@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -116,27 +117,80 @@ func TestSourceModeValidation(t *testing.T) {
 	}
 }
 
-// 面板测不到客户端的网络，所以不能让面板替客户端排优。
-func TestProbeHandlerRejectsClientSide(t *testing.T) {
+// 客户端列表也要能测：面板测不到客户端那台机器的速度，但"这个前缀能不能
+// 把文件取下来"（最常见的 404）恰恰面板能查出来。能查的要查，
+// 查不了的部分（速度是否代表客户端）要在返回里说清楚，而不是整条拒绝。
+func TestProbeHandlerClientSideTestsPrefixesWithoutReordering(t *testing.T) {
 	db := newTestDB(t)
 	p := &Panel{db: db, listenPort: "8080", frps: NewFrpsManager(db, t.TempDir()), ranks: newRankCache()}
+	_ = db.SetSetting(settingClientSources, "panel,https://slow.example,https://fast.example")
 
-	r := httptest.NewRequest(http.MethodPost, "/api/sources/probe", strings.NewReader(`{"side":"client"}`))
-	r.Header.Set("Content-Type", "application/json")
+	stubProbe(t, func(targets []shared.ProbeTarget) []shared.ProbeResult {
+		out := make([]shared.ProbeResult, 0, len(targets))
+		for _, tg := range targets {
+			fast := strings.Contains(tg.URL, "fast.example")
+			score := 10.0
+			if fast {
+				score = 100
+			}
+			out = append(out, shared.ProbeResult{
+				Token: tg.Source.Token(), Label: tg.Source.Label(), URL: tg.URL,
+				OK: true, Attempts: 2, SpeedKBps: score, Score: score,
+			})
+		}
+		return out
+	})
+
+	// 界面上的当前值（含刚加、还没保存的前缀）
+	body := `{"side":"client","apply":true,"sources":"panel,https://slow.example,https://fast.example"}`
+	r := httptest.NewRequest(http.MethodPost, "/api/sources/probe", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	p.sourcesProbeHandler(w, r)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("客户端侧测速应 400，实际 %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("客户端侧应当可测，实际 %d: %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "测不到客户端") {
-		t.Fatalf("错误信息要说清为什么: %s", w.Body.String())
+
+	var out struct {
+		Results []shared.ProbeResult `json:"results"`
+		Order   []string             `json:"order"`
+		Applied bool                 `json:"applied"`
+		Caveat  string               `json:"caveat"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Results) != 3 {
+		t.Fatalf("三个源都该有结论（panel 标 skipped），实际 %d 条", len(out.Results))
+	}
+	var skipped int
+	for _, x := range out.Results {
+		if x.Token == "panel" {
+			if !x.Skipped {
+				t.Fatal("面板中继没有可测地址，应标 skipped 而不是伪装成不可用")
+			}
+			skipped++
+		}
+	}
+	if skipped != 1 {
+		t.Fatalf("panel 源应当只出现一次且为 skipped，实际 %d", skipped)
+	}
+	if out.Applied {
+		t.Fatal("客户端侧绝不能用面板的实测结果重排")
+	}
+	if strings.Join(out.Order, ",") != "panel,https://slow.example,https://fast.example" {
+		t.Fatalf("顺序必须原样返回，实际 %v", out.Order)
+	}
+	if out.Caveat == "" {
+		t.Fatal("要说明这是面板网络、不代表客户端速度")
+	}
+	if got := db.GetSetting(settingClientSources); got != "panel,https://slow.example,https://fast.example" {
+		t.Fatalf("客户端列表不该被改动，实际 %q", got)
 	}
 }
 
 // 空事件列表必须是 []，不能是 null —— 前端 `?? 旧值` 会把 null 当"没返回"，
 // 清空后界面残留（客户端列表踩过一次）。
-func TestSourceEventsNeverNil(t *testing.T) {
-	db := newTestDB(t)
+func TestSourceEventsNeverNil(t *testing.T) {	db := newTestDB(t)
 	evs, err := db.ListSourceEvents("", 10)
 	if err != nil {
 		t.Fatal(err)
@@ -153,5 +207,81 @@ func TestSourceEventsNeverNil(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Kind != "download" || got[0].OK {
 		t.Fatalf("记录没存对: %+v", got)
+	}
+}
+
+// 测速必须测**界面上正在显示的那份列表**，而不是库里保存的那份。
+//
+// 这是 0.7.22 的真实缺陷：按钮就在列表正下方，用户点「+ ghfast」再点测速时
+// 库里还是上一版列表，于是只测了库里的那一项，再拿结果覆盖表单 ——
+// 用户看到「只测了一个源」，刚加的那项直接消失。
+func TestProbeHandlerUsesListFromRequest(t *testing.T) {
+	db := newTestDB(t)
+	p := &Panel{db: db, listenPort: "8080", frps: NewFrpsManager(db, t.TempDir()), ranks: newRankCache()}
+	// 库里只有一项（还没保存用户新加的那项）
+	_ = db.SetSetting(settingServerSources, "https://slow.example")
+
+	var probed []string
+	stubProbe(t, func(targets []shared.ProbeTarget) []shared.ProbeResult {
+		out := make([]shared.ProbeResult, 0, len(targets))
+		for _, tg := range targets {
+			probed = append(probed, tg.Source.Token())
+			fast := strings.Contains(tg.URL, "fast.example")
+			score := 10.0
+			if fast {
+				score = 100
+			}
+			out = append(out, shared.ProbeResult{
+				Token: tg.Source.Token(), Label: tg.Source.Label(), URL: tg.URL,
+				OK: true, Attempts: 2, SpeedKBps: score, Score: score,
+			})
+		}
+		return out
+	})
+
+	body := `{"side":"server","apply":true,"sources":"https://slow.example,https://fast.example"}`
+	r := httptest.NewRequest(http.MethodPost, "/api/sources/probe", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	p.sourcesProbeHandler(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("应当成功，实际 %d: %s", w.Code, w.Body.String())
+	}
+	if len(probed) != 2 {
+		t.Fatalf("请求里有两项就必须测两项，实际测了 %v", probed)
+	}
+
+	// 应用到库里的必须是"请求带来的那两项"，顺序按实测（fast 在前）
+	if got := db.GetSetting(settingServerSources); got != "https://fast.example,https://slow.example" {
+		t.Fatalf("应当把测过的那份列表按实测顺序存下，实际 %q", got)
+	}
+	// 应用之后也要能查到这次结果（原来清空缓存，界面显示"没有测速记录"）
+	if rk := p.LastRank(sideServer); rk == nil {
+		t.Fatal("应用后应当保留最近一次测速结果")
+	}
+}
+
+// 认不出的 token 要当场拒绝，不能静默退回默认列表：
+// 那会让「我加了三个只测了两个」重新变成没人能解释的现象。
+func TestProbeHandlerRejectsBadList(t *testing.T) {
+	db := newTestDB(t)
+	p := &Panel{db: db, listenPort: "8080", frps: NewFrpsManager(db, t.TempDir()), ranks: newRankCache()}
+	stubProbe(t, func(targets []shared.ProbeTarget) []shared.ProbeResult { return nil })
+
+	for _, tc := range []struct{ name, sources, want string }{
+		{"认不出的源", "nosuchsrc", "无法识别的源"},
+		{"缺协议", "ghfast.top", "无法识别的源"},
+		{"服务端列表不能有面板", "panel,github", "不能有"},
+	} {
+		body := `{"side":"server","sources":"` + tc.sources + `"}`
+		r := httptest.NewRequest(http.MethodPost, "/api/sources/probe", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		p.sourcesProbeHandler(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s：应当 400，实际 %d (%s)", tc.name, w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), tc.want) {
+			t.Fatalf("%s：错误信息要能看懂，实际 %s", tc.name, w.Body.String())
+		}
 	}
 }

@@ -40,6 +40,10 @@ type ProbeResult struct {
 
 	// OK 至少一轮成功且拿到了数据。全轮失败时 Error 有原因。
 	OK bool `json:"ok"`
+	// Skipped 这个源没有可测的东西（典型是客户端列表里的「面板中继」——
+	// 它的地址就是面板自己，测了也没有意义）。界面上要显示"不用测"，
+	// 而不是伪装成 0KB/s 或"不可用"。
+	Skipped bool `json:"skipped"`
 	// Attempts / Failures 用来算可用性。两轮里失败一轮说明链路不稳。
 	Attempts int `json:"attempts"`
 	Failures int `json:"failures"`
@@ -230,6 +234,10 @@ func ProbeSummary(res []ProbeResult) string {
 	}
 	parts := make([]string, 0, len(res))
 	for _, r := range res {
+		if r.Skipped {
+			// 面板中继没有可测的东西，写进摘要只会让一行字更长。
+			continue
+		}
 		if !r.OK {
 			parts = append(parts, r.Label+" 不可用（"+firstLine(r.Error)+"）")
 			continue
