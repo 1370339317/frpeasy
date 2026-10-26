@@ -186,6 +186,15 @@ export interface TunnelsResponse {
   install_command: string
   install_command_windows: string
   install_command_android: string
+  /** 同一批命令，但下载地址直接指向更新源（不经过面板转发） */
+  install_command_git: string
+  install_command_windows_git: string
+  install_command_android_git: string
+  /** Git 源实际使用的目录地址（UI 展示用，让用户看见「到底从哪下」） */
+  bin_git_base: string
+  /** 面板没配更新源时为 false —— 此时没有第二个地方可取二进制 */
+  bin_git_available: boolean
+  bin_git_note: string
   /** 卸载命令：在那台机器上直接执行即可（与云端下发卸载互补） */
   uninstall_command: string
   uninstall_command_windows: string

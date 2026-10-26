@@ -55,11 +55,9 @@ func (p *Panel) createTunnelHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 返回隧道 + 供客户端使用的一键安装命令（若尚未有 agent 注册）
-	resp := map[string]any{
-		"tunnel":                       t,
-		"install_command":              p.buildInstallCommand(r),
-		"install_command_windows":      p.buildInstallCommandWindows(r),
-		"install_command_android":      p.buildInstallCommandAndroid(r),
+	resp := map[string]any{"tunnel": t}
+	for k, v := range p.installCommandFields(r) {
+		resp[k] = v
 	}
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(resp)
@@ -108,13 +106,10 @@ func (p *Panel) listTunnelsHandler(w http.ResponseWriter, r *http.Request) {
 		ts[i].AccessURL = accessURL(accessHost, ts[i].AgentID, ts[i].PublicPort)
 	}
 	agents, _ := p.db.ListAgents()
-	json.NewEncoder(w).Encode(map[string]any{
-		"tunnels":                      ts,
-		"agents":                       agents,
-		"frps":                         p.frps.Status(),
-		"install_command":              p.buildInstallCommand(r),
-		"install_command_windows":      p.buildInstallCommandWindows(r),
-		"install_command_android":      p.buildInstallCommandAndroid(r),
+	out := map[string]any{
+		"tunnels": ts,
+		"agents":  agents,
+		"frps":    p.frps.Status(),
 		// 卸载命令：给「现在的面板上直接复制一条命令去那台机器执行」用。
 		// 与云端一键卸载（POST /api/agents/{id}/uninstall）互补：
 		// 前者适合客户端已失联/面板换了地址，后者适合它还在线。
@@ -129,7 +124,12 @@ func (p *Panel) listTunnelsHandler(w http.ResponseWriter, r *http.Request) {
 		// 而面板并不在 80/443」这类会导致客户端装不上的配置错误。
 		"install_base":      p.resolvePanelBase(r),
 		"panel_listen_port": p.listenPort,
-	})
+	}
+	// 安装命令（面板源 / Git 源两套）与 Git 可用性
+	for k, v := range p.installCommandFields(r) {
+		out[k] = v
+	}
+	json.NewEncoder(w).Encode(out)
 }
 
 // accessURL 生成隧道的外部访问地址。未绑定机器（草稿）或端口为 0 时不生成，

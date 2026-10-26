@@ -191,6 +191,24 @@ chk "Android 命令默认不提权" 0 "$(echo "$AND" | grep -c -- '--elevate')"
 chk "Android 命令不写死 su 形状" 0 "$(echo "$AND" | grep -c 'su -c')"
 chk "安装脚本落地失败时明确退出" 1 "$(echo "$AND" | grep -c 'download failed on device')"
 
+say "== 17b) 安装命令的来源可选（面板 / Git）=="
+# 默认只有面板源：命令里不带 --source，任何能打开面板的机器都能装。
+chk "面板源命令不含 --source" 0 "$(curl -s -b cj.txt $B/api/tunnels | jget "d['install_command']" | grep -c -- '--source')"
+chk "未配更新源时 Git 不可用" False "$(curl -s -b cj.txt $B/api/tunnels | jget "d['bin_git_available']")"
+chk "不可用时给出原因" 1 "$(curl -s -b cj.txt $B/api/tunnels | jget "d['bin_git_note']" | grep -c '更新源')"
+
+# 配好更新源之后，Git 变体必须把地址直接写进命令里（不经过面板转发）。
+curl -s -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json'   -d '{"update_base":"https://files.example.com/dl"}' >/dev/null
+chk "配了更新源后 Git 可用" True "$(curl -s -b cj.txt $B/api/tunnels | jget "d['bin_git_available']")"
+chk "Git 基址就是更新源目录" "https://files.example.com/dl" "$(curl -s -b cj.txt $B/api/tunnels | jget "d['bin_git_base']")"
+GITC=$(curl -s -b cj.txt $B/api/tunnels | jget "d['install_command_git']")
+GITW=$(curl -s -b cj.txt $B/api/tunnels | jget "d['install_command_windows_git']")
+GITA=$(curl -s -b cj.txt $B/api/tunnels | jget "d['install_command_android_git']")
+chk "Linux Git 命令含地址" 1 "$(echo "$GITC" | grep -c -- '--source git --git-base https://files.example.com/dl')"
+chk "Linux Git 命令不再指向面板 agent 接口" 0 "$(echo "$GITC" | grep -c '/api/agent/bin')"
+chk "Windows Git 命令用 -Source/-GitBase" 1 "$(echo "$GITW" | grep -c -- '-Source git -GitBase https://files.example.com/dl')"
+chk "Android Git 命令含地址" 1 "$(echo "$GITA" | grep -c -- '--source git --git-base https://files.example.com/dl')"
+
 say "== 18) 端口 / 防火墙清单 =="
 chk "未登录取端口被拦 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/ports)"
 PORTJ=$(curl -s -b cj.txt $B/api/ports)

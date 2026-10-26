@@ -40,6 +40,7 @@ func main() {
 	// 通知面板「这台机器是被卸载了」而不是掉线。安装脚本的 --uninstall
 	// 分支在删文件之前调它，因为那时代码里已经没有 server 参数了。
 	goodbye := flag.Bool("goodbye", false, "内部使用：卸载前向面板报备一次，然后退出")
+	binSource := flag.String("source", "panel", "二进制来源：panel=经面板下发（默认），git=直接从更新源取")
 	flag.Parse()
 
 	if *goodbye {
@@ -76,10 +77,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	c, err := agent.NewClient(*server, *token, *name, *dataDir)
+	c, err := agent.NewClient(*server, *token, *name, *dataDir, *binSource)
 	if err != nil {
 		fmt.Println("初始化失败:", err)
 		os.Exit(1)
+	}
+	// 明确打出二进制来源。它决定了 frpc 是从面板中继取还是自己上上游取，
+	// 出问题时第一个要看的就是这一行 —— 以前这个选择是隐式的，日志里看不出来。
+	if *binSource == agent.BinSourceGit {
+		fmt.Println("[agent] 二进制来源: git（frpc 直接从上游取，不经过面板）")
+	} else {
+		fmt.Println("[agent] 二进制来源: panel（frpc 经面板中继）")
 	}
 	if err := c.Run(); err != nil {
 		fmt.Println("运行失败:", err)

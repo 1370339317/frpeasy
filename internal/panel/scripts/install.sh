@@ -21,6 +21,9 @@ DATA_OVERRIDE=""
 UNINSTALL=0
 FOREGROUND=0
 ELEVATE=0
+# 二进制来源：panel = 经面板下发（默认），git = 直接从更新源/镜像取。
+SOURCE="panel"
+GIT_BASE=""
 
 say()  { printf '%s\n' "[frpeasy] $*"; }
 warn() { printf '%s\n' "[frpeasy] WARN: $*" >&2; }
@@ -33,6 +36,12 @@ usage() {
   --server <url>    panel base url, e.g. http://1.2.3.4:8080   (required)
   --token <tok>     install token from the panel               (required)
   --data <dir>      override the agent data directory
+  --source <s>      where to download the agent + frpc binaries from:
+                      panel (default) - served by the panel; works on intranet-only boxes
+                      git             - straight from the update source (needs --git-base)
+  --git-base <url>  base url used with --source git, e.g.
+                      https://github.com/you/frpeasy/releases/latest/download
+                      (a mirror prefix is already folded in by the panel)
   --elevate         Android only: obtain root first (su variant auto-detected)
   --uninstall       remove the agent, its service and its data
   --foreground      run in this console instead of installing a service
@@ -49,6 +58,8 @@ while [ $# -gt 0 ]; do
     --server)     need_val "$@"; SERVER="$2"; shift 2 ;;
     --token)      need_val "$@"; TOKEN="$2"; shift 2 ;;
     --data)       need_val "$@"; DATA_OVERRIDE="$2"; shift 2 ;;
+    --source)     need_val "$@"; SOURCE="$2"; shift 2 ;;
+    --git-base)   need_val "$@"; GIT_BASE="$2"; shift 2 ;;
     --elevate)    ELEVATE=1; shift ;;
     --uninstall)  UNINSTALL=1; shift ;;
     --foreground) FOREGROUND=1; shift ;;
@@ -56,6 +67,29 @@ while [ $# -gt 0 ]; do
     *)            die "unknown argument: $1 (try --help)" ;;
   esac
 done
+
+# ---------------------------------------------------------------- binary source
+
+# 为什么要有这个开关：面板的出口带宽是所有客户端共享的，装一台就要发 6.5MB 的
+# agent、之后还要发 20MB 的 frpc，慢起来整条链路都在等同一个窄口子。反过来也有
+# 只有面板可达的环境（纯内网），那种情况下必须由面板转发。所以交给装的人选。
+#
+# 换的只是"从哪儿取这个文件"，版本与内容仍由面板决定 —— agent 会把选择记下来，
+# 之后拉 frpc 用同一个来源，不需要再选一次。
+case "$SOURCE" in
+  panel|git) : ;;
+  *) die "--source must be 'panel' or 'git' (got '$SOURCE')" ;;
+esac
+SRC_ARGS=""
+AGENT_SRC_ARGS=""
+if [ "$SOURCE" = "git" ]; then
+  [ -n "$GIT_BASE" ] || die "--source git requires --git-base <url>"
+  # SRC_ARGS 给脚本自己用（拼下载地址、提权后重跑）；
+  # AGENT_SRC_ARGS 只把 --source 传给 agent —— agent 取 frpc 用的是面板下发的
+  # mirror_base + frp_version，用不上 git-base。
+  SRC_ARGS="--source git --git-base $GIT_BASE"
+  AGENT_SRC_ARGS="--source git"
+fi
 
 # ---------------------------------------------------------------- platform
 
@@ -318,7 +352,7 @@ if [ "$ELEVATE" -eq 1 ]; then
     if [ "${FRPEASY_ELEVATED:-0}" = "1" ]; then
       die "elevation failed: su exited but we are still not root"
     fi
-    REARGS="--server $SERVER --token $TOKEN --elevate"
+    REARGS="--server $SERVER --token $TOKEN --elevate $SRC_ARGS"
     [ -n "$DATA_OVERRIDE" ] && REARGS="$REARGS --data $DATA_OVERRIDE"
     say "root requested; detecting which su invocation shape this device supports ..."
     for shape in "-c" "0" "root -c"; do
@@ -335,6 +369,11 @@ fi
 
 say "platform : $PLATFORM / $ARCH"
 say "panel    : $SERVER"
+if [ "$SOURCE" = "git" ]; then
+  say "source   : git ($GIT_BASE)"
+else
+  say "source   : panel"
+fi
 say "binary   : $BIN"
 say "data dir : $DATA_DIR"
 
@@ -346,7 +385,14 @@ ensure_bin_dir
 TMP="$DATA_DIR/.agent.new.$$"
 rm -f "$TMP"
 
-URL="$SERVER/api/agent/bin/$OSKEY/$ARCH"
+if [ "$SOURCE" = "git" ]; then
+  # 与面板拼法一致：发布产物就叫 frpeasy-agent-<os>-<arch>，放在 release 根目录。
+  # 这里不做任何"面板取不到再回退"的判断 —— 选了什么就是什么，
+  # 否则日志里看不出这次走的哪条路（这正是上一版删掉静默回退的原因）。
+  URL="$GIT_BASE/frpeasy-agent-$OSKEY-$ARCH"
+else
+  URL="$SERVER/api/agent/bin/$OSKEY/$ARCH"
+fi
 say "downloading $URL ..."
 # 注意：不能写成 "if ! fetch ...; then rc=$?" —— 叹号会把退出码取反，
 # rc 永远是 0，下面「没有下载器」的专门提示就永远走不到。先跑再取码。
@@ -360,6 +406,18 @@ if [ "$rc" -ne 0 ]; then
     1) on the panel host: keep bin/frpeasy-agent-linux-$ARCH next to frpeasy-panel
     2) adb push frpeasy-agent-linux-$ARCH /data/local/tmp/frpeasy-agent/frpeasy-agent
     3) adb shell chmod 755 /data/local/tmp/frpeasy-agent/frpeasy-agent"
+  fi
+  if [ "$SOURCE" = "git" ]; then
+    die "download failed (rc=$rc) from the git source you picked: $URL
+  Nothing was changed on this machine.
+  You asked for --source git, so the binary comes straight from the update source instead
+  of the panel. This box may simply not be able to reach that host (intranet-only machine,
+  DNS, TLS interception).
+  Two ways out:
+    1) re-run with --source panel instead of --source git (the panel already has the binary
+       cached, so it costs the panel no extra download)
+    2) if the URL above does open on this machine, check whether it returns an error page:
+       curl -i $URL"
   fi
   die "download failed (rc=$rc). The existing installation, if any, was left untouched.
   Most likely the panel has no $OSKEY/$ARCH agent binary and could not fetch one from its
@@ -401,7 +459,7 @@ fi
 
 if [ "$FOREGROUND" -eq 1 ]; then
   say "running in foreground, Ctrl+C to stop (no service is registered)"
-  exec "$TMP" --server "$SERVER" --token "$TOKEN" --data "$DATA_DIR" --name "$(hostname 2>/dev/null || echo agent)"
+  exec "$TMP" --server "$SERVER" --token "$TOKEN" --data "$DATA_DIR" --name "$(hostname 2>/dev/null || echo agent)" $AGENT_SRC_ARGS
 fi
 
 # ---------------------------------------------------------------- install
@@ -435,6 +493,7 @@ LOG="$DATA_DIR/agent.log"
 SERVER="$SERVER"
 TOKEN="$TOKEN"
 NAME="$AGENT_NAME"
+AGENT_SRC_ARGS="$AGENT_SRC_ARGS"
 running() { [ -f "\$PIDFILE" ] && kill -0 "\$(cat "\$PIDFILE" 2>/dev/null)" 2>/dev/null; }
 start() {
   running && { echo "[frpeasy] already running (pid \$(cat "\$PIDFILE"))"; return 0; }
@@ -443,9 +502,9 @@ start() {
   # 直接写 "nohup cmd &" 时，没有 nohup 会让整条命令失败、取不到后台 pid，
   # 表面上执行完了、实际什么都没起。所以先探测再决定怎么起。
   if command -v nohup >/dev/null 2>&1; then
-    nohup "\$BIN" --server "\$SERVER" --token "\$TOKEN" --data "\$DATA" --name "\$NAME" >>"\$LOG" 2>&1 &
+    nohup "\$BIN" --server "\$SERVER" --token "\$TOKEN" --data "\$DATA" --name "\$NAME" \$AGENT_SRC_ARGS >>"\$LOG" 2>&1 &
   else
-    "\$BIN" --server "\$SERVER" --token "\$TOKEN" --data "\$DATA" --name "\$NAME" >>"\$LOG" 2>&1 &
+    "\$BIN" --server "\$SERVER" --token "\$TOKEN" --data "\$DATA" --name "\$NAME" \$AGENT_SRC_ARGS >>"\$LOG" 2>&1 &
   fi
   echo \$! > "\$PIDFILE"
   sleep 2
@@ -461,7 +520,7 @@ supervise() {
   # 崩溃自动拉起。Android 上系统可能把进程杀掉，靠这个循环拉回来。
   trap 'stop; exit 0' INT TERM HUP
   while :; do
-    "\$BIN" --server "\$SERVER" --token "\$TOKEN" --data "\$DATA" --name "\$NAME" >>"\$LOG" 2>&1 &
+    "\$BIN" --server "\$SERVER" --token "\$TOKEN" --data "\$DATA" --name "\$NAME" \$AGENT_SRC_ARGS >>"\$LOG" 2>&1 &
     echo \$! > "\$PIDFILE"
     wait \$!
     sleep 5
@@ -506,7 +565,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$BIN --server $SERVER --token $TOKEN --data $DATA_DIR --name $AGENT_NAME
+ExecStart=$BIN --server $SERVER --token $TOKEN --data $DATA_DIR --name $AGENT_NAME $AGENT_SRC_ARGS
 Restart=always
 RestartSec=5
 # 面板地址暂时不可达时不要反复重启到 systemd 放弃 (start-limit)
@@ -527,7 +586,7 @@ elif have_openrc; then
 #!/sbin/openrc-run
 name="frpeasy-agent"
 command="$BIN"
-command_args="--server $SERVER --token $TOKEN --data $DATA_DIR --name $AGENT_NAME"
+command_args="--server $SERVER --token $TOKEN --data $DATA_DIR --name $AGENT_NAME $AGENT_SRC_ARGS"
 command_background="yes"
 pidfile="/run/\$RC_SVCNAME.pid"
 respawn_delay=5

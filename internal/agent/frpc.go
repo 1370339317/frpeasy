@@ -28,9 +28,16 @@ type FrpcManager struct {
 	pullCooldownUntil time.Time // 拉取失败后的冷却截止时间
 	lastPullErr       error
 
-	// panelBase 面板地址。非空时优先从面板取 frpc（/api/frpc/bin/…），
-	// 取不到再回退直连 GitHub/镜像。留空 = 只用直连（自检、单元测试）。
+	// panelBase 面板地址。安装时选了「面板」源就用它取 frpc（/api/frpc/bin/…）。
 	panelBase string
+
+	// source 安装时选定的二进制来源："panel"（默认）或 "git"。
+	//
+	// 两者是**互斥选择，不做任何自动回退**：选了什么就走什么。以前这里是
+	// 「先面板、取不到再直连 GitHub」，结果面板上配的镜像对内网机器等于摆设，
+	// 而且日志里看不出某一次究竟走了哪条路 —— 用户只能感觉到「有时能通有时不能」。
+	// 现在由安装命令里的 --source 决定，并且失败信息会点明「你选的是哪个源」。
+	source string
 }
 
 // SetPanelBase 设置面板地址（由 NewClient 注入）。
@@ -39,6 +46,29 @@ func (m *FrpcManager) SetPanelBase(base string) {
 	m.panelBase = strings.TrimRight(strings.TrimSpace(base), "/")
 	m.mu.Unlock()
 }
+
+// SetSource 设置二进制来源（由 NewClient 注入）。空串按面板源处理。
+func (m *FrpcManager) SetSource(src string) {
+	m.mu.Lock()
+	if src == BinSourceGit {
+		m.source = BinSourceGit
+	} else {
+		m.source = BinSourcePanel
+	}
+	m.mu.Unlock()
+}
+
+// 二进制来源，与面板侧（internal/panel 的 BinSource*）保持同一套取值。
+const (
+	BinSourcePanel = "panel"
+	BinSourceGit   = "git"
+)
+
+// resolveFrpcAsset 解析 frp 发布资产地址（可注入，测试里替换掉真实 GitHub 请求）。
+//
+// 与面板侧 resolveFRPAsset 同一做法：把网络边界做成变量，
+// 单元测试才有办法覆盖「选了 Git 源」这条路径而不真的出网。
+var resolveFrpcAsset = shared.ResolveAssetURL
 
 // pullRetryCooldown 拉取失败后等待多久再重试，避免疯狂重下几十 MB。
 const pullRetryCooldown = 60 * time.Second
@@ -105,27 +135,78 @@ func (m *FrpcManager) EnsureBinary(version, mirror string) (string, error) {
 		return "", err
 	}
 	panelBase := m.panelBase
+	src := m.source
 	m.mu.Unlock()
 
-	// 只从面板取。
+	// 按安装时选定的来源取，**不做交叉回退**。
 	//
-	// 这里原来还有「面板取不到就直连 GitHub」的回退，已经删掉：那条路让客户端
-	// 绕过面板，面板上配的镜像等于摆设；在只能连面板的内网机器上，它还表现为
-	// 「有时能通、有时不能」，而日志里根本看不出这一次走的是哪条路。
-	// 现在取不到就明确失败并说清怎么办。
-	if panelBase == "" {
-		return "", fmt.Errorf("还没有面板地址，无法获取 frpc（agent 尚未成功拉取过一次配置）")
+	// 两条路都只负责"把文件弄到手"，具体要哪个版本由面板的 frp_version 决定 ——
+	// 端口和配置是面板下发的，客户端自己换个 frpc 版本只会连不上。
+	var (
+		dst string
+		err error
+	)
+	if src == BinSourceGit {
+		dst, err = m.downloadFromUpstream(version, mirror)
+		if err != nil {
+			err = fmt.Errorf("你选的是 Git 源（--source git），直连更新源拉 frpc 失败：%w。"+
+				"这台机器可能连不上上游；要去掉这个选择，用面板的安装命令重装一次即可（"+
+				"--source panel，默认值），面板已经缓存过该平台的 frpc", err)
+		}
+	} else {
+		if panelBase == "" {
+			return "", fmt.Errorf("还没有面板地址，无法获取 frpc（agent 尚未成功拉取过一次配置）")
+		}
+		dst, err = m.downloadFromPanel(panelBase)
+		if err != nil {
+			err = fmt.Errorf("你选的是面板源，从中继下载 frpc 失败：%w。"+
+				"若面板出口带宽不够，可以换 Git 源重装（安装命令里选「Git」）；"+
+				"若这台机器只能连面板，请确认面板能拉到该平台的 frpc"+
+				"（面板「文件与更新」页点一次「预存」即可验证）", err)
+		}
 	}
-	p, err := m.downloadFromPanel(panelBase)
 	if err != nil {
 		m.mu.Lock()
 		m.pullCooldownUntil = time.Now().Add(pullRetryCooldown)
 		m.lastPullErr = err
 		m.mu.Unlock()
-		return "", fmt.Errorf("从面板获取 frpc 失败：%w。客户端不会直连 GitHub —— "+
-			"请确认面板能拉到该平台的 frpc（面板「文件与更新」页点一次「预存」即可验证）", err)
+		return "", err
 	}
-	return p, nil
+	return dst, nil
+}
+
+// downloadFromUpstream 直接从 frp 的发布源（可经镜像）取 frpc。
+//
+// 只在安装时选了 --source git 时使用：面板出口带宽是所有客户端共享的，慢的时候
+// 让客户端自己去 CDN 取要快得多。代价是这台机器必须能出网。
+//
+// 解包到 binDir 下的临时子目录再改名，而不是原地解压：直接解会留下一个
+// frpc_<ver>_<os>_<arch>/ 中间目录，且多平台并行时可能互相覆盖。
+func (m *FrpcManager) downloadFromUpstream(version, mirror string) (string, error) {
+	if err := os.MkdirAll(m.binDir, 0o755); err != nil {
+		return "", err
+	}
+	keyword := shared.PlatformKeyword(runtime.GOOS, runtime.GOARCH)
+	url, tag, err := resolveFrpcAsset(shared.FRPRepo, version, keyword, mirror)
+	if err != nil {
+		return "", fmt.Errorf("解析 frp 资源失败（%s，版本 %q）：%w", keyword, version, err)
+	}
+	tmpDir, err := os.MkdirTemp(m.binDir, ".frpcext-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmpDir)
+	extracted, err := shared.DownloadAndExtract(url, tmpDir, "frpc")
+	if err != nil {
+		return "", fmt.Errorf("下载 %s 失败：%w", url, err)
+	}
+	dst := m.binaryPath()
+	if err := os.Rename(extracted, dst); err != nil {
+		return "", fmt.Errorf("保存 frpc 失败：%w", err)
+	}
+	_ = os.Chmod(dst, 0o755)
+	_ = os.WriteFile(m.versionPath(), []byte(tag), 0o644)
+	return dst, nil
 }
 
 // downloadFromPanel 从面板取 frpc 裸二进制。

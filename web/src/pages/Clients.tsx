@@ -40,6 +40,56 @@ function isUninstalling(a: Agent): boolean {
   return !!a.uninstall_sent_at && a.online && sinceUninstallSent(a) < UNINSTALL_GRACE_MS
 }
 
+/** 二进制来源。与后端 install_cmd.go 的 BinSource* 常量一一对应。 */
+type BinSource = 'panel' | 'git'
+
+/**
+ * 来源切换。
+ *
+ * 只有两个选项，因为实际上只有两条路：经面板转发，或这台机器自己去上游取。
+ * 没有"自动"——自动需要在两条都慢的时候赌一把，而用户比程序更清楚这台机器的处境
+ * （内网？出网正常？）。选完写进命令，一条命令就定死了走哪条。
+ */
+function SourcePicker({
+  value,
+  onChange,
+  gitAvailable,
+}: {
+  value: BinSource
+  onChange: (v: BinSource) => void
+  gitAvailable: boolean
+}) {
+  const items: { key: BinSource; label: string; hint: string; disabled: boolean }[] = [
+    { key: 'panel', label: '面板', hint: '客户端只连面板，任何环境都能装', disabled: false },
+    {
+      key: 'git',
+      label: 'Git',
+      hint: gitAvailable ? '直接从更新源取，不占面板带宽' : '还没配更新源，暂不可用',
+      disabled: !gitAvailable,
+    },
+  ]
+  return (
+    <div className="inline-flex flex-wrap gap-[3px] rounded-[9px] border border-border bg-chip p-[3px]">
+      {items.map((it) => (
+        <button
+          key={it.key}
+          type="button"
+          title={it.hint}
+          disabled={it.disabled}
+          onClick={() => onChange(it.key)}
+          className={cx(
+            'cursor-pointer rounded-[7px] border-none px-[13px] py-1 text-[12.5px] transition',
+            value === it.key ? 'bg-card2 font-semibold text-fg' : 'bg-transparent text-dim',
+            it.disabled && 'cursor-not-allowed opacity-45',
+          )}
+        >
+          {it.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 const TABS: { key: CommandKind; label: string }[] = [
   { key: 'linux', label: 'Linux' },
   { key: 'win', label: 'Windows' },
@@ -206,13 +256,44 @@ export function Clients() {
     installBase,
     panelPort,
     accessHost,
+    installGit,
+    gitBase,
+    gitAvailable,
+    gitNote,
     loadAll,
     loadAgents,
     toast,
   } = useApp()
   const [kind, setKind] = useState<CommandKind>('linux')
 
-  const cmd = install[kind] || '加载中…'
+  // 二进制来源。默认面板：任何能打开面板的机器都能装，包括纯内网。
+  // 选 Git 时命令里的下载地址直接指向更新源，不经过面板转发 ——
+  // 面板出口带宽是所有客户端共用的，慢的时候换这一条会快很多。
+  //
+  // 只换"从哪儿取文件"，版本仍由面板决定（agent 会把选择记下来，
+  // 之后拉 frpc 沿用同一个来源）。选择存在本地，下次进来还是它。
+  const [source, setSource] = useState<BinSource>(() => {
+    try {
+      return localStorage.getItem('frpeasy.binSource') === 'git' ? 'git' : 'panel'
+    } catch {
+      return 'panel'
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem('frpeasy.binSource', source)
+    } catch {
+      /* 隐私模式下 localStorage 可能不可写，不影响功能 */
+    }
+  }, [source])
+  // 面板没配更新源时根本没有第二个地方可取二进制，强制回到面板源，
+  // 否则会显示一条地址为空、执行必然失败的 Git 命令。
+  useEffect(() => {
+    if (!gitAvailable && source === 'git') setSource('panel')
+  }, [gitAvailable, source])
+
+  const usingGit = source === 'git' && gitAvailable
+  const cmd = (usingGit ? installGit[kind] : install[kind]) || '加载中…'
   const unCmd = uninstall[kind] || '加载中…'
 
   // 常规刷新交给 store 里的全局轮询（5 秒）；这里只处理一种例外：
@@ -278,7 +359,29 @@ export function Clients() {
         desc="在需要被穿透的那台机器上执行一次；重跑即升级 / 修复"
         actions={<Tabs value={kind} onChange={setKind} items={TABS} />}
       >
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <span className="text-xs text-dim">二进制来源</span>
+          <SourcePicker value={source} onChange={setSource} gitAvailable={gitAvailable} />
+          <span className="text-xs text-dim">
+            {usingGit ? (
+              <>
+                地址直指 <span className="font-mono">{gitBase || '更新源'}</span>
+                ，不经过面板转发（面板出口带宽是所有客户端共用的）
+              </>
+            ) : (
+              <>经面板下发；客户端只连面板，纯内网环境用这个</>
+            )}
+          </span>
+        </div>
         <Pre>{cmd}</Pre>
+        {usingGit ? (
+          <div className="mt-2 text-xs leading-[1.6] text-dim">
+            选了 Git 源：这台机器必须能出网访问上面的地址。agent 与 frpc 都从那里取，
+            版本仍由面板决定。如果拉不动（内网机器常见），换回「面板」重新复制一条命令重装即可。
+          </div>
+        ) : !gitAvailable && gitNote ? (
+          <div className="mt-2 text-xs leading-[1.6] text-dim">{gitNote}</div>
+        ) : null}
         <div className="mt-2 text-xs leading-[1.6] text-dim">{HINTS[kind]}</div>
         <PortWarn base={installBase} port={panelPort} accessHost={accessHost} />
         <div className="mt-3 flex flex-wrap items-center gap-3">

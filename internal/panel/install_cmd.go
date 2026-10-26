@@ -6,23 +6,40 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"frpeasy/internal/shared"
+)
+
+// 二进制来源。客户端从哪儿拿 agent 与 frpc，由用户在复制安装命令时选。
+//
+// 为什么必须能选：面板的出口带宽是所有客户端共享的（每装一台就要发 6.5MB agent，
+// 之后还要发 20MB frpc），慢起来整条安装链路都在等一个 1~5Mbps 的口子。而反过来，
+// 有些环境只有一条通道能用 —— 纯内网机器连不上上游，面板挂在小水管后面时中继又不可用。
+// 所以由人来定，定了就写进命令、存进 agent 的 state，frpc 后续沿用同一个选择。
+//
+// **选的是通道，不是版本**：用哪个 frp 版本、agent 版本始终由面板决定，
+// 客户端只是换个地方把同一个文件取回来。这条线不能被越过 —— 一旦客户端自己决定版本，
+// 面板与客户端就会各跑各的，隧道直接连不上。
+const (
+	BinSourcePanel = "panel" // 经面板下发（默认；纯内网环境必须用它）
+	BinSourceGit   = "git"   // 客户端自己从更新源（含镜像前缀）取
 )
 
 // buildInstallCommand 生成给客户端复制的一键安装命令（Linux/macOS 用 bash 脚本）。
-func (p *Panel) buildInstallCommand(r *http.Request) string {
+func (p *Panel) buildInstallCommand(r *http.Request, src string) string {
 	panelHTTP := p.resolvePanelBase(r)
 	token := p.db.GetSetting("install_token")
-	return "curl -sSL " + panelHTTP + "/install | sh -s -- --server " + panelHTTP + " --token " + token
+	return "curl -sSL " + panelHTTP + "/install | sh -s -- --server " + panelHTTP + " --token " + token + p.sourceArgs(src)
 }
 
 // buildInstallCommandWindows 生成 Windows（PowerShell）一键安装命令。
 //
 // 用 iwr 而非 irm：两者都能落地，但 iwr 的 -OutFile 语义更明确、老版本 5.1 行为一致。
 // 脚本正文是纯 ASCII，所以不存在「落地文件被按 ANSI 代码页解码」的乱码问题。
-func (p *Panel) buildInstallCommandWindows(r *http.Request) string {
+func (p *Panel) buildInstallCommandWindows(r *http.Request, src string) string {
 	panelHTTP := p.resolvePanelBase(r)
 	token := p.db.GetSetting("install_token")
-	return "powershell -ExecutionPolicy Bypass -Command \"iwr " + panelHTTP + "/install.ps1 -OutFile $env:TEMP\\frpeasy-install.ps1 -UseBasicParsing; & $env:TEMP\\frpeasy-install.ps1 -Server " + panelHTTP + " -Token " + token + "\""
+	return "powershell -ExecutionPolicy Bypass -Command \"iwr " + panelHTTP + "/install.ps1 -OutFile $env:TEMP\\frpeasy-install.ps1 -UseBasicParsing; & $env:TEMP\\frpeasy-install.ps1 -Server " + panelHTTP + " -Token " + token + p.sourceArgsWindows(src) + "\""
 }
 
 // buildInstallCommandAndroid 生成 Android（adb shell）一键安装命令。
@@ -34,14 +51,70 @@ func (p *Panel) buildInstallCommandWindows(r *http.Request) string {
 //  2. root / 非 root 用同一条命令：agent 运行不需要 root，装到 /data/local/tmp
 //     由 shell 用户即可写入。少一条分支就少一种出错方式。
 //  3. 不注册任何自启（见 installScript 顶部说明），装完只正常启动一次。
-func (p *Panel) buildInstallCommandAndroid(r *http.Request) string {
+func (p *Panel) buildInstallCommandAndroid(r *http.Request, src string) string {
 	panelHTTP := p.resolvePanelBase(r)
 	token := p.db.GetSetting("install_token")
 	sh := "/data/local/tmp/frpeasy-install.sh"
 	return "adb shell \"curl -fsSL " + panelHTTP + "/install -o " + sh +
 		" || toybox wget -O " + sh + " " + panelHTTP + "/install; " +
 		"[ -s " + sh + " ] || { echo 'download failed on device: neither curl nor toybox wget worked'; exit 1; }; " +
-		"sh " + sh + " --server " + panelHTTP + " --token " + token + "\""
+		"sh " + sh + " --server " + panelHTTP + " --token " + token + p.sourceArgs(src) + "\""
+}
+
+// sourceArgs 生成 install.sh 的下载源参数（空串 = 用默认的面板源）。
+//
+// 注意脚本正文仍然从面板取：它只有二十几 KB，而且是面板的一部分 ——
+// 上游没有它的副本。这里换的是 agent 与 frpc 这两块大二进制。
+func (p *Panel) sourceArgs(src string) string {
+	if src != BinSourceGit {
+		return ""
+	}
+	base := p.gitBinBase()
+	if base == "" {
+		// 没有可用更新源时退回面板源。调用方会用 bin_git_available=false
+		// 告诉 UI 不要给这个选项，所以正常不会走到这里。
+		return ""
+	}
+	return " --source git --git-base " + base
+}
+
+// sourceArgsWindows 同上，参数风格换成 PowerShell 的 -Name Value。
+func (p *Panel) sourceArgsWindows(src string) string {
+	if src != BinSourceGit {
+		return ""
+	}
+	base := p.gitBinBase()
+	if base == "" {
+		return ""
+	}
+	return " -Source git -GitBase " + base
+}
+
+// gitBinBase 返回「客户端自己下载」时应使用的二进制目录地址（无尾斜杠，空 = 不可用）。
+//
+// 两种 update_base 写法都要支持（见 shared.ManifestURL）：目录 或 manifest.json 直链。
+// 后者要把末尾文件名去掉，因为二进制与清单放在同一目录。
+//
+// 镜像前缀只在地址是 github.com 时才拼：ghproxy / ghfast 这类是在原地址前面
+// 再套一层代理，自建更新源套上去必然 404。
+func (p *Panel) gitBinBase() string {
+	base := strings.TrimSpace(p.db.GetSetting("update_base"))
+	if base == "" {
+		return ""
+	}
+	if strings.HasSuffix(strings.ToLower(base), ".json") {
+		if i := strings.LastIndex(base, "/"); i > 0 {
+			base = base[:i]
+		}
+	}
+	base = strings.TrimRight(base, "/")
+	if base == "" {
+		return ""
+	}
+	if strings.Contains(base, "github.com") {
+		base = shared.ApplyMirror(base, p.db.GetSetting("mirror_base"))
+	}
+	return base
 }
 
 // buildUninstallCommand 生成「在那台机器上执行即可卸载」的命令。
@@ -69,13 +142,6 @@ func (p *Panel) buildUninstallCommandAndroid(r *http.Request) string {
 		"[ -s " + sh + " ] || { echo 'download failed on device: neither curl nor toybox wget worked'; exit 1; }; " +
 		"sh " + sh + " --uninstall\""
 }
-
-// buildInstallCommandAndroidRoot 以 root 身份安装（可选，不是必需的）。
-//
-// **不假设 su 是哪种实现**：Magisk / KernelSU / APatch / adbsu 的调用形状各不相同
-// （有的要 `su -c "cmd"`，有的要 `su 0 cmd`），在面板侧写死任何一种都是在猜，
-// 猜对了是运气、猜错了用户面对的是一条看不出原因的失败命令。
-// 所以这里只多带一个 --elevate，由设备上的脚本按行为依次探测三种常见形状，
 
 // resolvePanelBase 决定「客户端访问本面板」所用的基址（带 scheme，无尾斜杠）。
 //
@@ -194,4 +260,47 @@ func (p *Panel) resolveFRPSAddr(r *http.Request, bindPort int) string {
 		return ""
 	}
 	return host + ":" + strconv.Itoa(bindPort)
+}
+
+// gitAgentURL 客户端在「Git 源」下应下载的 agent 地址（空 = 不可用）。
+//
+// 拼法必须与 install.sh 里一致：<base>/frpeasy-agent-<os>-<arch>。
+// 之所以能直接拼而不用查 release API：发布产物就按这个名字放在 release 根目录，
+// 而 update_base 指向的正是 .../releases/latest/download 这类目录。
+func (p *Panel) gitAgentURL(osName, arch string) string {
+	base := p.gitBinBase()
+	if base == "" || !shared.IsSupportedPlatform(osName, arch) {
+		// 平台判断必须用白名单：AgentBinFileName 只做别名收敛，
+		// 对乱写的值会原样返回，于是拼出一条指向不存在文件的地址。
+		return ""
+	}
+	name := shared.AgentBinFileName(osName, arch)
+	if name == "" {
+		return ""
+	}
+	return base + "/" + name
+}
+
+// installCommandFields 生成与安装命令有关的响应字段（两个接口共用一份，避免走偏）。
+func (p *Panel) installCommandFields(r *http.Request) map[string]any {
+	base := p.gitBinBase()
+	note := ""
+	if base == "" {
+		note = "面板还没配置更新源，客户端没有第二个地方能取到二进制，因此只提供「面板」一个来源。" +
+			"到「设置 → 更新源」填上 GitHub Release 地址（或镜像前缀）后，这里会出现 Git 选项。"
+	}
+	return map[string]any{
+		// 面板来源（默认，纯内网环境必须用这个）
+		"install_command":         p.buildInstallCommand(r, BinSourcePanel),
+		"install_command_windows": p.buildInstallCommandWindows(r, BinSourcePanel),
+		"install_command_android": p.buildInstallCommandAndroid(r, BinSourcePanel),
+		// Git 来源：同样的命令，但地址直接指向更新源，不经过面板转发
+		"install_command_git":         p.buildInstallCommand(r, BinSourceGit),
+		"install_command_windows_git": p.buildInstallCommandWindows(r, BinSourceGit),
+		"install_command_android_git": p.buildInstallCommandAndroid(r, BinSourceGit),
+		// UI 用来显示「Git 源实际会从哪里下」以及为什么不可用
+		"bin_git_base":      base,
+		"bin_git_available": base != "",
+		"bin_git_note":      note,
+	}
 }
