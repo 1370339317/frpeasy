@@ -20,17 +20,70 @@ func startSelfCleanup(dataDir string) error {
 	if err := safeCleanPath(dataDir); err != nil {
 		return fmt.Errorf("拒绝删除安装目录: %w", err)
 	}
-	script := "Start-Sleep 1; " +
-		"schtasks /delete /f /tn frpeasy-agent 2>$null | Out-Null; " +
-		"Stop-Process -Name frpeasy-agent -Force -ErrorAction SilentlyContinue; " +
-		"Start-Sleep 2; " +
-		// -LiteralPath：路径里可能有 [ ] 等通配符字符，用 Literal 才按字面删
-		"Remove-Item -LiteralPath " + psQuote(dataDir) +
-		" -Recurse -Force -ErrorAction SilentlyContinue"
-
+	exe := ""
+	if p := selfExePath(); p != "" && safeCleanPath(p) == nil {
+		exe = p
+	}
+	script := cleanupScript(dataDir, uninstallLogPath(), exe, "frpeasy-agent")
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
 	if attr := detachAttr(); attr != nil {
 		cmd.SysProcAttr = attr
 	}
 	return cmd.Start()
+}
+
+// cleanupScript 生成清理脚本。
+//
+// 抽成纯函数是为了能真的跑一遍验证（见 uninstall_windows_test.go）：
+// 卸载脚本一旦写错，症状是「agent 退了、东西还在」，而 agent 已经退出、
+// 无法回报任何东西 —— 只能靠事前的测试兜住。
+//
+// 全程写日志并最后自检。原来每一步都带 SilentlyContinue / 2>$null，
+// 失败完全无声：面板只看到「离线」，于是「真删干净了」和「进程退了、任务还在」
+// 在界面上长得一模一样。
+func cleanupScript(dataDir, logPath, exePath, taskName string) string {
+	dir := psQuote(dataDir)
+	log := psQuote(logPath)
+	task := psQuote(taskName)
+
+	// 正常安装时 exe 就在 dataDir 里，删目录即可；但 --data 允许指到别处，
+	// 那种情况下必须单独删 exe，否则会留下「服务没了、二进制还在」的残局。
+	// 先删 exe 再删目录：目录删掉后 exe 路径就不存在了，反过来会漏。
+	exeDel := ""
+	if exePath != "" {
+		exeDel = "try {\n" +
+			"  Remove-Item -LiteralPath " + psQuote(exePath) + " -Force -ErrorAction Stop\n" +
+			"  L '删二进制 OK'\n" +
+			"} catch {\n" +
+			"  L ('删二进制失败: ' + $_.Exception.Message)\n" +
+			"}\n"
+	}
+
+	// 必须按「行」拼，不要压成一行：-Command 用分号串语句时，
+	// function 定义与 try/catch 很容易被粘错。
+	return "Start-Sleep 1\n" +
+		"$ErrorActionPreference = 'Continue'\n" +
+		"$log = " + log + "\n" +
+		"function L($m) { \"$(Get-Date -Format o) $m\" | Out-File -Append -Encoding utf8 $log }\n" +
+		"L '=== 开始卸载 ==='\n" +
+		"$out = schtasks /delete /f /tn " + task + " 2>&1\n" +
+		"L ('schtasks delete rc=' + $LASTEXITCODE + ' out=' + ($out -join ' '))\n" +
+		"Stop-Process -Name " + task + " -Force -ErrorAction SilentlyContinue\n" +
+		"L 'stop-process 已发出'\n" +
+		"Start-Sleep 2\n" +
+		exeDel +
+		"try {\n" +
+		"  Remove-Item -LiteralPath " + dir + " -Recurse -Force -ErrorAction Stop\n" +
+		"  L '删目录 OK'\n" +
+		"} catch {\n" +
+		"  L ('删目录失败: ' + $_.Exception.Message)\n" +
+		"}\n" +
+		"$leftDir = Test-Path -LiteralPath " + dir + "\n" +
+		"L ('自检 目录还存在=' + $leftDir)\n" +
+		"$q = schtasks /query /tn " + task + " 2>&1\n" +
+		"L ('自检 计划任务查询 rc=' + $LASTEXITCODE + ' out=' + ($q -join ' '))\n" +
+		"L '=== 结束 ==='\n" +
+		// 显式退出 0：最后一条原生命令是 schtasks query，任务被删掉后它必然返回
+		// 非 0，那会变成整个 PowerShell 进程的退出码 —— 看起来像「卸载脚本失败」。
+		"exit 0"
 }

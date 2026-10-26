@@ -15,10 +15,28 @@ import {
   cx,
 } from '../components/ui'
 
+// 卸载宽限期。
+//
+// 客户端收到指令后：先停 frpc，再起一个独立的清理进程删文件，agent 本身还要
+// 多存活 8 秒（否则清理进程会被 systemd 的 cgroup 回收一起杀掉），而本页是
+// 10 秒一轮询。这段时间里它必然还会心跳好几轮 —— 早期实现把「还在心跳」直接
+// 判成失败，还写死了「多半是 agent 没有 root / 管理员权限」。
+// 但 Windows 客户端是以 SYSTEM 身份由计划任务跑的，权限根本不是瓶颈；
+// 这句结论只会把用户带到错误的方向（去提权，而真正的原因可能是自启没摘掉）。
+const UNINSTALL_GRACE_MS = 60_000
+
+/** 距卸载指令被心跳领走过了多久（毫秒）。解析不出来按「已超时」处理。 */
+function sinceUninstallSent(a: Agent): number {
+  const raw = a.uninstall_sent_at
+  if (!raw) return Number.POSITIVE_INFINITY
+  const t = Date.parse(raw)
+  if (Number.isNaN(t)) return Number.POSITIVE_INFINITY
+  return Date.now() - t
+}
+
 const TABS: { key: CommandKind; label: string }[] = [
   { key: 'linux', label: 'Linux' },
-  { key: 'win', label: 'Windows' },
-  { key: 'android', label: 'Android · adb' },
+  { key: 'win', label: 'Windows' },  { key: 'android', label: 'Android · adb' },
   { key: 'androidRoot', label: 'Android · root' },
 ]
 
@@ -95,6 +113,21 @@ function agentState(a: Agent): {
   gone: boolean
 } {
   const sent = !!a.uninstall_sent_at
+  if (sent && a.online && sinceUninstallSent(a) < UNINSTALL_GRACE_MS) {
+    return {
+      label: '正在卸载',
+      tone: 'warn',
+      led: 'warn',
+      gone: false,
+      note: (
+        <>
+          客户端已收到卸载指令，正在停服务、摘开机自启、删文件。它要退干净大约需要几秒，
+          这期间仍会心跳一两轮 —— <b>这时显示「在线」是正常的，不是没生效</b>。
+          一分钟后它还在心跳，才会判成「卸载未生效」。
+        </>
+      ),
+    }
+  }
   if (sent && a.online) {
     return {
       label: '卸载未生效',
@@ -103,8 +136,14 @@ function agentState(a: Agent): {
       gone: false,
       note: (
         <>
-          卸载指令已经下发，但它仍在正常心跳 —— 多半是 agent 没有 root / 管理员权限，删不掉自己。
-          到那台机器上执行上面「卸载客户端」里的命令；或者给它提权后在这里重新点一次「卸载」。
+          指令已送达，但一分钟后它仍在心跳 —— 说明清理没跑完，或者跑完又被拉了起来。
+          最常见的原因是<b>自启没摘掉</b>（进程退出后计划任务 / systemd 又把它拉回来），
+          其次是 exe 或数据目录被别的进程占用。
+          <br />
+          到那台机器上再执行一次上面的卸载命令最稳。想知道它卡在哪一步：
+          Windows 看 <code className="font-mono">C:\ProgramData\frpeasy-uninstall.log</code>，
+          Linux 看 <code className="font-mono">/tmp/frpeasy-uninstall.log</code> 与{' '}
+          <code className="font-mono">journalctl -u frpeasy-agent</code>。
         </>
       ),
     }
@@ -299,8 +338,9 @@ export function Clients() {
                   <div className="ml-2 flex items-center gap-1.5">
                     {/* 云端卸载：真正删那台机器上的东西，务必与「移除记录」区分开。
                         已经确认卸载掉的（机器上没 agent 了）不再给这个按钮：
-                        点了只会把指令存起来等一台不会再上线的机器。 */}
-                    {!st.gone && (
+                        点了只会把指令存起来等一台不会再上线的机器。
+                        正在卸载途中也不给：重复下发只会让它重跑一遍清理。 */}
+                    {!st.gone && st.label !== '正在卸载' && (
                       <Button
                         variant="danger"
                         size="sm"

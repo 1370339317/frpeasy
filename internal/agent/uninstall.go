@@ -52,6 +52,21 @@ func (c *Client) selfUninstall() {
 	fmt.Println("[agent] 卸载完成，本进程退出")
 }
 
+// uninstallLogPath 清理脚本的日志位置。
+//
+// 故意不放在安装目录里 —— 那个目录正在被删，日志会跟着一起消失，等于没有。
+// Windows 用 ProgramData（任何用户都能打开、且不在被删目录内）；
+// 其余平台用 /tmp（所有发行版都有、重启即清、不需要额外权限）。
+func uninstallLogPath() string {
+	if runtime.GOOS == "windows" {
+		if pd := strings.TrimSpace(os.Getenv("ProgramData")); pd != "" {
+			return filepath.Join(pd, "frpeasy-uninstall.log")
+		}
+		return `C:\ProgramData\frpeasy-uninstall.log`
+	}
+	return "/tmp/frpeasy-uninstall.log"
+}
+
 // safeCleanPath 校验即将被递归删除的路径。
 //
 // 与安装脚本 do_uninstall 的规则保持一致：宁可拒绝，也不能删错目录。
