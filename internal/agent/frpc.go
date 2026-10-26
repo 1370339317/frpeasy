@@ -31,19 +31,18 @@ type FrpcManager struct {
 	// panelBase 面板地址。安装时选了「面板」源就用它取 frpc（/api/frpc/bin/…）。
 	panelBase string
 
-	// pin 安装时钉死的来源：auto（默认，跟面板）| panel | git。
-	//
-	// 钉死时不参与回退 —— 用户明确指定了，替他改主意比直接失败更糟。
-	pin string
-	// chain 面板下发的来源链（按顺序尝试），每轮配置刷新。
+	// list 面板下发的源列表（有序候选），每轮配置刷新。
 	//
 	// 放在配置里而不是安装命令里：写进 systemd unit 后，面板改设置就得重装
 	// 所有客户端才生效。每轮下发则改完立刻对全站生效。
-	chain []string
+	//
+	// 每一项可能是 panel（经面板中继）或某个镜像前缀（自己去取），
+	// 两种都只是"从哪儿拿这个文件"，版本与内容始终由面板决定。
+	list []shared.Source
 
 	// lastSource / lastNote 最近一次真正生效的来源与失败明细，随心跳上报，
 	// 让界面能回答「这台机器最后是从哪儿拿到的、为什么没走首选」。
-	lastSource string
+	lastSource shared.Source
 	lastNote   string
 }
 
@@ -54,64 +53,42 @@ func (m *FrpcManager) SetPanelBase(base string) {
 	m.mu.Unlock()
 }
 
-// SetSource 设置安装时钉死的来源（由 NewClient 注入，取自 --source）。
-// 空串或无法识别的值一律按 auto 处理，不要因为一个写字错的参数让客户端起不来。
-func (m *FrpcManager) SetSource(pin string) {
+// SetSources 应用面板下发的源列表（每轮配置更新时调用）。
+//
+// 空列表退回「仅面板」：那是唯一在纯内网也成立的选择，绝不能因为
+// 一次配置为空就让客户端去够 github.com。
+func (m *FrpcManager) SetSources(list []shared.Source) {
+	if len(list) == 0 {
+		list = []shared.Source{{Kind: shared.SourcePanel}}
+	}
 	m.mu.Lock()
-	m.pin = shared.NormalizeBinSource(pin)
+	m.list = list
 	m.mu.Unlock()
 }
 
-// setPolicy 应用面板下发的来源链（每轮配置更新时调用）。
-func (m *FrpcManager) setPolicy(chain []string) {
-	m.mu.Lock()
-	m.chain = chain
-	m.mu.Unlock()
-}
-
-// SourceOrder 当前要尝试的来源顺序（自更新复用同一套判断，避免两处走法不一致）。
-func (m *FrpcManager) SourceOrder() []string {
+// Sources 当前要尝试的源顺序（自更新复用同一套判断，避免两处走法不一致）。
+func (m *FrpcManager) Sources() []shared.Source {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return shared.SourceOrder(m.pin, m.chain)
+	if len(m.list) == 0 {
+		return []shared.Source{{Kind: shared.SourcePanel}}
+	}
+	return append([]shared.Source(nil), m.list...)
 }
 
 // LastFetch 最近一次取二进制的生效来源与失败明细。
+// 生效来源用 token 表示（panel / github / 前缀），空串表示一次都没成功过。
 func (m *FrpcManager) LastFetch() (source, note string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.lastSource, m.lastNote
+	return m.lastSource.Token(), m.lastNote
 }
 
 // resolveFrpcAsset 解析 frp 发布资产地址（可注入，测试里替换掉真实网络请求）。
 //
 // 与面板侧 resolveFRPAsset 同一做法：把网络边界做成变量，
-// 单元测试才有办法覆盖「选了 Git 源」这条路径而不真的出网。
-var resolveFrpcAsset = resolveFrpAssetURL
-
-// resolveFrpAssetURL 拼出 frp 发布资产的地址。
-//
-// 能拼就不查 API。发布产物的路径是固定的：
-//
-//	https://github.com/fatedier/frp/releases/download/v<ver>/frp_<ver>_<os>_<arch>.tar.gz（Windows 是 .zip）
-//
-// 而 api.github.com 在国内经常连不上，镜像只能代理下载、代理不了 API ——
-// 一旦因为版本是 latest 而去查 API，整个 Git 源就白配了（超时后照样失败）。
-// 所以面板会先把 latest 解析成具体版本再下发（见 agentConfigHandler），
-// 这里只在确实拿不到具体版本时才退回 API。
-func resolveFrpAssetURL(repo, version, keyword, mirror string) (string, string, error) {
-	v := strings.TrimPrefix(strings.TrimSpace(version), "v")
-	if v != "" && !strings.EqualFold(v, "latest") {
-		ext := ".tar.gz"
-		if strings.HasPrefix(keyword, "windows_") {
-			ext = ".zip"
-		}
-		official := "https://github.com/" + repo + "/releases/download/v" + v +
-			"/frp_" + v + "_" + keyword + ext
-		return shared.ApplyMirror(official, mirror), "v" + v, nil
-	}
-	return shared.ResolveAssetURL(repo, version, keyword, mirror)
-}
+// 单元测试才有办法覆盖「走镜像」这条路径而不真的出网。
+var resolveFrpcAsset = shared.FRPAssetURL
 
 // pullRetryCooldown 拉取失败后等待多久再重试，避免疯狂重下几十 MB。
 const pullRetryCooldown = 60 * time.Second
@@ -156,7 +133,7 @@ func (m *FrpcManager) CurrentVersion() string {
 
 // EnsureBinary 确保 frpc 二进制存在且版本匹配，否则从 GitHub（可经镜像）拉取。
 // 失败后退避 pullRetryCooldown，避免每轮心跳都重新拉一遍几十 MB。
-func (m *FrpcManager) EnsureBinary(version, mirror string) (string, error) {
+func (m *FrpcManager) EnsureBinary(version string) (string, error) {
 	cur := m.CurrentVersion()
 	bin := m.binaryPath()
 	_, statErr := os.Stat(bin)
@@ -178,7 +155,10 @@ func (m *FrpcManager) EnsureBinary(version, mirror string) (string, error) {
 		return "", err
 	}
 	panelBase := m.panelBase
-	order := shared.SourceOrder(m.pin, m.chain)
+	order := m.list
+	if len(order) == 0 {
+		order = []shared.Source{{Kind: shared.SourcePanel}}
+	}
 	m.mu.Unlock()
 
 	// 按来源链依次尝试，**每次失败的明细都留着**。
@@ -196,15 +176,14 @@ func (m *FrpcManager) EnsureBinary(version, mirror string) (string, error) {
 			dst string
 			err error
 		)
-		switch src {
-		case shared.BinSourceGit:
-			dst, err = m.downloadFromUpstream(version, mirror)
-		default:
+		if src.IsPanel() {
 			if panelBase == "" {
 				err = fmt.Errorf("还没有面板地址，无法获取 frpc（agent 尚未成功拉取过一次配置）")
 			} else {
 				dst, err = m.downloadFromPanel(panelBase)
 			}
+		} else {
+			dst, err = m.downloadFromUpstream(src, version)
 		}
 		if err == nil {
 			m.mu.Lock()
@@ -216,23 +195,23 @@ func (m *FrpcManager) EnsureBinary(version, mirror string) (string, error) {
 			}
 			m.mu.Unlock()
 			if len(notes) > 0 {
-				fmt.Println("[agent] frpc 已从 " + shared.BinSourceLabel(src) + " 取到（先前失败：" + strings.Join(notes, "；") + "）")
+				fmt.Println("[agent] frpc 已从 " + src.Label() + " 取到（先前失败：" + strings.Join(notes, "；") + "）")
 			}
 			return dst, nil
 		}
-		notes = append(notes, shared.BinSourceLabel(src)+"："+err.Error())
+		notes = append(notes, src.Label()+"："+err.Error())
 	}
 
-	err := fmt.Errorf("frpc 拉取失败（已按顺序尝试 %s）：%s",
-		strings.Join(order, " → "), strings.Join(notes, "；"))
-	if len(order) == 1 {
-		err = fmt.Errorf("%w。只试了这一个来源是因为安装时明确指定了它；"+
-			"要去掉这个限制，用面板的安装命令重装一次（不加 --source 即跟随面板设置）", err)
+	labels := make([]string, 0, len(order))
+	for _, s := range order {
+		labels = append(labels, s.Label())
 	}
+	err := fmt.Errorf("frpc 拉取失败（依次尝试 %s）：%s",
+		strings.Join(labels, " → "), strings.Join(notes, "；"))
 	m.mu.Lock()
 	m.pullCooldownUntil = time.Now().Add(pullRetryCooldown)
 	m.lastPullErr = err
-	m.lastSource = ""
+	m.lastSource = shared.Source{}
 	m.lastNote = strings.Join(notes, "；")
 	m.mu.Unlock()
 	return "", err
@@ -245,12 +224,12 @@ func (m *FrpcManager) EnsureBinary(version, mirror string) (string, error) {
 //
 // 解包到 binDir 下的临时子目录再改名，而不是原地解压：直接解会留下一个
 // frpc_<ver>_<os>_<arch>/ 中间目录，且多平台并行时可能互相覆盖。
-func (m *FrpcManager) downloadFromUpstream(version, mirror string) (string, error) {
+func (m *FrpcManager) downloadFromUpstream(src shared.Source, version string) (string, error) {
 	if err := os.MkdirAll(m.binDir, 0o755); err != nil {
 		return "", err
 	}
 	keyword := shared.PlatformKeyword(runtime.GOOS, runtime.GOARCH)
-	url, tag, err := resolveFrpcAsset(shared.FRPRepo, version, keyword, mirror)
+	url, tag, err := resolveFrpcAsset(shared.FRPRepo, version, keyword, "")
 	if err != nil {
 		return "", fmt.Errorf("解析 frp 资源失败（%s，版本 %q）：%w", keyword, version, err)
 	}
@@ -259,7 +238,7 @@ func (m *FrpcManager) downloadFromUpstream(version, mirror string) (string, erro
 		return "", err
 	}
 	defer os.RemoveAll(tmpDir)
-	extracted, err := shared.DownloadAndExtract(url, tmpDir, "frpc")
+	extracted, err := shared.DownloadAndExtract(src.Apply(url), tmpDir, "frpc")
 	if err != nil {
 		return "", fmt.Errorf("下载 %s 失败：%w", url, err)
 	}
@@ -381,10 +360,10 @@ func (m *FrpcManager) Reconcile(cfg shared.AgentConfig, force bool) error {
 	if version == "" {
 		version = "latest"
 	}
-	// 来源链随配置一起下发：面板改设置后，客户端下一轮配置就生效，
+	// 源列表随配置一起下发：面板改设置后，客户端下一轮配置就生效，
 	// 不需要重装。放在这里而不是 EnsureBinary 里，是为了让"配置"只有一个入口。
-	m.setPolicy(cfg.BinSources)
-	bin, err := m.EnsureBinary(version, cfg.MirrorBase)
+	m.SetSources(shared.SourceListFromTokens(cfg.Sources))
+	bin, err := m.EnsureBinary(version)
 	if err != nil {
 		return fmt.Errorf("frpc 二进制拉取失败: %w", err)
 	}

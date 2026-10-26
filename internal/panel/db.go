@@ -124,12 +124,10 @@ func (db *DB) initSettings() error {
 		"port_range_start": strconv.Itoa(shared.DefaultPortRangeStart),
 		"port_range_end":   strconv.Itoa(shared.DefaultPortRangeEnd),
 		"frp_version":      shared.DefaultFRPVersion,
-		"mirror_base":      "", // 为空=GitHub 官方；可填 ghproxy/jsdelivr/自建前缀
-		// 二进制来源链：客户端按顺序尝试。默认只走面板 —— 这是唯一在各种网络
-		// 环境下都成立的选择，改动必须有明确意图（例如面板出口带宽不够时
-		// 改成 panel,git，让面板失败后退到更新源）。
-		"bin_source_chain": "panel",
-		"data_dir":         "./data",
+		// 遗留字段：现在由两个源列表派生（见 syncMirrorBase），保留是因为
+		// 老版本客户端只认它、界面与第三方脚本也还在读。
+		"mirror_base": "",
+		"data_dir":    "./data",
 		// 更新源：一个静态目录，里面有 manifest.json 和各平台二进制。
 		// 空 = 不检查面板自身更新（不是错误：内网/离线场景本来就无从检查）。
 		// 填 GitHub Releases 的话用
@@ -155,6 +153,44 @@ func (db *DB) initSettings() error {
 				return err
 			}
 		}
+	}
+
+	// 下载源（有序候选）。单独处理而不是放进 defaults，因为它要参考遗留的
+	// mirror_base：老配置把前缀存在那里，升级后必须迁过来，否则用户的镜像
+	// 配置会在升级瞬间失效，而界面上只是"源"这一栏变回默认值。
+	if db.GetSetting(settingServerSources) == "" {
+		v := shared.SourceDirect
+		if mb := strings.TrimSpace(db.GetSetting("mirror_base")); mb != "" {
+			// 原来是"配了前缀就只用前缀"，迁成"前缀 → 直连"多了一条兜底，
+			// 属于有意的改善：前缀挂掉时至少还能自己试一下官方地址。
+			v = mb + "," + shared.SourceDirect
+		}
+		if err := db.SetSetting(settingServerSources, v); err != nil {
+			return err
+		}
+	}
+	if db.GetSetting(settingClientSources) == "" {
+		// 默认只走面板：客户端只连面板是唯一在纯内网也成立的选择。
+		// 让它默认去够 github.com，会让内网机器表现为"装上了但建不起隧道"。
+		v := shared.SourcePanel
+		// 上一版用过 bin_source_chain（panel / git 的排列组合），迁过来。
+		switch strings.TrimSpace(db.GetSetting("bin_source_chain")) {
+		case "git":
+			v = shared.SourceDirect
+		case "panel,git":
+			v = shared.SourcePanel + "," + shared.SourceDirect
+		case "git,panel":
+			v = shared.SourceDirect + "," + shared.SourcePanel
+		}
+		if err := db.SetSetting(settingClientSources, v); err != nil {
+			return err
+		}
+	}
+	// 遗留字段与列表对齐（老客户端与「文件」页仍读它）
+	if p := shared.FirstPrefix(shared.SourcesForClient(db.GetSetting(settingClientSources))); p != "" {
+		_ = db.SetSetting("mirror_base", p)
+	} else if p := shared.FirstPrefix(shared.SourcesForPanel(db.GetSetting(settingServerSources))); p != "" {
+		_ = db.SetSetting("mirror_base", p)
 	}
 	// 环境变量只作为「库里没有值时」的初始值，不覆盖用户已保存的设置。
 	//

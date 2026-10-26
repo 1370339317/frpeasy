@@ -23,14 +23,12 @@ type FirewallInfo struct {
 	CheckedAt string `json:"checked_at"`
 }
 
-
 func runQuick(name string, args ...string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 	return string(out), err == nil
 }
-
 
 // detectFirewall 尽力识别主机防火墙。
 //
@@ -82,7 +80,6 @@ type FWCommand struct {
 	Note        string `json:"note"`
 	Recommended bool   `json:"recommended"`
 }
-
 
 // buildFWCommands 按端口生成各防火墙的放行命令。
 //

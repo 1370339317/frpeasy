@@ -145,14 +145,13 @@ type AgentConfig struct {
 	MirrorBase string `json:"mirror_base"`
 	// FRPVersion 要拉取的 frp 版本（"latest" 或具体 tag）。
 	FRPVersion string `json:"frp_version"`
-	// BinSources 二进制来源链，按顺序尝试；面板设置项 bin_source_chain 的解析结果。
+	// Sources 二进制源列表（有序候选），面板设置项 client_sources 的解析结果。
+	// 每项是 panel / github / 镜像前缀。
 	//
 	// 为什么不写进安装命令：写进 systemd unit / 计划任务意味着面板以后换更新源、
 	// 或补上镜像前缀，已经装好的机器仍按旧地址去取，必须重装才生效。
 	// 每轮配置下发就没这个问题，而且改设置立刻对全站生效。
-	BinSources []string `json:"bin_sources"`
-	// BinGitBase git 源的目录地址（已折入镜像前缀）。为空表示面板没有可用更新源。
-	BinGitBase string `json:"bin_git_base"`
+	Sources []string `json:"sources"`
 
 	// FRPSRunning 面板侧 frps 当前是否在运行（运行时字段，不进配置内容）。
 	//

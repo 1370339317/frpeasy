@@ -43,7 +43,7 @@ func TestSafeCleanPathAllowsInstallDirs(t *testing.T) {
 	}
 }
 
-// 两套引号规则不能混用：POSIX 用 '\''，PowerShell 用 ''。
+// 两套引号规则不能混用：POSIX 用 '\”，PowerShell 用 ”。
 // 用错的话路径里带单引号就会把命令拆断，removal 变成一段乱码命令。
 func TestQuoting(t *testing.T) {
 	if got := shQuote("/var/lib/a'b"); got != `'/var/lib/a'\''b'` {

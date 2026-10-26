@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"frpeasy/internal/agent"
-	"frpeasy/internal/shared"
 )
 
 // version 由构建时 -ldflags "-X main.version=x.y.z" 注入。
@@ -41,7 +40,10 @@ func main() {
 	// 通知面板「这台机器是被卸载了」而不是掉线。安装脚本的 --uninstall
 	// 分支在删文件之前调它，因为那时代码里已经没有 server 参数了。
 	goodbye := flag.Bool("goodbye", false, "内部使用：卸载前向面板报备一次，然后退出")
-	binSource := flag.String("source", "auto", "二进制来源：auto=跟随面板设置（默认），panel=只经面板，git=只从上上游取")
+	// 已废弃：源顺序现在完全由面板设置决定、每轮配置下发。
+	// 仍然接受这个参数，是因为老 unit / 计划任务里还写着 `--source git`，
+	// 直接报"未知参数"会让那些机器重启后起不来。
+	legacySource := flag.String("source", "", "（已废弃，忽略）以前用来钉死二进制来源")
 	flag.Parse()
 
 	if *goodbye {
@@ -78,20 +80,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	c, err := agent.NewClient(*server, *token, *name, *dataDir, *binSource)
+	c, err := agent.NewClient(*server, *token, *name, *dataDir)
 	if err != nil {
 		fmt.Println("初始化失败:", err)
 		os.Exit(1)
 	}
 	// 明确打出二进制来源。它决定了 frpc 是从面板中继取还是自己上上游取，
 	// 出问题时第一个要看的就是这一行 —— 以前这个选择是隐式的，日志里看不出来。
-	switch shared.NormalizeBinSource(*binSource) {
-	case shared.BinSourceGit:
-		fmt.Println("[agent] 二进制来源: git（钉死，只从上游取，不回退）")
-	case shared.BinSourcePanel:
-		fmt.Println("[agent] 二进制来源: panel（钉死，只经面板中继，不回退）")
-	default:
-		fmt.Println("[agent] 二进制来源: 跟随面板设置（来源链每轮由面板下发）")
+	if *legacySource != "" && *legacySource != "auto" {
+		fmt.Println("[agent] 提示: --source 已废弃并被忽略；源顺序由面板设置决定（设置 → 二进制下载）")
 	}
 	if err := c.Run(); err != nil {
 		fmt.Println("运行失败:", err)

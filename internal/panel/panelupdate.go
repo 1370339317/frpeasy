@@ -15,7 +15,6 @@ import (
 	"frpeasy/internal/shared"
 )
 
-
 // panelUpdateHandler POST /api/panel/update
 //
 // 立即返回 202，实际下载与替换放在后台：面板二进制约 11MB，慢网下要几十秒，
@@ -86,7 +85,6 @@ func (p *Panel) panelUpdateHandler(w http.ResponseWriter, r *http.Request) {
 
 	go p.doPanelUpdate(manifest, asset, exe)
 }
-
 
 // doPanelUpdate 后台执行：下载 → 校验 → 预检 → 交接。
 func (p *Panel) doPanelUpdate(manifest *shared.Manifest, asset *shared.Asset, exe string) {
@@ -196,7 +194,6 @@ func (p *Panel) doPanelUpdate(manifest *shared.Manifest, asset *shared.Asset, ex
 		p.Shutdown()
 	}()
 }
-
 
 // abortUpdate 解除更新中的标记，允许用户重试。
 func (p *Panel) abortUpdate() {

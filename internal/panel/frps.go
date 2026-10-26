@@ -183,18 +183,22 @@ func (m *FrpsManager) EnsureBinary() (string, error) {
 		}
 	}
 
-	mirror := m.db.GetSetting("mirror_base")
 	keyword := shared.PlatformKeyword(runtime.GOOS, runtime.GOARCH)
-	url, tag, err := shared.ResolveAssetURL(shared.FRPRepo, version, keyword, mirror)
-	if err != nil {
-		return "", fmt.Errorf("解析 frps 资源失败(%s): %w", tag, err)
-	}
-	path, err := shared.DownloadAndExtract(url, m.binDir, "frps")
-	if err != nil {
-		return "", fmt.Errorf("下载/解压 frps 失败: %w", err)
-	}
-	_ = os.WriteFile(m.versionPath(), []byte(tag), 0o644)
-	return path, nil
+	// 按源列表依次尝试。面板自己取二进制同样需要回退：
+	// 某个镜像挂掉时，用户不该被迫先改设置再手动点一次重启。
+	return trySources("frps", sourcesFromSetting(m.db, settingServerSources),
+		func(src shared.Source) (string, error) {
+			url, tag, err := resolveFRPAsset(shared.FRPRepo, version, keyword, "")
+			if err != nil {
+				return "", fmt.Errorf("解析资源失败：%w", err)
+			}
+			path, err := shared.DownloadAndExtract(src.Apply(url), m.binDir, "frps")
+			if err != nil {
+				return "", fmt.Errorf("下载/解压失败（%s）：%w", url, err)
+			}
+			_ = os.WriteFile(m.versionPath(), []byte(tag), 0o644)
+			return path, nil
+		})
 }
 
 // dashCredentials 返回 dashboard 的用户名/口令，首次调用时自动生成并落库。
@@ -624,6 +628,7 @@ func trimToken(t string) string {
 	}
 	return "******"
 }
+
 // frpsLogHandler GET /api/frps/log —— 返回 frps 日志尾部，便于在面板内排障。
 func (p *Panel) frpsLogHandler(w http.ResponseWriter, r *http.Request) {
 	n, _ := strconv.Atoi(r.URL.Query().Get("bytes"))
@@ -661,4 +666,3 @@ func (p *Panel) frpsControlHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
-

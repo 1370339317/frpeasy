@@ -107,8 +107,10 @@ export interface Settings {
   install_token: string
   update_base: string
   agent_auto_update: string
-  /** 客户端取二进制的来源链，逗号分隔且有序：panel / panel,git / git / git,panel */
-  bin_source_chain: string
+  /** 面板自己取二进制时的源顺序（有序、逗号分隔）：github / https://前缀,… */
+  server_sources: string
+  /** 客户端取二进制时的源顺序：panel / github / https://前缀,… */
+  client_sources: string
   [key: string]: string
 }
 
@@ -192,17 +194,6 @@ export interface TunnelsResponse {
   install_command: string
   install_command_windows: string
   install_command_android: string
-  /** 同一批命令，但下载地址直接指向更新源（不经过面板转发） */
-  install_command_git: string
-  install_command_windows_git: string
-  install_command_android_git: string
-  /** Git 源实际使用的目录地址（UI 展示用，让用户看见「到底从哪下」） */
-  bin_git_base: string
-  /** 面板没配更新源时为 false —— 此时没有第二个地方可取二进制 */
-  bin_git_available: boolean
-  bin_git_note: string
-  /** Git 源可用但不推荐时的提醒（例如没配镜像，等于直连 GitHub） */
-  bin_git_warn: string
   /** 卸载命令：在那台机器上直接执行即可（与云端下发卸载互补） */
   uninstall_command: string
   uninstall_command_windows: string
@@ -377,7 +368,8 @@ export interface SettingsBody {
   new_password?: string
   update_base?: string
   agent_auto_update?: string
-  bin_source_chain?: string
+  server_sources?: string
+  client_sources?: string
 }
 
 export interface SettingsSaveResult {

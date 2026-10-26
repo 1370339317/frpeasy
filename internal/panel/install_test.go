@@ -220,7 +220,7 @@ func TestBuildInstallCommands(t *testing.T) {
 	_ = p.db.SetSetting("install_token", "tok123")
 	_ = p.db.SetSetting("public_addr", "1.2.3.4:8080")
 
-	android := p.buildInstallCommandAndroid(nil, BinSourcePanel)
+	android := p.buildInstallCommandAndroid(nil)
 	if !strings.Contains(android, "adb shell") {
 		t.Fatalf("Android 命令应以 adb shell 开头: %s", android)
 	}
@@ -249,7 +249,7 @@ func TestBuildInstallCommands(t *testing.T) {
 		t.Fatalf("命令应在脚本落地失败时明确退出: %s", android)
 	}
 
-	linux := p.buildInstallCommand(nil, BinSourcePanel)
+	linux := p.buildInstallCommand(nil)
 	if !strings.Contains(linux, "sh -s -- --server") || !strings.Contains(linux, "--token tok123") {
 		t.Fatalf("Linux 命令格式不对: %s", linux)
 	}

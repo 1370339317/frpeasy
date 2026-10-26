@@ -97,7 +97,7 @@ func TestEnsureBinaryReusesLocalWithoutPanel(t *testing.T) {
 	// 指向一个必然连不上的地址：只要它被请求，这个测试就会失败/超时
 	m.SetPanelBase("http://127.0.0.1:1")
 
-	path, err := m.EnsureBinary("v0.71.1", "")
+	path, err := m.EnsureBinary("v0.71.1")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -73,8 +73,8 @@ func (p *Panel) agentConfigHandler(w http.ResponseWriter, r *http.Request) {
 		FRPSAddr:  p.resolveFRPSAddr(r, bindPort),
 		FRPSToken: p.db.GetSetting("frps_token"),
 		Tunnels:   tunnels,
-		// 来源链每轮下发，改设置立刻生效，不用重装客户端。
-		BinSources:  shared.ParseBinSourceChain(p.db.GetSetting("bin_source_chain")),
+		// 源列表每轮下发，改设置立刻生效，不用重装客户端。
+		Sources:     sourceTokens(p.clientSources()),
 		MirrorBase:  p.db.GetSetting("mirror_base"),
 		FRPVersion:  p.concreteFRPVersion(agent.Os, agent.Arch),
 		FRPSRunning: p.frps.Status()["running"] == true,

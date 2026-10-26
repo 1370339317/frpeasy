@@ -50,9 +50,12 @@ type state struct {
 	Server string `json:"server,omitempty"`
 }
 
-// NewClient 构造 client。binSource 是安装时选定的二进制来源（"panel" 或 "git"，
-// 空串按 panel 处理）——它决定 frpc 从面板中继取，还是这台机器自己去上游取。
-func NewClient(server, installTok, name, dataDir, binSource string) (*Client, error) {
+// NewClient 构造 client。
+//
+// 不再接受"安装时钉死的来源"：源顺序完全由面板的设置决定、每轮随配置下发，
+// 所以装完之后改设置就能生效，不需要重装。（--source 参数仍被接受但忽略，
+// 见 cmd/agent 的说明——老 unit 里还留着它。）
+func NewClient(server, installTok, name, dataDir string) (*Client, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -64,9 +67,8 @@ func NewClient(server, installTok, name, dataDir, binSource string) (*Client, er
 		frpc:       NewFrpcManager(dataDir),
 		httpClient: &http.Client{Timeout: 20 * time.Second},
 	}
-	// 面板地址始终注入：即使选了 Git 源，面板仍是配置与版本的唯一来源。
+	// 面板地址始终注入：即使某个客户端一路走镜像，面板仍是配置与版本的唯一来源。
 	c.frpc.SetPanelBase(server)
-	c.frpc.SetSource(binSource)
 	return c, nil
 }
 

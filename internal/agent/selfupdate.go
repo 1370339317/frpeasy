@@ -157,11 +157,13 @@ func (c *Client) updateCandidateURLs(up *shared.AgentUpdate) []string {
 		seen[u] = true
 		out = append(out, u)
 	}
-	for _, src := range c.frpc.SourceOrder() {
-		if src == shared.BinSourceGit {
-			add(up.URLGit)
-		} else {
+	for _, src := range c.frpc.Sources() {
+		if src.IsPanel() {
 			add(up.URL)
+		} else {
+			// 同一个文件、换个前缀取：URLGit 是面板锁好版本的那条地址，
+			// 套上这个源的前缀即可（自建源不会被套，见 Source.Apply）。
+			add(src.Apply(up.URLGit))
 		}
 	}
 	add(up.URL)

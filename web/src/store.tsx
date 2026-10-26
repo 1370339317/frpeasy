@@ -54,14 +54,6 @@ interface AppData {
   versions: VersionsResponse | null
   net: NetworkResponse | null
   install: Record<CommandKind, string>
-  /** 同一批命令，下载地址直接指向更新源（不经面板转发） */
-  installGit: Record<CommandKind, string>
-  /** Git 源实际使用的地址；面板没配更新源时为空 */
-  gitBase: string
-  gitAvailable: boolean
-  gitNote: string
-  /** Git 可用但当前配置下不推荐时的提醒（空 = 没有提醒） */
-  gitWarn: string
   /** 卸载命令：同样按平台分 */
   uninstall: Record<CommandKind, string>
   accessHost: string
@@ -99,11 +91,6 @@ const EMPTY_INSTALL: Record<CommandKind, string> = {
   android: '',
 }
 
-const EMPTY_INSTALL_GIT: Record<CommandKind, string> = {
-  linux: '',
-  win: '',
-  android: '',
-}
 
 const AppContext = createContext<AppContextValue | null>(null)
 
@@ -123,11 +110,6 @@ export function AppProvider({
     versions: null,
     net: null,
     install: EMPTY_INSTALL,
-    installGit: EMPTY_INSTALL_GIT,
-    gitBase: '',
-    gitAvailable: false,
-    gitNote: '',
-    gitWarn: '',
     uninstall: EMPTY_INSTALL,
     accessHost: '',
     accessSource: 'fallback',
@@ -196,15 +178,6 @@ export function AppProvider({
         win: r.install_command_windows || '',
         android: r.install_command_android || '',
       },
-      installGit: {
-        linux: r.install_command_git || '',
-        win: r.install_command_windows_git || '',
-        android: r.install_command_android_git || '',
-      },
-      gitBase: r.bin_git_base || '',
-      gitAvailable: !!r.bin_git_available,
-      gitNote: r.bin_git_note || '',
-      gitWarn: r.bin_git_warn || '',
       uninstall: {
         linux: r.uninstall_command || '',
         win: r.uninstall_command_windows || '',

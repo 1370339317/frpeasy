@@ -32,7 +32,7 @@ var frpcFetchMu sync.Mutex
 // resolveFRPAsset 解析 frp 发布资产地址（可注入，测试里替换掉真实 GitHub 请求）。
 // 与 fetchFRPVersions / probeAgentVersion 同样的做法：网络边界做成变量，
 // 单元测试才有办法覆盖"拉到了 / 拉不到 / 版本不匹配"这几条路径。
-var resolveFRPAsset = shared.ResolveAssetURL
+var resolveFRPAsset = shared.FRPAssetURL
 
 // frpcCachePath 某平台 frpc 的缓存路径（不保证存在）。
 func (p *Panel) frpcCachePath(osName, arch string) string {
@@ -88,29 +88,31 @@ func (p *Panel) ensureFrpcBin(osName, arch string) (string, error) {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return "", fmt.Errorf("创建缓存目录 %s 失败：%v", binDir, err)
 	}
-	mirror := p.db.GetSetting("mirror_base")
-	url, tag, err := resolveFRPAsset(shared.FRPRepo, version, shared.PlatformKeyword(osName, arch), mirror)
-	if err != nil {
-		return "", fmt.Errorf("解析 frpc 资源失败（%s/%s）：%v", osName, arch, err)
-	}
-
-	// 解包到临时子目录再改名：直接解到 bin/ 会留下一个叫 frpc 的中间文件，
-	// 多平台并行时还会互相覆盖。
-	tmpDir, err := os.MkdirTemp(binDir, ".frpcext-*")
-	if err != nil {
-		return "", fmt.Errorf("创建临时目录失败：%v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-	extracted, err := shared.DownloadAndExtract(url, tmpDir, "frpc")
-	if err != nil {
-		return "", fmt.Errorf("拉取 frpc 失败（%s）：%v", url, err)
-	}
-	if err := os.Rename(extracted, dst); err != nil {
-		return "", fmt.Errorf("保存 %s 失败：%v", dst, err)
-	}
-	_ = os.Chmod(dst, 0o755)
-	_ = os.WriteFile(dst+cacheStampSuffix, []byte(tag), 0o644)
-	return dst, nil
+	keyword := shared.PlatformKeyword(osName, arch)
+	return trySources("frpc "+osName+"/"+arch, sourcesFromSetting(p.db, settingServerSources),
+		func(src shared.Source) (string, error) {
+			url, tag, err := resolveFRPAsset(shared.FRPRepo, version, keyword, "")
+			if err != nil {
+				return "", fmt.Errorf("解析资源失败：%v", err)
+			}
+			// 解包到临时子目录再改名：直接解到 bin/ 会留下一个叫 frpc 的中间文件，
+			// 多平台并行时还会互相覆盖。
+			tmpDir, terr := os.MkdirTemp(binDir, ".frpcext-*")
+			if terr != nil {
+				return "", fmt.Errorf("创建临时目录失败：%v", terr)
+			}
+			defer os.RemoveAll(tmpDir)
+			extracted, derr := shared.DownloadAndExtract(src.Apply(url), tmpDir, "frpc")
+			if derr != nil {
+				return "", fmt.Errorf("下载/解压失败（%s）：%v", url, derr)
+			}
+			if rerr := os.Rename(extracted, dst); rerr != nil {
+				return "", fmt.Errorf("保存失败：%v", rerr)
+			}
+			_ = os.Chmod(dst, 0o755)
+			_ = os.WriteFile(dst+cacheStampSuffix, []byte(tag), 0o644)
+			return dst, nil
+		})
 }
 
 // frpcVersionMatches 缓存戳是否还匹配期望版本。

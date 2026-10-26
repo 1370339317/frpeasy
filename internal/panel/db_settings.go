@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 )
 
-
 // --- Settings ---
 
 func (db *DB) GetSetting(key string) string {
@@ -13,12 +12,10 @@ func (db *DB) GetSetting(key string) string {
 	return v
 }
 
-
 func (db *DB) SetSetting(key, value string) error {
 	_, err := db.Exec("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, value)
 	return err
 }
-
 
 func (db *DB) GetAllSettings() (map[string]string, error) {
 	rows, err := db.Query("SELECT key,value FROM settings")
@@ -36,7 +33,6 @@ func (db *DB) GetAllSettings() (map[string]string, error) {
 	}
 	return m, nil
 }
-
 
 // MarshalSettingsJSON 便于调试导出。
 func (db *DB) MarshalSettingsJSON() string {

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useApp } from '../store'
 import { api, qs } from '../lib/api'
-import { copyText, fmtBytes } from '../lib/format'
+import { copyText } from '../lib/format'
 import {
   Button,
   Card,
@@ -9,27 +9,164 @@ import {
   Field,
   Hint,
   Input,
+  cx,
 } from '../components/ui'
 import type { MirrorTestResult, Settings as SettingsShape, SettingsBody, SettingsSaveResult } from '../types'
 
-// 客户端取二进制的来源链。合法组合只有这四种，所以只给预设，不做自由输入 ——
-// 手打逗号串的结果通常是拼写错误，而错误的表现是"客户端一直拉取失败"。
-// 名字必须自己解释自己。原来叫「仅面板 / 面板 → Git / 仅 Git」，
-// 用户第一眼会以为 Git 是上面镜像预设里的某一项 —— 那是两码事：
-// 上面填的是"代理前缀"，这里选的是"谁来下载"。所以一律带上"中继 / GitHub"。
-const CHAIN_PRESETS: { label: string; value: string; note: string }[] = [
-  { label: '仅面板中继', value: 'panel', note: '默认；客户端只连面板' },
-  { label: '面板中继 → GitHub', value: 'panel,git', note: '面板取不到再自己取' },
-  { label: 'GitHub → 面板中继', value: 'git,panel', note: '优先自己取，省面板带宽' },
-  { label: '仅 GitHub', value: 'git', note: '客户端必须能出网' },
+// 内置候选源。用户也可以自己填前缀 —— 镜像会挂、会改名，写死清单不现实。
+const SOURCE_PRESETS: { token: string; label: string; note: string }[] = [
+  { token: 'panel', label: '面板中继', note: '只有它时客户端不出网' },
+  { token: 'github', label: 'GitHub 直连', note: '无前缀' },
+  { token: 'https://ghfast.top', label: 'ghfast', note: '国内快' },
+  { token: 'https://ghproxy.com', label: 'ghproxy', note: '' },
+  { token: 'https://gh-proxy.com', label: 'gh-proxy', note: '' },
 ]
 
-const MIRROR_PRESETS: { label: string; value: string; note?: string }[] = [
-  { label: 'GitHub 官方', value: '' },
-  { label: 'ghfast', value: 'https://ghfast.top/', note: '国内快' },
-  { label: 'ghproxy', value: 'https://ghproxy.com/' },
-  { label: 'gh-proxy', value: 'https://gh-proxy.com/' },
-]
+/** 把一个 token 说成人话。 */
+function sourceLabel(tok: string): string {
+  if (tok === 'panel') return '面板中继'
+  if (tok === 'github') return 'GitHub 直连'
+  try {
+    return new URL(tok).host
+  } catch {
+    return tok
+  }
+}
+
+function parseSources(v: string): string[] {
+  return v
+    .split(',')
+    .map((x) => x.trim().replace(/\/+$/, ''))
+    .filter(Boolean)
+}
+
+/**
+ * 有序源列表编辑器。
+ *
+ * 用"上移/下移"而不是拖拽：拖拽在窄屏和键盘操作下都难用，而这里最多四项 ——
+ * 点两下就调好了，不值得为它引入一个拖拽库和一堆边界情况。
+ */
+function SourceListEditor({
+  value,
+  onChange,
+  allowPanel,
+  probe,
+}: {
+  value: string
+  onChange: (v: string) => void
+  allowPanel: boolean
+  probe: Record<string, MirrorTestResult>
+}) {
+  const list = parseSources(value)
+  const set = (next: string[]) => onChange(next.join(','))
+  const move = (i: number, d: number) => {
+    const next = [...list]
+    const j = i + d
+    if (j < 0 || j >= next.length) return
+    ;[next[i], next[j]] = [next[j], next[i]]
+    set(next)
+  }
+  const remove = (i: number) => set(list.filter((_, k) => k !== i))
+  const [custom, setCustom] = useState('')
+  const addable = SOURCE_PRESETS.filter(
+    (p) => (allowPanel || p.token !== 'panel') && !list.includes(p.token),
+  )
+
+  return (
+    <div>
+      <div className="overflow-hidden rounded-[9px] border border-border">
+        {list.length === 0 && (
+          <div className="px-3 py-2.5 text-[12.5px] text-bad-fg">
+            至少要有一个源，否则客户端无从取到任何文件。
+          </div>
+        )}
+        {list.map((tok, i) => {
+          const r = probe[tok]
+          return (
+            <div
+              key={tok}
+              className={cx(
+                'flex items-center gap-2 px-3 py-1.5 text-[12.5px]',
+                i > 0 && 'border-t border-border',
+              )}
+            >
+              <span className="w-4 shrink-0 text-dim">{i + 1}</span>
+              <span className="shrink-0 font-medium">{sourceLabel(tok)}</span>
+              {tok !== 'panel' && tok !== 'github' && (
+                <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-dim">{tok}</span>
+              )}
+              {r && (
+                <span className={cx('ml-auto shrink-0 text-[11.5px]', r.ok ? 'text-ok-fg' : 'text-bad-fg')}>
+                  {r.ok ? `${r.elapsed_ms}ms · ${Math.round((r.speed_kbps ?? 0))}KB/s` : '不通'}
+                </span>
+              )}
+              <span className="ml-auto flex shrink-0 items-center gap-1">
+                <Btn title="上移" disabled={i === 0} onClick={() => move(i, -1)}>↑</Btn>
+                <Btn title="下移" disabled={i === list.length - 1} onClick={() => move(i, 1)}>↓</Btn>
+                <Btn title="移除" disabled={list.length <= 1} onClick={() => remove(i)}>✕</Btn>
+              </span>
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {addable.map((p) => (
+          <Chip key={p.token} sub={p.note} onClick={() => set([...list, p.token])}>
+            + {p.label}
+          </Chip>
+        ))}
+        <Input
+          value={custom}
+          onChange={(e) => setCustom(e.target.value)}
+          placeholder="自定义前缀，如 https://your-mirror/"
+          className="max-w-[260px]"
+        />
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={!custom.trim()}
+          onClick={() => {
+            const v = custom.trim().replace(/\/+$/, '')
+            if (!/^https?:\/\//.test(v)) return
+            set([...list, v])
+            setCustom('')
+          }}
+        >
+          添加
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/** 列表行里的小按钮（上移/下移/移除）。 */
+function Btn({
+  children,
+  onClick,
+  disabled,
+  title,
+}: {
+  children: ReactNode
+  onClick: () => void
+  disabled?: boolean
+  title: string
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+      className={cx(
+        'h-[22px] w-[22px] rounded-[5px] border border-border bg-card2 text-[12px] leading-none',
+        disabled ? 'cursor-not-allowed opacity-40' : 'cursor-pointer text-dim hover:text-fg',
+      )}
+    >
+      {children}
+    </button>
+  )
+}
 
 export function SettingsPage() {
   const {
@@ -47,19 +184,20 @@ export function SettingsPage() {
 
   // 表单是受控的：只在 settings 真的刷新时回填，避免每次渲染把用户输入冲掉
   const [publicAddr, setPublicAddr] = useState('')
-  const [mirror, setMirror] = useState('')
+  // 两个源列表（有序、逗号分隔）。以前的单值 mirror_base 已被它们取代。
+  const [serverSources, setServerSources] = useState('github')
+  const [clientSources, setClientSources] = useState('panel')
+  // 逐项测速结果，key 是源 token。面板测得到自己的网络，测不到客户端的，
+  // 所以只有服务端列表能测。
+  const [probe, setProbe] = useState<Record<string, MirrorTestResult>>({})
   const [pStart, setPStart] = useState('')
   const [pEnd, setPEnd] = useState('')
   const [bindPort, setBindPort] = useState('')
-  // 客户端取二进制的来源链。这里只给几个预设，不做自由编辑 ——
-  // 合法组合只有四种，让用户手打逗号串只会打出拼写错误。
-  const [chain, setChain] = useState('panel')
   const [dashPort, setDashPort] = useState('')
   const [token, setToken] = useState('')
   const [pass, setPass] = useState('')
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
-  const [testResult, setTestResult] = useState<MirrorTestResult | null>(null)
 
   // 表单只在「第一次拿到设置」时回填一次。
   //
@@ -77,11 +215,11 @@ export function SettingsPage() {
   // 不再回填，于是点了没反应。
   const fillForm = useCallback((s: SettingsShape) => {
     setPublicAddr(s.public_addr ?? '')
-    setMirror(s.mirror_base ?? '')
+    setServerSources(s.server_sources || 'github')
+    setClientSources(s.client_sources || 'panel')
     setPStart(s.port_range_start ?? '')
     setPEnd(s.port_range_end ?? '')
     setBindPort(s.frps_bind_port ?? '')
-    setChain(s.bin_source_chain || 'panel')
     setDashPort(s.dashboard_port ?? '')
     setToken('')
     setPass('')
@@ -122,12 +260,12 @@ export function SettingsPage() {
         // 必须显式带上 clear 标记，服务端才允许写入空值。
         if (!body.public_addr) body.clear_public_addr = '1'
       }
-      if (trim(mirror) !== trim(settings.mirror_base ?? '')) body.mirror_base = trim(mirror)
+      if (serverSources !== (settings.server_sources || 'github')) body.server_sources = serverSources
+      if (clientSources !== (settings.client_sources || 'panel')) body.client_sources = clientSources
       if (trim(pStart) !== trim(settings.port_range_start ?? '')) body.port_range_start = trim(pStart)
       if (trim(pEnd) !== trim(settings.port_range_end ?? '')) body.port_range_end = trim(pEnd)
       if (trim(bindPort) !== trim(settings.frps_bind_port ?? '')) body.frps_bind_port = trim(bindPort)
       if (trim(dashPort) !== trim(settings.dashboard_port ?? '')) body.dashboard_port = trim(dashPort)
-      if (chain !== (settings.bin_source_chain || 'panel')) body.bin_source_chain = chain
       // 令牌输入框拿到的是脱敏串，只有用户重新输入时才提交
       if (token.trim()) body.frps_token = token.trim()
       if (pass) body.new_password = pass
@@ -165,7 +303,8 @@ export function SettingsPage() {
     saving,
     settings,
     publicAddr,
-    mirror,
+    serverSources,
+    clientSources,
     pStart,
     pEnd,
     bindPort,
@@ -178,16 +317,25 @@ export function SettingsPage() {
     toast,
   ])
 
-  async function testMirror() {
+  // 按源测速。面板只能测自己这台机器的网络，所以只对服务端列表提供。
+  async function probeSource(tok: string) {
+    try {
+      const q = qs({ mirror: tok === 'github' ? '' : tok, version: versions?.target_version || 'latest' })
+      const r = await api<MirrorTestResult>('GET', `/api/system/mirror-test?${q}`)
+      setProbe((p) => ({ ...p, [tok]: r }))
+    } catch (e) {
+      setProbe((p) => ({ ...p, [tok]: { ok: false, error: (e as Error).message } }))
+    }
+  }
+
+  async function probeAll() {
     if (testing) return
     setTesting(true)
-    setTestResult(null)
     try {
-      const q = qs({ mirror: mirror.trim(), version: versions?.target_version || 'latest' })
-      const r = await api<MirrorTestResult>('GET', `/api/system/mirror-test?${q}`)
-      setTestResult(r)
-    } catch (e) {
-      setTestResult({ ok: false, error: (e as Error).message })
+      // 顺序测，不并发：并发会让每个源的测速结果互相抢带宽，排出来的顺序反而不可信。
+      for (const tok of parseSources(serverSources)) {
+        await probeSource(tok)
+      }
     } finally {
       setTesting(false)
     }
@@ -252,106 +400,52 @@ export function SettingsPage() {
         </Hint>
       </Card>
 
-      <Card title="二进制下载" desc="分两项：面板自己取（frps / frpc）、客户端取（agent / frpc）">
+      <Card
+        title="二进制下载"
+        desc="两个有序列表：面板自己取、客户端取。从左往右试，第一个能用的就停"
+      >
         <div className="mb-2 text-[13px] font-semibold text-fg">
-          ① 面板自己取 frps / frpc
+          ① 面板自己取 frps / frpc / 自己的更新
         </div>
-        <Field label="镜像前缀（留空 = 直连 github.com）">
-          <Input
-            value={mirror}
-            onChange={(e) => setMirror(e.target.value)}
-            placeholder="如 https://ghfast.top/"
-          />
-        </Field>
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div className="flex flex-wrap gap-2">
-            {MIRROR_PRESETS.map((p) => (
-              <Chip
-                key={p.value}
-                selected={mirror === p.value}
-                sub={p.note}
-                onClick={() => {
-                  setMirror(p.value)
-                  toast(p.value ? '已选择镜像' : '已切回 GitHub 官方')
-                }}
-              >
-                {p.label}
-              </Chip>
-            ))}
-          </div>
-          <Button variant="ghost" size="sm" onClick={() => void testMirror()} disabled={testing}>
-            {testing ? '测试中…' : '测试当前源'}
+        <SourceListEditor
+          value={serverSources}
+          onChange={setServerSources}
+          allowPanel={false}
+          probe={probe}
+        />
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Button variant="ghost" size="sm" disabled={testing} onClick={() => void probeAll()}>
+            {testing ? '测速中…' : '逐个测速'}
           </Button>
+          <span className="text-xs text-dim">
+            每项实下 512KB 测速，按结果调整顺序比凭感觉猜可靠
+          </span>
         </div>
         <Hint>
-          这是<b>面板这台机器</b>去 github.com 取 frps / frpc 时用的地址代理，
-          按「前缀 + GitHub 原始链接」拼接。测试会实际解析版本资产并下载 512KB 测速。
+          这是<b>面板这台机器</b>自己出网取二进制时的顺序（frps、frpc 缓存、agent 缓存、面板自更新）。
+          某项失败才试下一项，失败原因记进日志。
           <br />
-          它同时也会拼进下面「GitHub」那条通道的地址里 —— 两处用的是同一个前缀。
+          没有 panel 选项：面板不能给自己中继。
         </Hint>
 
-        <div className="mb-2 mt-5 text-[13px] font-semibold text-fg">
-          ② 客户端取 agent / frpc
-        </div>
-        <Field label="来源顺序">
-          <div className="flex flex-wrap gap-2">
-            {CHAIN_PRESETS.map((p) => (
-              <Chip
-                key={p.value}
-                selected={chain === p.value}
-                sub={p.note}
-                onClick={() => setChain(p.value)}
-              >
-                {p.label}
-              </Chip>
-            ))}
-          </div>
-        </Field>
+        <div className="mb-2 mt-6 text-[13px] font-semibold text-fg">② 客户端取 agent / frpc</div>
+        <SourceListEditor
+          value={clientSources}
+          onChange={setClientSources}
+          allowPanel
+          probe={probe}
+        />
         <Hint>
-          这里决定的是<b>谁来下载</b>，只有两条通道：
+          这是<b>客户端那台机器</b>从哪儿取。两种通道：
+          <b>面板中继</b>（客户端只连面板，由面板转发；任何环境都能用，但占面板出口带宽）
+          和<b>镜像前缀</b>（客户端经该前缀自己取 GitHub 上的文件，不占面板带宽，要求它能出网）。
+          最后一项可以是「GitHub 直连」——没配任何前缀时它最慢，先测一下再排。
           <br />
-          · <b>面板中继</b>：客户端只连面板，由面板把文件转发过去。任何环境都能用，
-          但占面板的出口带宽（装一台要发 6.5MB 的 agent，之后还有 20MB 的 frpc）。
+          这里没有测速：面板测不到客户端那台机器的网络。
           <br />
-          · <b>GitHub</b>：客户端自己去 GitHub Release 取，<b>自动套用上面填的镜像前缀</b>。
-          不占面板带宽，但这台机器必须能出网。
-          <br />
-          选两项时按顺序尝试，前一个失败才试后一个；失败原因会写进客户端卡片。
-          改完下一轮心跳就生效，<b>不需要重装客户端</b>（安装命令里显式选过 GitHub 的机器除外，
-          那些是钉死的，不参与回退）。
-          <br />
-          注意：<b>没填镜像前缀时「GitHub」这条路就是直连 github.com</b>，
-          国内实测比经面板还慢，先配好前缀再用。
+          改完下一轮心跳就生效，<b>不用重装客户端</b>。安装那一步固定经面板（装的时候 agent
+          还没跑起来、这份顺序还没下发，而且装不上比走慢一点的通道严重得多）。
         </Hint>
-
-        {testing && (
-          <div className="mt-3 rounded-[10px] border border-border bg-card2 px-3.5 py-3 text-[12.5px]">
-            正在解析版本资产并下载 512KB 测速，最多 45 秒…
-          </div>
-        )}
-        {testResult && !testing && (
-          <div
-            className={
-              testResult.ok
-                ? 'mt-3 rounded-[10px] border border-ok bg-card2 px-3.5 py-3 text-[12.5px] leading-[1.6] text-ok-fg'
-                : 'mt-3 rounded-[10px] border border-bad bg-card2 px-3.5 py-3 text-[12.5px] leading-[1.6] text-bad-fg'
-            }
-          >
-            {testResult.ok ? (
-              <>
-                <b>可用</b> · 下载 {fmtBytes(testResult.bytes)} 用了 {testResult.elapsed_ms} ms · 约{' '}
-                {Math.round(testResult.speed_kbps ?? 0)} KB/s
-              </>
-            ) : (
-              <>
-                <b>不可用</b> · {testResult.error || '未知错误'}
-              </>
-            )}
-            {testResult.url && (
-              <div className="mt-1.5 font-mono text-xs break-all text-dim">{testResult.url}</div>
-            )}
-          </div>
-        )}
       </Card>
 
       <Card title="端口池" desc="自动分配公网端口的范围">

@@ -7,7 +7,6 @@ import (
 	"time"
 )
 
-
 // hostKind 判断探测目标主机属于哪一类，决定"回访"能不能说明问题。
 func hostKind(host string) string {
 	if host == "" {
@@ -29,7 +28,6 @@ func hostKind(host string) string {
 	}
 	return "public"
 }
-
 
 // checkPorts 批量检测并给出结论。
 //
@@ -70,12 +68,10 @@ func checkPorts(host string, targets []PortNeed, external bool) []PortCheck {
 	return out
 }
 
-
 // checkOnePort 单端口检测（测试与需要逐个报告的场合用）。
 func checkOnePort(host string, it PortNeed, external bool) PortCheck {
 	return checkPorts(host, []PortNeed{it}, external)[0]
 }
-
 
 // judgePort 把「本机监听 / 本机回访 / 外部回访」三类证据收敛成一个可解释的结论。
 func judgePort(host string, it PortNeed, self DialOutcome, ext *ExtProbeResult) PortCheck {
@@ -139,7 +135,6 @@ func judgePort(host string, it PortNeed, self DialOutcome, ext *ExtProbeResult) 
 	}
 	return res
 }
-
 
 func noServiceReason(it PortNeed) string {
 	switch it.Purpose {

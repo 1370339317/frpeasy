@@ -99,16 +99,6 @@ func (p *Panel) ensureAgentBin(osName, arch string) (string, error) {
 			"或手工把该文件放进 %s", name, p.dataDir+"/bin")
 	}
 
-	m, err := shared.FetchManifest(base, p.db.GetSetting("mirror_base"))
-	if err != nil {
-		// 清单拉不到（断网、镜像挂了）时同样退回缓存：
-		// 缓存里的旧版本至少能用，比直接 502 让客户端装不上强。
-		if path := p.cachedAgentBin(osName, arch); path != "" {
-			return path, nil
-		}
-		return "", fmt.Errorf("面板上没有 %s，从更新源拉清单也失败：%v", name, err)
-	}
-
 	// 缓存命中判定要带版本。
 	//
 	// 原来只判断「文件在不在」：一旦某次拉取把 0.5.5 落到 data/bin，
@@ -116,17 +106,6 @@ func (p *Panel) ensureAgentBin(osName, arch string) (string, error) {
 	// 指挥客户端升级，客户端下到的却是旧文件，--version 对不上目标版本，
 	// 失败后进入 30 分钟冷却。表现就是「自动升级永远不生效」，而且无声无息。
 	cached := p.cachedAgentBin(osName, arch)
-	if cached != "" && p.cacheStampMatches(cached, m.Version) {
-		return cached, nil
-	}
-
-	asset, err := m.SelectAsset(shared.AssetAgent, osName, arch)
-	if err != nil {
-		if cached != "" {
-			return cached, nil
-		}
-		return "", fmt.Errorf("面板上没有 %s，而且 %v", name, err)
-	}
 
 	dir := filepath.Join(p.dataDir, "bin")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -136,33 +115,57 @@ func (p *Panel) ensureAgentBin(osName, arch string) (string, error) {
 	tmp := dst + ".part"
 	defer os.Remove(tmp) // 失败路径上不留下半截文件
 
-	url := m.URL(asset)
-	n, err := shared.DownloadFile(url, tmp)
+	// 每个源各自去拉清单：清单地址本身带前缀，所以清单里写的相对文件名
+	// （m.URL(asset)）自然也是经同一个前缀取的，不用再单独拼一次。
+	path, err := trySources("agent "+name, sourcesFromSetting(p.db, settingServerSources),
+		func(src shared.Source) (string, error) {
+			m, ferr := shared.FetchManifest(src.Apply(base), "")
+			if ferr != nil {
+				return "", fmt.Errorf("拉清单失败：%v", ferr)
+			}
+			if cached != "" && p.cacheStampMatches(cached, m.Version) {
+				return cached, nil
+			}
+			asset, aerr := m.SelectAsset(shared.AssetAgent, osName, arch)
+			if aerr != nil {
+				return "", aerr
+			}
+			url := m.URL(asset)
+			n, derr := shared.DownloadFile(url, tmp)
+			if derr != nil {
+				return "", fmt.Errorf("下载失败（%s）：%v", url, derr)
+			}
+			// 先比长度再比哈希：长度不符多半是代理返回了截断内容，报长度更好理解
+			if asset.Size > 0 && n != asset.Size {
+				return "", fmt.Errorf("大小不符：期望 %d 字节，实际 %d 字节（下载被截断或中间有代理）", asset.Size, n)
+			}
+			if asset.SHA256 != "" {
+				got, herr := shared.FileSHA256(tmp)
+				if herr != nil {
+					return "", fmt.Errorf("计算哈希失败：%v", herr)
+				}
+				if !strings.EqualFold(got, asset.SHA256) {
+					return "", fmt.Errorf("sha256 与清单不符 —— 传输损坏，或清单与产物不是同一次发布")
+				}
+			}
+			if rerr := os.Rename(tmp, dst); rerr != nil {
+				return "", fmt.Errorf("保存失败：%v", rerr)
+			}
+			// 记录这份缓存来自哪次发布。下次请求据此判断要不要刷新。
+			_ = os.WriteFile(dst+cacheStampSuffix, []byte(m.Version), 0o644)
+			// 客户端安装脚本自己也会 chmod，但 Linux 上直接执行时先给权限更省事
+			_ = os.Chmod(dst, 0o755)
+			return dst, nil
+		})
 	if err != nil {
-		return "", fmt.Errorf("下载 %s 失败（%s）：%v", name, url, err)
-	}
-	// 先比长度再比哈希：长度不符多半是代理返回了截断内容，报长度更好理解
-	if asset.Size > 0 && n != asset.Size {
-		return "", fmt.Errorf("下载 %s 大小不符：期望 %d 字节，实际 %d 字节（下载被截断或中间有代理）", name, asset.Size, n)
-	}
-	if asset.SHA256 != "" {
-		got, err := shared.FileSHA256(tmp)
-		if err != nil {
-			return "", fmt.Errorf("计算 %s 哈希失败：%v", name, err)
+		// 所有源都不通（断网、镜像全挂）时退回缓存：旧版本至少能用，
+		// 比直接 502 让客户端装不上强。
+		if cached != "" {
+			return cached, nil
 		}
-		if !strings.EqualFold(got, asset.SHA256) {
-			return "", fmt.Errorf("下载 %s 后 sha256 与清单不符 —— 传输损坏，或清单与产物不是同一次发布", name)
-		}
+		return "", fmt.Errorf("面板上没有 %s，从更新源拉取也失败：%v", name, err)
 	}
-	if err := os.Rename(tmp, dst); err != nil {
-		return "", fmt.Errorf("保存 %s 失败：%v", dst, err)
-	}
-	// 记录这份缓存来自哪次发布。下次请求据此判断要不要刷新 ——
-	// 只判断「文件在不在」会让缓存永远停在第一次下载的版本上。
-	_ = os.WriteFile(dst+cacheStampSuffix, []byte(m.Version), 0o644)
-	// 客户端安装脚本自己也会 chmod，但 Linux 上直接执行时先给权限更省事
-	_ = os.Chmod(dst, 0o755)
-	return dst, nil
+	return path, nil
 }
 
 // cacheStampSuffix 缓存版本戳的后缀，与二进制同目录（<name>.fromver）。

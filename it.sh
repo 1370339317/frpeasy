@@ -191,37 +191,34 @@ chk "Android 命令默认不提权" 0 "$(echo "$AND" | grep -c -- '--elevate')"
 chk "Android 命令不写死 su 形状" 0 "$(echo "$AND" | grep -c 'su -c')"
 chk "安装脚本落地失败时明确退出" 1 "$(echo "$AND" | grep -c 'download failed on device')"
 
-say "== 17b) 安装命令的来源可选（面板 / Git）=="
-# 默认只有面板源：命令里不带 --source，任何能打开面板的机器都能装。
-chk "面板源命令不含 --source" 0 "$(curl -s -b cj.txt $B/api/tunnels | jget "d['install_command']" | grep -c -- '--source')"
-chk "未配更新源时 Git 不可用" False "$(curl -s -b cj.txt $B/api/tunnels | jget "d['bin_git_available']")"
-chk "不可用时给出原因" 1 "$(curl -s -b cj.txt $B/api/tunnels | jget "d['bin_git_note']" | grep -c '更新源')"
+say "== 17b) 安装命令：只有一个版本，不带来源参数 =="
+IC=$(curl -s -b cj.txt $B/api/tunnels | jget "d['install_command']")
+IW=$(curl -s -b cj.txt $B/api/tunnels | jget "d['install_command_windows']")
+IA=$(curl -s -b cj.txt $B/api/tunnels | jget "d['install_command_android']")
+chk "Linux 命令不带 --source" 0 "$(echo "$IC" | grep -c -- '--source')"
+chk "Windows 命令不带 -Source" 0 "$(echo "$IW" | grep -c -- '-Source')"
+chk "Android 命令不带 --source" 0 "$(echo "$IA" | grep -c -- '--source')"
+chk "命令里没有 git-base" 0 "$(echo "$IC" | grep -c 'git-base')"
 
-# 配好更新源之后，Git 变体必须把地址直接写进命令里（不经过面板转发）。
-curl -s -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json'   -d '{"update_base":"https://files.example.com/dl"}' >/dev/null
-chk "配了更新源后 Git 可用" True "$(curl -s -b cj.txt $B/api/tunnels | jget "d['bin_git_available']")"
-chk "Git 基址就是更新源目录" "https://files.example.com/dl" "$(curl -s -b cj.txt $B/api/tunnels | jget "d['bin_git_base']")"
-GITC=$(curl -s -b cj.txt $B/api/tunnels | jget "d['install_command_git']")
-GITW=$(curl -s -b cj.txt $B/api/tunnels | jget "d['install_command_windows_git']")
-GITA=$(curl -s -b cj.txt $B/api/tunnels | jget "d['install_command_android_git']")
-chk "Linux Git 命令含地址" 1 "$(echo "$GITC" | grep -c -- '--source git --git-base https://files.example.com/dl')"
-chk "Linux Git 命令不再指向面板 agent 接口" 0 "$(echo "$GITC" | grep -c '/api/agent/bin')"
-chk "Windows Git 命令用 -Source/-GitBase" 1 "$(echo "$GITW" | grep -c -- '-Source git -GitBase https://files.example.com/dl')"
-chk "Android Git 命令含地址" 1 "$(echo "$GITA" | grep -c -- '--source git --git-base https://files.example.com/dl')"
-
-say "== 17c) 来源链：面板设置 / 配置下发 / 心跳上报 =="
-# 默认只走面板：这是唯一在各种网络环境下都成立的选择
-chk "默认来源链是 panel" "panel" "$(curl -s -b cj.txt $B/api/settings | jget "d['bin_source_chain']")"
-# 配置接口把链发给客户端（改设置立刻生效，不用重装）
-chk "config 下发来源链 panel" "['panel']" "$(curl -s "$B/api/agent/config?agent_id=$AGID&token=$AGTOK" | jget "d['bin_sources']")"
-chk "非法来源链被拒 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d '{"bin_source_chain":"panel,http"}')"
-chk "空来源链被拒 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d '{"bin_source_chain":""}')"
-chk "合法来源链可保存" "git,panel" "$(curl -s -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d '{"bin_source_chain":" git , panel "}' >/dev/null; curl -s -b cj.txt $B/api/settings | jget "d['bin_source_chain']")"
-chk "config 下发两条" "['git', 'panel']" "$(curl -s "$B/api/agent/config?agent_id=$AGID&token=$AGTOK" | jget "d['bin_sources']")"
-
-# 客户端上报「实际从哪儿拿到 frpc」，界面据此显示；改设置有没有生效看的就是它
-curl -s -X POST $B/api/agent/heartbeat -H 'Content-Type: application/json'   -d "{\"agent_id\":\"$AGID\",\"agent_token\":\"$AGTOK\",\"bin_source\":\"git\",\"bin_note\":\"面板超时\"}" >/dev/null
-chk "心跳上报来源被存下" "git" "$(curl -s -b cj.txt $B/api/agents | jget "next((x['bin_source'] for x in d['agents'] if x['id']=='$AGID'), '')")"
+say "== 17c) 源列表：默认值 / 校验 / 下发 / 上报 =="
+# 默认：面板自己取直连 GitHub，客户端只经面板（纯内网也成立）
+chk "默认 server_sources" "github" "$(curl -s -b cj.txt $B/api/settings | jget "d['server_sources']")"
+chk "默认 client_sources" "panel" "$(curl -s -b cj.txt $B/api/settings | jget "d['client_sources']")"
+# 校验：面板不能给自己中继；认不出的 token 与空列表都要拒
+chk "server 列表含 panel 被拒 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d '{"server_sources":"panel"}')"
+chk "认不出的 token 被拒 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d '{"server_sources":"nonsense"}')"
+chk "空列表被拒 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d '{"client_sources":""}')"
+# 合法保存要规范化：去空格、去重、去尾斜杠
+curl -s -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json'   -d '{"server_sources":" https://ghfast.top/ , github , https://ghfast.top "}' >/dev/null
+chk "server 列表规范化" "https://ghfast.top,github" "$(curl -s -b cj.txt $B/api/settings | jget "d['server_sources']")"
+# 遗留字段跟着派生，老客户端与「文件」页仍读它
+chk "mirror_base 派生自列表" "https://ghfast.top" "$(curl -s -b cj.txt $B/api/settings | jget "d['mirror_base']")"
+# 客户端列表下发给 agent
+curl -s -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json'   -d '{"client_sources":"panel,https://ghfast.top"}' >/dev/null
+chk "config 下发客户端源列表" "['panel', 'https://ghfast.top']" "$(curl -s "$B/api/agent/config?agent_id=$AGID&token=$AGTOK" | jget "d['sources']")"
+# 心跳上报「实际从哪儿拿到 frpc」，界面据此显示
+curl -s -X POST $B/api/agent/heartbeat -H 'Content-Type: application/json'   -d "{\"agent_id\":\"$AGID\",\"agent_token\":\"$AGTOK\",\"bin_source\":\"https://ghfast.top\",\"bin_note\":\"面板中继超时\"}" >/dev/null
+chk "心跳上报来源被存下" "https://ghfast.top" "$(curl -s -b cj.txt $B/api/agents | jget "next((x['bin_source'] for x in d['agents'] if x['id']=='$AGID'), '')")"
 chk "回退原因被存下" 1 "$(curl -s -b cj.txt $B/api/agents | jget "next((x['bin_note'] for x in d['agents'] if x['id']=='$AGID'), '')" | grep -c '超时')"
 
 say "== 18) 端口 / 防火墙清单 =="

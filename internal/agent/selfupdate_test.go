@@ -20,7 +20,7 @@ import (
 func newTestClient(t *testing.T) *Client {
 	t.Helper()
 	dir := t.TempDir()
-	c, err := NewClient("http://127.0.0.1:1", "it", "test", dir, "")
+	c, err := NewClient("http://127.0.0.1:1", "it", "test", dir)
 	if err != nil {
 		t.Fatal(err)
 	}

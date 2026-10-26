@@ -40,80 +40,15 @@ function isUninstalling(a: Agent): boolean {
   return !!a.uninstall_sent_at && a.online && sinceUninstallSent(a) < UNINSTALL_GRACE_MS
 }
 
-/** 二进制来源。与 shared/binsource.go 的 BinSource* 常量一一对应。 */
-type BinSource = 'auto' | 'git'
-
-/** 把设置里的来源链说成人话，用在安装区与客户端卡片上。 */
-function chainLabel(chain: string | undefined): string {
-  switch (chain) {
-    case 'git':
-      return '仅 GitHub'
-    case 'panel,git':
-      return '面板中继 → GitHub'
-    case 'git,panel':
-      return 'GitHub → 面板中继'
-    default:
-      return '仅面板中继'
+/** 把客户端上报的源 token 说成人话。空串 = 旧版 agent 没上报。 */
+function binSourceLabel(tok: string): string {
+  if (tok === 'panel') return '面板中继'
+  if (tok === 'github') return 'GitHub 直连'
+  try {
+    return new URL(tok).host
+  } catch {
+    return tok
   }
-}
-
-/**
- * 来源切换。
- *
- * 只有两个选项，因为实际上只有两条路：经面板转发，或这台机器自己去上游取。
- * 没有"自动"——自动需要在两条都慢的时候赌一把，而用户比程序更清楚这台机器的处境
- * （内网？出网正常？）。选完写进命令，一条命令就定死了走哪条。
- */
-function SourcePicker({
-  value,
-  onChange,
-  gitAvailable,
-  gitWarn,
-}: {
-  value: BinSource
-  onChange: (v: BinSource) => void
-  gitAvailable: boolean
-  /** 非空表示「能用但不推荐」，悬停时优先展示这句话 */
-  gitWarn: string
-}) {
-  const items: { key: BinSource; label: string; hint: string; disabled: boolean }[] = [
-    {
-      key: 'auto',
-      label: '自动',
-      // 自动 = 跟随面板设置里的顺序。把当前顺序直接写在提示里，
-      // 否则"自动"对用户来说等于黑箱。
-      hint: '安装固定经面板；装好后 frpc 与自动更新跟随设置里的顺序',
-      disabled: false,
-    },
-    {
-      key: 'git',
-      label: 'GitHub',
-      hint: !gitAvailable
-        ? '还没配更新源，暂不可用'
-        : gitWarn || '钉死：客户端自己去 GitHub Release 取，失败不回退',
-      disabled: !gitAvailable,
-    },
-  ]
-  return (
-    <div className="inline-flex flex-wrap gap-[3px] rounded-[9px] border border-border bg-chip p-[3px]">
-      {items.map((it) => (
-        <button
-          key={it.key}
-          type="button"
-          title={it.hint}
-          disabled={it.disabled}
-          onClick={() => onChange(it.key)}
-          className={cx(
-            'cursor-pointer rounded-[7px] border-none px-[13px] py-1 text-[12.5px] transition',
-            value === it.key ? 'bg-card2 font-semibold text-fg' : 'bg-transparent text-dim',
-            it.disabled && 'cursor-not-allowed opacity-45',
-          )}
-        >
-          {it.label}
-        </button>
-      ))}
-    </div>
-  )
 }
 
 const TABS: { key: CommandKind; label: string }[] = [
@@ -282,47 +217,16 @@ export function Clients() {
     installBase,
     panelPort,
     accessHost,
-    installGit,
-    gitBase,
-    gitAvailable,
-    gitNote,
-    gitWarn,
-    settings,
     loadAll,
     loadAgents,
     toast,
   } = useApp()
   const [kind, setKind] = useState<CommandKind>('linux')
 
-  // 二进制来源。
-  //   自动（默认）= 跟随面板设置里的顺序，改设置下一轮心跳就生效；
-  //   Git        = 钉死在更新源，失败也不回退。
-  //
-  // 只换"从哪儿取文件"，版本仍由面板决定。选择存在本地，下次进来还是它。
-  const [source, setSource] = useState<BinSource>(() => {
-    try {
-      return localStorage.getItem('frpeasy.binSource') === 'git' ? 'git' : 'auto'
-    } catch {
-      return 'auto'
-    }
-  })
-  useEffect(() => {
-    try {
-      localStorage.setItem('frpeasy.binSource', source)
-    } catch {
-      /* 隐私模式下 localStorage 可能不可写，不影响功能 */
-    }
-  }, [source])
-  // 面板没配更新源时根本没有第二个地方可取二进制，强制回到面板源，
-  // 否则会显示一条地址为空、执行必然失败的 Git 命令。
-  useEffect(() => {
-    if (!gitAvailable && source === 'git') setSource('auto')
-  }, [gitAvailable, source])
-
-  const usingGit = source === 'git' && gitAvailable
-  const cmd = (usingGit ? installGit[kind] : install[kind]) || '加载中…'
+  // 安装命令只有一个版本：源顺序由面板设置决定、每轮下发，
+  // 装完改设置就生效 —— 所以命令里不再有"从哪儿取"这个选项。
+  const cmd = install[kind] || '加载中…'
   const unCmd = uninstall[kind] || '加载中…'
-
   // 常规刷新交给 store 里的全局轮询（5 秒）；这里只处理一种例外：
   // 「正在卸载」那几秒状态在快速变化，5 秒粒度会显得卡住，加密到 3 秒。
   const uninstalling = agents.some(isUninstalling)
@@ -386,42 +290,13 @@ export function Clients() {
         desc="在需要被穿透的那台机器上执行一次；重跑即升级 / 修复"
         actions={<Tabs value={kind} onChange={setKind} items={TABS} />}
       >
-        <div className="mb-2 flex flex-wrap items-center gap-2">
-          <span className="text-xs text-dim">客户端从哪儿取</span>
-          <SourcePicker
-            value={source}
-            onChange={setSource}
-            gitAvailable={gitAvailable}
-            gitWarn={gitWarn}
-          />
-          <span className="text-xs text-dim">
-            {usingGit ? (
-              <>
-                钉死 GitHub：地址直指 <span className="font-mono">{gitBase || '更新源'}</span>
-                （已套用镜像前缀），不经过面板转发、失败也不回退
-              </>
-            ) : (
-              <>
-                安装这一步<b>固定经面板</b>；装好之后 frpc 与自动更新按「
-                <b>{chainLabel(settings?.bin_source_chain)}</b>」走，改设置下一轮心跳生效
-              </>
-            )}
-          </span>
-        </div>
         <Pre>{cmd}</Pre>
-        {usingGit && gitWarn ? (
-          // 选了 Git 但这套配置下它并不快（最常见的是没配镜像前缀，等于直连 GitHub）。
-          // 必须在这里说，否则用户会以为"换了条路应该更快"，实际更卡却不知道为什么。
-          <div className="mt-2 text-xs leading-[1.6] text-warn-fg">{gitWarn}</div>
-        ) : usingGit ? (
-          <div className="mt-2 text-xs leading-[1.6] text-dim">
-            选了 GitHub：这台机器必须能出网访问上面的地址。agent 与 frpc 都从那里取，
-            版本仍由面板决定；<b>这个选择是钉死的，失败也不会自动改走面板</b>。
-            内网机器拉不动时，换回「自动」重新复制一条命令重装即可。
-          </div>
-        ) : !gitAvailable && gitNote ? (
-          <div className="mt-2 text-xs leading-[1.6] text-dim">{gitNote}</div>
-        ) : null}
+        <div className="mt-2 text-xs leading-[1.6] text-dim">
+          安装这一步<b>固定经面板</b>取 agent（装的时候 agent 还没跑起来，源顺序也还没下发；
+          而且装不上比走慢一点的通道严重得多）。装好之后，frpc 与自动更新按
+          <b>「设置 → 二进制下载」</b>里的客户端顺序走；改设置下一轮心跳生效，不用重装。
+          当前生效的源写在下面客户端卡片的「二进制来源」一栏。
+        </div>
         <div className="mt-2 text-xs leading-[1.6] text-dim">{HINTS[kind]}</div>
         <PortWarn base={installBase} port={panelPort} accessHost={accessHost} />
         <div className="mt-3 flex flex-wrap items-center gap-3">
@@ -563,7 +438,7 @@ export function Clients() {
                   <span>
                     {a.bin_source ? (
                       <>
-                        {a.bin_source === 'git' ? 'GitHub' : '面板中继'}
+                        {binSourceLabel(a.bin_source)}
                         {a.bin_note ? (
                           <span
                             className="ml-1 text-warn-fg"

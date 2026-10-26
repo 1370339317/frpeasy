@@ -85,7 +85,7 @@ func TestGoodbyeSurfacesHTTPStatus(t *testing.T) {
 func TestFrpcNeverFallsBackToGitHub(t *testing.T) {
 	m := NewFrpcManager(t.TempDir())
 	// 不给面板地址：以前这里会继续去 ResolveAssetURL（出网），现在必须直接失败
-	_, err := m.EnsureBinary("v0.71.1", "")
+	_, err := m.EnsureBinary("v0.71.1")
 	if err == nil {
 		t.Fatal("没有面板地址时不该成功")
 	}

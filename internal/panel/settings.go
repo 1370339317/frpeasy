@@ -106,9 +106,50 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = p.db.SetSetting(k, strings.Join(chain, ","))
 			changedKeys = append(changedKeys, k)
-		case "mirror_base", "frp_version":
-			// 这两个空值是合法的：mirror_base 空 = 走 GitHub 官方，
-			// frp_version 空 = 跟随最新稳定版。
+		case settingServerSources, settingClientSources:
+			// 源列表是有序候选，校验要严：认不出的 token、空列表都必须当场拒绝。
+			// 静默忽略一项会让「我配了三个只生效两个」变成没人能解释的现象，
+			// 而表现只是"某个源好像没被用到"。
+			list, perr := shared.ParseSources(v)
+			if perr != nil {
+				http.Error(w, perr.Error(), http.StatusBadRequest)
+				return
+			}
+			if len(list) == 0 {
+				http.Error(w, "至少保留一个源", http.StatusBadRequest)
+				return
+			}
+			if k == settingServerSources {
+				for _, src := range list {
+					if src.IsPanel() {
+						http.Error(w, "服务端列表里不能有 panel：那等于让面板给自己中继", http.StatusBadRequest)
+						return
+					}
+				}
+			}
+			_ = p.db.SetSetting(k, shared.FormatSources(list))
+			changedKeys = append(changedKeys, k)
+			// 遗留字段 mirror_base 是派生值：列表一变就跟着变，
+			// 免得两个来源各说一套（老客户端与「文件」页读的是它）。
+			p.syncMirrorBase()
+			// 换源后清单缓存必须作废，否则「检查更新」还显示上一个源的结果
+			p.manifestMu.Lock()
+			p.manifestInfo = nil
+			p.manifestMu.Unlock()
+		case "mirror_base":
+			// 遗留写法：老脚本/老界面会直接写这个字段。仍接受，但当源列表里
+			// 还没有任何前缀时把它并进服务端列表 —— 否则用户"配了镜像却没生效"
+			// 而且完全看不出为什么。
+			nv := strings.TrimSpace(v)
+			_ = p.db.SetSetting(k, nv)
+			changedKeys = append(changedKeys, k)
+			if nv != "" && shared.FirstPrefix(p.serverSources()) == "" {
+				list := p.serverSources()
+				merged := append([]shared.Source{{Kind: shared.SourceDirect, Prefix: strings.TrimRight(nv, "/")}}, list...)
+				_ = p.db.SetSetting(settingServerSources, shared.FormatSources(merged))
+			}
+		case "frp_version":
+			// 空值合法：跟随最新稳定版。
 			_ = p.db.SetSetting(k, v)
 			changedKeys = append(changedKeys, k)
 		case "port_range_start", "port_range_end":

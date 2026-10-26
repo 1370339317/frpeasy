@@ -358,3 +358,28 @@ func FetchAvailableFRPVersions(mirror string) []string {
 	}
 	return DefaultKnownFRPVersions
 }
+
+// FRPAssetURL 拼出 frp 发布资产地址；**能拼就不查 API**。
+//
+// 发布产物的路径是固定的：
+//
+//	https://github.com/fatedier/frp/releases/download/v<ver>/frp_<ver>_<os>_<arch>.tar.gz（Windows 是 .zip）
+//
+// 而 api.github.com 在国内经常连不上，镜像只能代理下载、代理不了 API ——
+// 每次取二进制都先查一次 API，等于把整个镜像配置作废。所以只要版本是具体的
+// （面板默认就是具体版本），这里就直接拼；只有 latest 才退回查 API。
+//
+// 返回的 tag 统一带 v 前缀，供调用方写版本戳。
+func FRPAssetURL(repo, version, keyword, prefix string) (string, string, error) {
+	v := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	if v != "" && !strings.EqualFold(v, "latest") {
+		ext := ".tar.gz"
+		if strings.HasPrefix(keyword, "windows_") {
+			ext = ".zip"
+		}
+		official := "https://github.com/" + repo + "/releases/download/v" + v +
+			"/frp_" + v + "_" + keyword + ext
+		return ApplyMirror(official, prefix), "v" + v, nil
+	}
+	return ResolveAssetURL(repo, version, keyword, prefix)
+}

@@ -3,7 +3,6 @@
 #
 #   .\install.ps1 -Server http://PANEL:8080 -Token <install-token>
 #   .\install.ps1 -Server http://PANEL:8080 -Token <token> -Foreground   (debug)
-#   .\install.ps1 -Server ... -Token ... -Source git -GitBase https://.../latest/download
 #   .\install.ps1 -Uninstall
 #
 # Re-running upgrades / repairs the install. The new binary is verified with
@@ -16,11 +15,10 @@
 param(
   [string]$Server = "",
   [string]$Token  = "",
-  # Where the agent + frpc binaries come from: "panel" (default, served by the
-  # panel and works on intranet-only boxes) or "git" (straight from the update
-  # source, needs -GitBase). Only the download path changes - the version and
-  # the content are still decided by the panel.
-  [string]$Source = "panel",
+  # Deprecated: accepted and ignored so commands copied before the source
+  # settings existed still work. Source order is now configured on the panel
+  # (Settings -> Binary download) and pushed down every heartbeat.
+  [string]$Source = "",
   [string]$GitBase = "",
   [switch]$Uninstall,
   [switch]$Foreground
@@ -28,20 +26,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if ($Source -ne "panel" -and $Source -ne "git") {
-  Write-Host "[frpeasy] ERROR: -Source must be 'panel' or 'git' (got '$Source')" -ForegroundColor Red
-  exit 1
+if ($Source -or $GitBase) {
+  Write-Host "[frpeasy] note: -Source / -GitBase are deprecated and ignored;"
+  Write-Host "           configure source order in panel -> Settings -> Binary download."
 }
-if ($Source -eq "git" -and -not $GitBase) {
-  Write-Host "[frpeasy] ERROR: -Source git requires -GitBase <url>" -ForegroundColor Red
-  exit 1
-}
-# Arguments re-used for the scheduled task and the foreground run, so the choice
-# survives a reboot (the agent reads them again from its own command line).
 $srcArgs = @()
-# Only --source goes to the agent: it fetches frpc using the mirror_base and
-# frp_version the panel sends down, so it has no use for -GitBase.
-if ($Source -eq "git") { $srcArgs = @("--source", "git") }
 $TaskName = "frpeasy-agent"
 $dir = Join-Path $env:ProgramData "frpeasy-agent"
 $exe = Join-Path $dir "frpeasy-agent.exe"
@@ -155,12 +144,10 @@ $tryArch = @($arch)
 if ($arch -eq "arm64") { $tryArch += "amd64" }
 $newVer = $null
 foreach ($a in $tryArch) {
-  if ($Source -eq "git") {
-    # Same layout as the panel uses: the release asset is frpeasy-agent-<os>-<arch>.
-    $url = "$GitBase/frpeasy-agent-windows-$a.exe"
-  } else {
-    $url = "$Server/api/agent/bin/windows/$a"
-  }
+  # The agent package always comes from the panel: at install time the agent is
+  # not running yet and the source order has not been pushed down. Also a failed
+  # install is far worse than a slow one on an intranet-only box.
+  $url = "$Server/api/agent/bin/windows/$a"
   Write-Host "[frpeasy] downloading $url ..."
   try {
     Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -TimeoutSec 300
