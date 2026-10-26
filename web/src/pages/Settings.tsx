@@ -14,11 +14,14 @@ import type { MirrorTestResult, Settings as SettingsShape, SettingsBody, Setting
 
 // 客户端取二进制的来源链。合法组合只有这四种，所以只给预设，不做自由输入 ——
 // 手打逗号串的结果通常是拼写错误，而错误的表现是"客户端一直拉取失败"。
+// 名字必须自己解释自己。原来叫「仅面板 / 面板 → Git / 仅 Git」，
+// 用户第一眼会以为 Git 是上面镜像预设里的某一项 —— 那是两码事：
+// 上面填的是"代理前缀"，这里选的是"谁来下载"。所以一律带上"中继 / GitHub"。
 const CHAIN_PRESETS: { label: string; value: string; note: string }[] = [
-  { label: '仅面板', value: 'panel', note: '默认；纯内网也能装' },
-  { label: '面板 → Git', value: 'panel,git', note: '面板失败再用更新源' },
-  { label: 'Git → 面板', value: 'git,panel', note: '优先直连，省面板带宽' },
-  { label: '仅 Git', value: 'git', note: '必须能出网' },
+  { label: '仅面板中继', value: 'panel', note: '默认；客户端只连面板' },
+  { label: '面板中继 → GitHub', value: 'panel,git', note: '面板取不到再自己取' },
+  { label: 'GitHub → 面板中继', value: 'git,panel', note: '优先自己取，省面板带宽' },
+  { label: '仅 GitHub', value: 'git', note: '客户端必须能出网' },
 ]
 
 const MIRROR_PRESETS: { label: string; value: string; note?: string }[] = [
@@ -249,8 +252,11 @@ export function SettingsPage() {
         </Hint>
       </Card>
 
-      <Card title="下载源" desc="拉取 frps / frpc 二进制用">
-        <Field label="镜像前缀（留空 = GitHub 官方）">
+      <Card title="二进制下载" desc="分两项：面板自己取（frps / frpc）、客户端取（agent / frpc）">
+        <div className="mb-2 text-[13px] font-semibold text-fg">
+          ① 面板自己取 frps / frpc
+        </div>
+        <Field label="镜像前缀（留空 = 直连 github.com）">
           <Input
             value={mirror}
             onChange={(e) => setMirror(e.target.value)}
@@ -278,11 +284,16 @@ export function SettingsPage() {
           </Button>
         </div>
         <Hint>
-          镜像按「前缀 + GitHub 原始链接」拼接。测试会实际解析版本资产并下载 512KB
-          测速，结果比凭感觉猜可靠。
+          这是<b>面板这台机器</b>去 github.com 取 frps / frpc 时用的地址代理，
+          按「前缀 + GitHub 原始链接」拼接。测试会实际解析版本资产并下载 512KB 测速。
+          <br />
+          它同时也会拼进下面「GitHub」那条通道的地址里 —— 两处用的是同一个前缀。
         </Hint>
 
-        <Field label="客户端取二进制的顺序">
+        <div className="mb-2 mt-5 text-[13px] font-semibold text-fg">
+          ② 客户端取 agent / frpc
+        </div>
+        <Field label="来源顺序">
           <div className="flex flex-wrap gap-2">
             {CHAIN_PRESETS.map((p) => (
               <Chip
@@ -297,14 +308,20 @@ export function SettingsPage() {
           </div>
         </Field>
         <Hint>
-          这里说的是 <b>agent 与 frpc 从哪儿取</b>：面板转发，还是客户端自己去更新源取。
-          选两项时按顺序尝试，前一个失败才试后一个，失败原因会记在客户端卡片上。
-          改完下一轮心跳就生效，<b>不需要重装客户端</b>（安装命令里显式选过 Git 的机器除外，
+          这里决定的是<b>谁来下载</b>，只有两条通道：
+          <br />
+          · <b>面板中继</b>：客户端只连面板，由面板把文件转发过去。任何环境都能用，
+          但占面板的出口带宽（装一台要发 6.5MB 的 agent，之后还有 20MB 的 frpc）。
+          <br />
+          · <b>GitHub</b>：客户端自己去 GitHub Release 取，<b>自动套用上面填的镜像前缀</b>。
+          不占面板带宽，但这台机器必须能出网。
+          <br />
+          选两项时按顺序尝试，前一个失败才试后一个；失败原因会写进客户端卡片。
+          改完下一轮心跳就生效，<b>不需要重装客户端</b>（安装命令里显式选过 GitHub 的机器除外，
           那些是钉死的，不参与回退）。
           <br />
-          面板出口带宽是所有客户端共用的，装一台要发 6.5MB 的 agent、之后还有 20MB 的 frpc；
-          带宽明显不够时用「Git → 面板」。但注意：<b>没配镜像前缀时 Git 就是直连 github.com</b>，
-          国内通常比面板还慢。
+          注意：<b>没填镜像前缀时「GitHub」这条路就是直连 github.com</b>，
+          国内实测比经面板还慢，先配好前缀再用。
         </Hint>
 
         {testing && (

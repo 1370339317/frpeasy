@@ -47,13 +47,13 @@ type BinSource = 'auto' | 'git'
 function chainLabel(chain: string | undefined): string {
   switch (chain) {
     case 'git':
-      return '仅 Git'
+      return '仅 GitHub'
     case 'panel,git':
-      return '面板 → Git'
+      return '面板中继 → GitHub'
     case 'git,panel':
-      return 'Git → 面板'
+      return 'GitHub → 面板中继'
     default:
-      return '仅面板'
+      return '仅面板中继'
   }
 }
 
@@ -87,10 +87,10 @@ function SourcePicker({
     },
     {
       key: 'git',
-      label: 'Git',
+      label: 'GitHub',
       hint: !gitAvailable
         ? '还没配更新源，暂不可用'
-        : gitWarn || '钉死只用 Git，不回退（面板带宽不够时用）',
+        : gitWarn || '钉死：客户端自己去 GitHub Release 取，失败不回退',
       disabled: !gitAvailable,
     },
   ]
@@ -387,7 +387,7 @@ export function Clients() {
         actions={<Tabs value={kind} onChange={setKind} items={TABS} />}
       >
         <div className="mb-2 flex flex-wrap items-center gap-2">
-          <span className="text-xs text-dim">二进制来源</span>
+          <span className="text-xs text-dim">客户端从哪儿取</span>
           <SourcePicker
             value={source}
             onChange={setSource}
@@ -397,8 +397,8 @@ export function Clients() {
           <span className="text-xs text-dim">
             {usingGit ? (
               <>
-                钉死 Git：地址直指 <span className="font-mono">{gitBase || '更新源'}</span>
-                ，不经过面板转发、失败也不回退
+                钉死 GitHub：地址直指 <span className="font-mono">{gitBase || '更新源'}</span>
+                （已套用镜像前缀），不经过面板转发、失败也不回退
               </>
             ) : (
               <>
@@ -415,9 +415,9 @@ export function Clients() {
           <div className="mt-2 text-xs leading-[1.6] text-warn-fg">{gitWarn}</div>
         ) : usingGit ? (
           <div className="mt-2 text-xs leading-[1.6] text-dim">
-            选了 Git 源：这台机器必须能出网访问上面的地址。agent 与 frpc 都从那里取，
+            选了 GitHub：这台机器必须能出网访问上面的地址。agent 与 frpc 都从那里取，
             版本仍由面板决定；<b>这个选择是钉死的，失败也不会自动改走面板</b>。
-            如果拉不动（内网机器常见），换回「自动」重新复制一条命令重装即可。
+            内网机器拉不动时，换回「自动」重新复制一条命令重装即可。
           </div>
         ) : !gitAvailable && gitNote ? (
           <div className="mt-2 text-xs leading-[1.6] text-dim">{gitNote}</div>
@@ -563,7 +563,7 @@ export function Clients() {
                   <span>
                     {a.bin_source ? (
                       <>
-                        {a.bin_source === 'git' ? 'Git' : '面板'}
+                        {a.bin_source === 'git' ? 'GitHub' : '面板中继'}
                         {a.bin_note ? (
                           <span
                             className="ml-1 text-warn-fg"
