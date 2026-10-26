@@ -209,6 +209,21 @@ chk "Linux Git 命令不再指向面板 agent 接口" 0 "$(echo "$GITC" | grep -
 chk "Windows Git 命令用 -Source/-GitBase" 1 "$(echo "$GITW" | grep -c -- '-Source git -GitBase https://files.example.com/dl')"
 chk "Android Git 命令含地址" 1 "$(echo "$GITA" | grep -c -- '--source git --git-base https://files.example.com/dl')"
 
+say "== 17c) 来源链：面板设置 / 配置下发 / 心跳上报 =="
+# 默认只走面板：这是唯一在各种网络环境下都成立的选择
+chk "默认来源链是 panel" "panel" "$(curl -s -b cj.txt $B/api/settings | jget "d['bin_source_chain']")"
+# 配置接口把链发给客户端（改设置立刻生效，不用重装）
+chk "config 下发来源链 panel" "['panel']" "$(curl -s "$B/api/agent/config?agent_id=$AGID&token=$AGTOK" | jget "d['bin_sources']")"
+chk "非法来源链被拒 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d '{"bin_source_chain":"panel,http"}')"
+chk "空来源链被拒 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d '{"bin_source_chain":""}')"
+chk "合法来源链可保存" "git,panel" "$(curl -s -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d '{"bin_source_chain":" git , panel "}' >/dev/null; curl -s -b cj.txt $B/api/settings | jget "d['bin_source_chain']")"
+chk "config 下发两条" "['git', 'panel']" "$(curl -s "$B/api/agent/config?agent_id=$AGID&token=$AGTOK" | jget "d['bin_sources']")"
+
+# 客户端上报「实际从哪儿拿到 frpc」，界面据此显示；改设置有没有生效看的就是它
+curl -s -X POST $B/api/agent/heartbeat -H 'Content-Type: application/json'   -d "{\"agent_id\":\"$AGID\",\"agent_token\":\"$AGTOK\",\"bin_source\":\"git\",\"bin_note\":\"面板超时\"}" >/dev/null
+chk "心跳上报来源被存下" "git" "$(curl -s -b cj.txt $B/api/agents | jget "next((x['bin_source'] for x in d['agents'] if x['id']=='$AGID'), '')")"
+chk "回退原因被存下" 1 "$(curl -s -b cj.txt $B/api/agents | jget "next((x['bin_note'] for x in d['agents'] if x['id']=='$AGID'), '')" | grep -c '超时')"
+
 say "== 18) 端口 / 防火墙清单 =="
 chk "未登录取端口被拦 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/ports)"
 PORTJ=$(curl -s -b cj.txt $B/api/ports)

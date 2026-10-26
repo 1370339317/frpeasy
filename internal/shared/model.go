@@ -81,6 +81,15 @@ type Agent struct {
 	//   SentAt 非零 && Online   → 已下发但仍在心跳 = 卸载没生效（多为权限不足）
 	UninstallRequested bool       `json:"uninstall_requested"`
 	UninstallSentAt    *time.Time `json:"uninstall_sent_at,omitempty"`
+
+	// 二进制来源的**实际生效值**（客户端心跳上报，不是面板的设置值）。
+	//
+	// 与设置里的来源链不是一回事：链是"允许试哪些、按什么顺序"，
+	// 这里回答的是"这台机器最后到底从哪儿拿到的"。回退存在时这两者必然不同，
+	// 而用户判断"换了来源到底有没有用"只看后者。
+	BinSource string `json:"bin_source"`
+	// BinNote 最近一次取二进制失败的明细（回退原因）。为空表示首选就成功了。
+	BinNote string `json:"bin_note"`
 	// UninstallByLocal 这次卸载是在那台机器上执行的（install.sh --uninstall 或
 	// agent 的 --goodbye 报备），而不是面板云端下发。
 	// 区分它的理由：面板上那条记录是「那台机器临死前告诉我们的」，
@@ -136,6 +145,15 @@ type AgentConfig struct {
 	MirrorBase string `json:"mirror_base"`
 	// FRPVersion 要拉取的 frp 版本（"latest" 或具体 tag）。
 	FRPVersion string `json:"frp_version"`
+	// BinSources 二进制来源链，按顺序尝试；面板设置项 bin_source_chain 的解析结果。
+	//
+	// 为什么不写进安装命令：写进 systemd unit / 计划任务意味着面板以后换更新源、
+	// 或补上镜像前缀，已经装好的机器仍按旧地址去取，必须重装才生效。
+	// 每轮配置下发就没这个问题，而且改设置立刻对全站生效。
+	BinSources []string `json:"bin_sources"`
+	// BinGitBase git 源的目录地址（已折入镜像前缀）。为空表示面板没有可用更新源。
+	BinGitBase string `json:"bin_git_base"`
+
 	// FRPSRunning 面板侧 frps 当前是否在运行（运行时字段，不进配置内容）。
 	//
 	// 用途：frpc 自带的登录重连是指数退避（1s→2s→…→最长 120s），frps 停得
@@ -155,6 +173,10 @@ type HeartbeatRequest struct {
 	IPs          []string            `json:"ips"`           // 客户端网卡 IP 列表
 	FRPVersion   string              `json:"frp_version"`   // 客户端当前实际运行的 frpc 版本
 	AgentVersion string              `json:"agent_version"` // 客户端 agent 自身版本
+	// BinSource 本次实际生效的二进制来源（panel / git），BinNote 是回退原因。
+	// 旧面板不认识这两个字段时会忽略，反之旧 agent 不填也只是显示为空。
+	BinSource string `json:"bin_source"`
+	BinNote   string `json:"bin_note"`
 }
 
 // AgentUpdate 面板通过心跳下发给客户端的升级指令。
@@ -167,9 +189,16 @@ type HeartbeatRequest struct {
 // SHA256 由面板对**实际下发的那个文件**实时计算，不是抄清单里的值。
 type AgentUpdate struct {
 	Version string `json:"version"`
-	URL     string `json:"url"`
-	SHA256  string `json:"sha256"`
-	Size    int64  `json:"size"`
+	// URL 经面板中继的地址。
+	URL string `json:"url"`
+	// URLGit 直接指向更新源的地址（面板锁定到具体版本，不是 latest）。
+	// 为空表示面板没有可用更新源；客户端按自己的来源链在两者间选。
+	//
+	// **版本与 sha256 永远来自面板**，这里只是把同一份文件换个地方取，
+	// 所以两条通道拿到的东西必须完全一致，客户端也照旧逐个校验。
+	URLGit string `json:"url_git,omitempty"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
 }
 
 // HeartbeatResponse 心跳回包。

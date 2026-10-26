@@ -133,7 +133,7 @@ func parseStringList(s string) []string {
 // 列名和扫描参数必须严格一一对应，而 GetAgent / ListAgents 各写一遍的话，
 // 加一列忘一处就会「某个接口整张表读不出来」，编译期毫无提示 —— 历史上踩过。
 // 所以列名只在这里出现一次，扫描参数按同一份定义动态拼。
-const agentColsTail = "online,last_seen,created_at,services,ips,frp_version,agent_version,uninstall_requested,uninstall_sent_at,uninstall_by_local"
+const agentColsTail = "online,last_seen,created_at,services,ips,frp_version,agent_version,uninstall_requested,uninstall_sent_at,uninstall_by_local,bin_source,bin_note"
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -157,7 +157,7 @@ func scanAgentRow(s rowScanner, a *shared.Agent, withTokens bool) error {
 	if withTokens {
 		dest = append(dest, &a.InstallToken, &a.AgentToken)
 	}
-	dest = append(dest, &online, &lastSeen, &createdAt, &svc, &ips, &ver, &aver, &uninstallReq, &sentAt, &uninstallLocal)
+	dest = append(dest, &online, &lastSeen, &createdAt, &svc, &ips, &ver, &aver, &uninstallReq, &sentAt, &uninstallLocal, &a.BinSource, &a.BinNote)
 	if err := s.Scan(dest...); err != nil {
 		return err
 	}
@@ -242,6 +242,16 @@ func (db *DB) ConsumeAgentUninstall(id string) bool {
 	}
 	n, err := res.RowsAffected()
 	return err == nil && n > 0
+}
+
+// UpdateAgentBinInfo 记录客户端上报的二进制来源与回退原因。
+//
+// 这是**显示用**的运行时值，不参与任何判定 —— 判「该不该升级」只看版本号，
+// 绝不看它从哪儿下的。分开保存的理由和 cache_behind 一样：没有它，
+// 「我改了来源设置到底生效没有」就只能靠猜。
+func (db *DB) UpdateAgentBinInfo(id, source, note string) error {
+	_, err := db.Exec("UPDATE agents SET bin_source=?, bin_note=? WHERE id=?", source, note, id)
+	return err
 }
 
 // MarkAgentLocalUninstall 记录「这台机器在本机执行了卸载」。

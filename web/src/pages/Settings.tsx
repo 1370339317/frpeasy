@@ -12,6 +12,15 @@ import {
 } from '../components/ui'
 import type { MirrorTestResult, Settings as SettingsShape, SettingsBody, SettingsSaveResult } from '../types'
 
+// 客户端取二进制的来源链。合法组合只有这四种，所以只给预设，不做自由输入 ——
+// 手打逗号串的结果通常是拼写错误，而错误的表现是"客户端一直拉取失败"。
+const CHAIN_PRESETS: { label: string; value: string; note: string }[] = [
+  { label: '仅面板', value: 'panel', note: '默认；纯内网也能装' },
+  { label: '面板 → Git', value: 'panel,git', note: '面板失败再用更新源' },
+  { label: 'Git → 面板', value: 'git,panel', note: '优先直连，省面板带宽' },
+  { label: '仅 Git', value: 'git', note: '必须能出网' },
+]
+
 const MIRROR_PRESETS: { label: string; value: string; note?: string }[] = [
   { label: 'GitHub 官方', value: '' },
   { label: 'ghfast', value: 'https://ghfast.top/', note: '国内快' },
@@ -39,6 +48,9 @@ export function SettingsPage() {
   const [pStart, setPStart] = useState('')
   const [pEnd, setPEnd] = useState('')
   const [bindPort, setBindPort] = useState('')
+  // 客户端取二进制的来源链。这里只给几个预设，不做自由编辑 ——
+  // 合法组合只有四种，让用户手打逗号串只会打出拼写错误。
+  const [chain, setChain] = useState('panel')
   const [dashPort, setDashPort] = useState('')
   const [token, setToken] = useState('')
   const [pass, setPass] = useState('')
@@ -66,6 +78,7 @@ export function SettingsPage() {
     setPStart(s.port_range_start ?? '')
     setPEnd(s.port_range_end ?? '')
     setBindPort(s.frps_bind_port ?? '')
+    setChain(s.bin_source_chain || 'panel')
     setDashPort(s.dashboard_port ?? '')
     setToken('')
     setPass('')
@@ -111,6 +124,7 @@ export function SettingsPage() {
       if (trim(pEnd) !== trim(settings.port_range_end ?? '')) body.port_range_end = trim(pEnd)
       if (trim(bindPort) !== trim(settings.frps_bind_port ?? '')) body.frps_bind_port = trim(bindPort)
       if (trim(dashPort) !== trim(settings.dashboard_port ?? '')) body.dashboard_port = trim(dashPort)
+      if (chain !== (settings.bin_source_chain || 'panel')) body.bin_source_chain = chain
       // 令牌输入框拿到的是脱敏串，只有用户重新输入时才提交
       if (token.trim()) body.frps_token = token.trim()
       if (pass) body.new_password = pass
@@ -266,6 +280,31 @@ export function SettingsPage() {
         <Hint>
           镜像按「前缀 + GitHub 原始链接」拼接。测试会实际解析版本资产并下载 512KB
           测速，结果比凭感觉猜可靠。
+        </Hint>
+
+        <Field label="客户端取二进制的顺序">
+          <div className="flex flex-wrap gap-2">
+            {CHAIN_PRESETS.map((p) => (
+              <Chip
+                key={p.value}
+                selected={chain === p.value}
+                sub={p.note}
+                onClick={() => setChain(p.value)}
+              >
+                {p.label}
+              </Chip>
+            ))}
+          </div>
+        </Field>
+        <Hint>
+          这里说的是 <b>agent 与 frpc 从哪儿取</b>：面板转发，还是客户端自己去更新源取。
+          选两项时按顺序尝试，前一个失败才试后一个，失败原因会记在客户端卡片上。
+          改完下一轮心跳就生效，<b>不需要重装客户端</b>（安装命令里显式选过 Git 的机器除外，
+          那些是钉死的，不参与回退）。
+          <br />
+          面板出口带宽是所有客户端共用的，装一台要发 6.5MB 的 agent、之后还有 20MB 的 frpc；
+          带宽明显不够时用「Git → 面板」。但注意：<b>没配镜像前缀时 Git 就是直连 github.com</b>，
+          国内通常比面板还慢。
         </Hint>
 
         {testing && (

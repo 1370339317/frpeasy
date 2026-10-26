@@ -39,7 +39,6 @@ func NewDB(path string) (*DB, error) {
 	return db, nil
 }
 
-
 func (db *DB) migrate() error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS admins (
@@ -97,6 +96,9 @@ func (db *DB) migrate() error {
 	// 清掉之后面板就再也分不清「从没下发过」和「已下发、正在等它死」，
 	// 于是卸载完的客户端只能一直显示成普通的「离线」。
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN uninstall_sent_at DATETIME`)
+	// 客户端上报的二进制来源与回退原因（显示用，不参与任何判定）
+	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN bin_source TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN bin_note TEXT NOT NULL DEFAULT ''`)
 
 	// uninstall_by_local 标记这次卸载是「在那台机器上执行的」，而不是面板下发。
 	//
@@ -106,7 +108,6 @@ func (db *DB) migrate() error {
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN uninstall_by_local INTEGER NOT NULL DEFAULT 0`)
 	return nil
 }
-
 
 func (db *DB) initSettings() error {
 	defaults := map[string]string{
@@ -124,6 +125,10 @@ func (db *DB) initSettings() error {
 		"port_range_end":   strconv.Itoa(shared.DefaultPortRangeEnd),
 		"frp_version":      shared.DefaultFRPVersion,
 		"mirror_base":      "", // 为空=GitHub 官方；可填 ghproxy/jsdelivr/自建前缀
+		// 二进制来源链：客户端按顺序尝试。默认只走面板 —— 这是唯一在各种网络
+		// 环境下都成立的选择，改动必须有明确意图（例如面板出口带宽不够时
+		// 改成 panel,git，让面板失败后退到更新源）。
+		"bin_source_chain": "panel",
 		"data_dir":         "./data",
 		// 更新源：一个静态目录，里面有 manifest.json 和各平台二进制。
 		// 空 = 不检查面板自身更新（不是错误：内网/离线场景本来就无从检查）。
@@ -169,7 +174,6 @@ func (db *DB) initSettings() error {
 	}
 	return nil
 }
-
 
 // --- 工具 ---
 

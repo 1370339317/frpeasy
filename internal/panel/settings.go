@@ -96,6 +96,16 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 				changedKeys = append(changedKeys, k)
 				publicAddrChanged = true
 			}
+		case "bin_source_chain":
+			// 来源链只允许 panel / git，且不能为空 —— 空链意味着「一次都不尝试」，
+			// 客户端会永远拿不到 frpc，而界面上看起来只是"拉取失败"。
+			chain := shared.ParseBinSourceChain(v)
+			if len(chain) == 0 {
+				http.Error(w, "来源链不能为空，且只能由 panel / git 组成（例如 panel 或 panel,git 或 git,panel）", http.StatusBadRequest)
+				return
+			}
+			_ = p.db.SetSetting(k, strings.Join(chain, ","))
+			changedKeys = append(changedKeys, k)
 		case "mirror_base", "frp_version":
 			// 这两个空值是合法的：mirror_base 空 = 走 GitHub 官方，
 			// frp_version 空 = 跟随最新稳定版。

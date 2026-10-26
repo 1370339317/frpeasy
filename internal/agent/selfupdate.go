@@ -109,7 +109,7 @@ func underSystemdWith(goos, invocationID string) bool {
 //
 // 这是同步阻塞的（下载最多十几 MB），所以只在真要升级时才会走到。
 func (c *Client) maybeSelfUpdate(up *shared.AgentUpdate) bool {
-	if up == nil || up.URL == "" {
+	if up == nil || (up.URL == "" && up.URLGit == "") {
 		return false
 	}
 	// 目标是"不比当前新"就完全不动。面板侧已经判断过一次，
@@ -142,6 +142,72 @@ func (c *Client) maybeSelfUpdate(up *shared.AgentUpdate) bool {
 	return true
 }
 
+// updateCandidateURLs 按来源链给出本次升级要依次尝试的地址。
+//
+// 两条通道指向同一个文件（版本与 sha256 由面板决定），所以这里只负责"从哪儿取"。
+// 首选那条地址缺失（例如面板没配更新源，没有 URLGit）时，仍然把另一条列进来 ——
+// 否则等于直接放弃升级。
+func (c *Client) updateCandidateURLs(up *shared.AgentUpdate) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(u string) {
+		if u == "" || seen[u] {
+			return
+		}
+		seen[u] = true
+		out = append(out, u)
+	}
+	for _, src := range c.frpc.SourceOrder() {
+		if src == shared.BinSourceGit {
+			add(up.URLGit)
+		} else {
+			add(up.URL)
+		}
+	}
+	add(up.URL)
+	add(up.URLGit)
+	return out
+}
+
+// fetchVerified 从指定地址下载并校验大小与 sha256，成功时 newPath 就是可用文件。
+//
+// 抽出来是为了「按来源链逐个尝试」：每个地址都要独立走完下载 + 校验，
+// 任何一步失败就换下一个地址。绝不能只看下载成功就当成功 ——
+// 换地址之后拿到的未必是同一个文件。
+func fetchVerified(url, newPath string, up *shared.AgentUpdate) error {
+	_ = os.Remove(newPath)
+	if _, err := shared.DownloadFile(url, newPath); err != nil {
+		_ = os.Remove(newPath)
+		return fmt.Errorf("下载失败: %w", err)
+	}
+	if up.Size > 0 {
+		st, err := os.Stat(newPath)
+		if err != nil {
+			_ = os.Remove(newPath)
+			return err
+		}
+		if st.Size() != up.Size {
+			_ = os.Remove(newPath)
+			return fmt.Errorf("文件大小不符：期望 %d，实际 %d", up.Size, st.Size())
+		}
+	}
+	if up.SHA256 == "" {
+		_ = os.Remove(newPath)
+		return fmt.Errorf("面板未提供 sha256，拒绝安装（无法校验完整性）")
+	}
+	ok, err := shared.VerifyFileSHA256(newPath, up.SHA256)
+	if err != nil {
+		_ = os.Remove(newPath)
+		return err
+	}
+	if !ok {
+		// 哈希不符意味着传输被截断、被篡改，或者这个地址给的不是同一个版本
+		_ = os.Remove(newPath)
+		return fmt.Errorf("sha256 校验未通过（期望 %s）", up.SHA256)
+	}
+	return nil
+}
+
 // doSelfUpdate 下载 → 校验 → 替换 → 交接。成功返回后调用方必须退出。
 func (c *Client) doSelfUpdate(up *shared.AgentUpdate) error {
 	self := selfExePath()
@@ -155,35 +221,28 @@ func (c *Client) doSelfUpdate(up *shared.AgentUpdate) error {
 	newPath := filepath.Join(dir, "agent.new"+shared.ExeSuffix())
 	_ = os.Remove(newPath)
 
-	if _, err := shared.DownloadFile(up.URL, newPath); err != nil {
-		return fmt.Errorf("下载失败: %w", err)
+	// 按来源链依次尝试。每个失败的地址都打出来 —— 回退必须可见，
+	// 否则「这次怎么从别的地方下的」永远是个谜。
+	//
+	// 两条通道给的是同一个文件（版本与 sha256 都由面板定），所以换地址重下是安全的：
+	// 万一下到的不是同一份，下面的 sha 校验会把它拦下来，而不是装上去。
+	var lastErr error
+	for _, u := range c.updateCandidateURLs(up) {
+		if err := fetchVerified(u, newPath, up); err != nil {
+			fmt.Printf("[agent] 自更新取包失败（%s）：%v\n", u, err)
+			lastErr = err
+			continue
+		}
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
+		return fmt.Errorf("所有来源都取不到新版本：%w", lastErr)
 	}
 	// 清理失败路径：任何一步失败都不能在磁盘上留一个半成品
 	fail := func(err error) error {
 		_ = os.Remove(newPath)
 		return err
-	}
-
-	if up.Size > 0 {
-		st, err := os.Stat(newPath)
-		if err != nil {
-			return fail(err)
-		}
-		if st.Size() != up.Size {
-			return fail(fmt.Errorf("文件大小不符：期望 %d，实际 %d", up.Size, st.Size()))
-		}
-	}
-	if up.SHA256 != "" {
-		ok, err := shared.VerifyFileSHA256(newPath, up.SHA256)
-		if err != nil {
-			return fail(err)
-		}
-		if !ok {
-			// 哈希不符意味着传输被截断或被篡改，绝不能装
-			return fail(fmt.Errorf("sha256 校验未通过（期望 %s）", up.SHA256))
-		}
-	} else {
-		return fail(fmt.Errorf("面板未提供 sha256，拒绝安装（无法校验完整性）"))
 	}
 
 	if err := os.Chmod(newPath, 0o755); err != nil && runtime.GOOS != "windows" {

@@ -40,8 +40,22 @@ function isUninstalling(a: Agent): boolean {
   return !!a.uninstall_sent_at && a.online && sinceUninstallSent(a) < UNINSTALL_GRACE_MS
 }
 
-/** 二进制来源。与后端 install_cmd.go 的 BinSource* 常量一一对应。 */
-type BinSource = 'panel' | 'git'
+/** 二进制来源。与 shared/binsource.go 的 BinSource* 常量一一对应。 */
+type BinSource = 'auto' | 'git'
+
+/** 把设置里的来源链说成人话，用在安装区与客户端卡片上。 */
+function chainLabel(chain: string | undefined): string {
+  switch (chain) {
+    case 'git':
+      return '仅 Git'
+    case 'panel,git':
+      return '面板 → Git'
+    case 'git,panel':
+      return 'Git → 面板'
+    default:
+      return '仅面板'
+  }
+}
 
 /**
  * 来源切换。
@@ -63,13 +77,20 @@ function SourcePicker({
   gitWarn: string
 }) {
   const items: { key: BinSource; label: string; hint: string; disabled: boolean }[] = [
-    { key: 'panel', label: '面板', hint: '客户端只连面板，任何环境都能装', disabled: false },
+    {
+      key: 'auto',
+      label: '自动',
+      // 自动 = 跟随面板设置里的顺序。把当前顺序直接写在提示里，
+      // 否则"自动"对用户来说等于黑箱。
+      hint: '跟随面板设置里的取二进制顺序，改设置下一轮心跳即生效',
+      disabled: false,
+    },
     {
       key: 'git',
       label: 'Git',
       hint: !gitAvailable
         ? '还没配更新源，暂不可用'
-        : gitWarn || '直接从更新源取，不占面板带宽',
+        : gitWarn || '钉死只用 Git，不回退（面板带宽不够时用）',
       disabled: !gitAvailable,
     },
   ]
@@ -266,23 +287,23 @@ export function Clients() {
     gitAvailable,
     gitNote,
     gitWarn,
+    settings,
     loadAll,
     loadAgents,
     toast,
   } = useApp()
   const [kind, setKind] = useState<CommandKind>('linux')
 
-  // 二进制来源。默认面板：任何能打开面板的机器都能装，包括纯内网。
-  // 选 Git 时命令里的下载地址直接指向更新源，不经过面板转发 ——
-  // 面板出口带宽是所有客户端共用的，慢的时候换这一条会快很多。
+  // 二进制来源。
+  //   自动（默认）= 跟随面板设置里的顺序，改设置下一轮心跳就生效；
+  //   Git        = 钉死在更新源，失败也不回退。
   //
-  // 只换"从哪儿取文件"，版本仍由面板决定（agent 会把选择记下来，
-  // 之后拉 frpc 沿用同一个来源）。选择存在本地，下次进来还是它。
+  // 只换"从哪儿取文件"，版本仍由面板决定。选择存在本地，下次进来还是它。
   const [source, setSource] = useState<BinSource>(() => {
     try {
-      return localStorage.getItem('frpeasy.binSource') === 'git' ? 'git' : 'panel'
+      return localStorage.getItem('frpeasy.binSource') === 'git' ? 'git' : 'auto'
     } catch {
-      return 'panel'
+      return 'auto'
     }
   })
   useEffect(() => {
@@ -295,7 +316,7 @@ export function Clients() {
   // 面板没配更新源时根本没有第二个地方可取二进制，强制回到面板源，
   // 否则会显示一条地址为空、执行必然失败的 Git 命令。
   useEffect(() => {
-    if (!gitAvailable && source === 'git') setSource('panel')
+    if (!gitAvailable && source === 'git') setSource('auto')
   }, [gitAvailable, source])
 
   const usingGit = source === 'git' && gitAvailable
@@ -376,11 +397,14 @@ export function Clients() {
           <span className="text-xs text-dim">
             {usingGit ? (
               <>
-                地址直指 <span className="font-mono">{gitBase || '更新源'}</span>
-                ，不经过面板转发（面板出口带宽是所有客户端共用的）
+                钉死 Git：地址直指 <span className="font-mono">{gitBase || '更新源'}</span>
+                ，不经过面板转发、失败也不回退
               </>
             ) : (
-              <>经面板下发；客户端只连面板，纯内网环境用这个</>
+              <>
+                跟随面板设置（当前：<b>{chainLabel(settings?.bin_source_chain)}</b>），
+                改设置后下一轮心跳生效，不用重装
+              </>
             )}
           </span>
         </div>
@@ -392,7 +416,8 @@ export function Clients() {
         ) : usingGit ? (
           <div className="mt-2 text-xs leading-[1.6] text-dim">
             选了 Git 源：这台机器必须能出网访问上面的地址。agent 与 frpc 都从那里取，
-            版本仍由面板决定。如果拉不动（内网机器常见），换回「面板」重新复制一条命令重装即可。
+            版本仍由面板决定；<b>这个选择是钉死的，失败也不会自动改走面板</b>。
+            如果拉不动（内网机器常见），换回「自动」重新复制一条命令重装即可。
           </div>
         ) : !gitAvailable && gitNote ? (
           <div className="mt-2 text-xs leading-[1.6] text-dim">{gitNote}</div>
@@ -534,6 +559,24 @@ export function Clients() {
                   </span>
                   <b className="font-medium text-dim">frpc 版本</b>
                   <span className="font-mono">{a.frp_version || '—'}</span>
+                  <b className="font-medium text-dim">二进制来源</b>
+                  <span>
+                    {a.bin_source ? (
+                      <>
+                        {a.bin_source === 'git' ? 'Git' : '面板'}
+                        {a.bin_note ? (
+                          <span
+                            className="ml-1 text-warn-fg"
+                            title={a.bin_note}
+                          >
+                            （已回退，悬停看原因）
+                          </span>
+                        ) : null}
+                      </>
+                    ) : (
+                      <span className="text-dim">—（旧版 agent 未上报）</span>
+                    )}
+                  </span>
                   <b className="font-medium text-dim">内网 IP</b>
                   <span className="font-mono">{(a.ips ?? []).join(', ') || '—'}</span>
                   <b className="font-medium text-dim">最后心跳</b>

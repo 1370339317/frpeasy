@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"frpeasy/internal/agent"
+	"frpeasy/internal/shared"
 )
 
 // version 由构建时 -ldflags "-X main.version=x.y.z" 注入。
@@ -40,7 +41,7 @@ func main() {
 	// 通知面板「这台机器是被卸载了」而不是掉线。安装脚本的 --uninstall
 	// 分支在删文件之前调它，因为那时代码里已经没有 server 参数了。
 	goodbye := flag.Bool("goodbye", false, "内部使用：卸载前向面板报备一次，然后退出")
-	binSource := flag.String("source", "panel", "二进制来源：panel=经面板下发（默认），git=直接从更新源取")
+	binSource := flag.String("source", "auto", "二进制来源：auto=跟随面板设置（默认），panel=只经面板，git=只从上上游取")
 	flag.Parse()
 
 	if *goodbye {
@@ -84,10 +85,13 @@ func main() {
 	}
 	// 明确打出二进制来源。它决定了 frpc 是从面板中继取还是自己上上游取，
 	// 出问题时第一个要看的就是这一行 —— 以前这个选择是隐式的，日志里看不出来。
-	if *binSource == agent.BinSourceGit {
-		fmt.Println("[agent] 二进制来源: git（frpc 直接从上游取，不经过面板）")
-	} else {
-		fmt.Println("[agent] 二进制来源: panel（frpc 经面板中继）")
+	switch shared.NormalizeBinSource(*binSource) {
+	case shared.BinSourceGit:
+		fmt.Println("[agent] 二进制来源: git（钉死，只从上游取，不回退）")
+	case shared.BinSourcePanel:
+		fmt.Println("[agent] 二进制来源: panel（钉死，只经面板中继，不回退）")
+	default:
+		fmt.Println("[agent] 二进制来源: 跟随面板设置（来源链每轮由面板下发）")
 	}
 	if err := c.Run(); err != nil {
 		fmt.Println("运行失败:", err)

@@ -142,6 +142,9 @@ func (c *Client) fetchConfig() (*shared.AgentConfig, error) {
 // heartbeat 上报各隧道状态与本机探测到的服务、网卡 IP、frpc 版本，
 // 并返回面板下发的回包（可能带升级指令）。
 func (c *Client) heartbeat(statuses []shared.TunnelStatus) (*shared.HeartbeatResponse, error) {
+	// 上报实际生效的二进制来源与回退原因：面板据此显示"这台机器最后是从哪儿拿的"。
+	// 只报结果不报过程 —— 过程（每次失败的原文）已经在 note 里了。
+	binSource, binNote := c.frpc.LastFetch()
 	req := shared.HeartbeatRequest{
 		AgentID:      c.agentID,
 		AgentToken:   c.agentTok,
@@ -151,6 +154,8 @@ func (c *Client) heartbeat(statuses []shared.TunnelStatus) (*shared.HeartbeatRes
 		IPs:          shared.GetLocalIPs(),
 		FRPVersion:   c.frpc.CurrentVersion(),
 		AgentVersion: Version,
+		BinSource:    binSource,
+		BinNote:      binNote,
 	}
 	var resp shared.HeartbeatResponse
 	if err := c.postJSON("/api/agent/heartbeat", req, &resp); err != nil {

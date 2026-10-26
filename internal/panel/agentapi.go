@@ -70,11 +70,13 @@ func (p *Panel) agentConfigHandler(w http.ResponseWriter, r *http.Request) {
 	tunnels, _ := p.db.ListTunnelsForAgent(agent.ID)
 	bindPort, _ := strconv.Atoi(p.db.GetSetting("frps_bind_port"))
 	cfg := shared.AgentConfig{
-		FRPSAddr:    p.resolveFRPSAddr(r, bindPort),
-		FRPSToken:   p.db.GetSetting("frps_token"),
-		Tunnels:     tunnels,
+		FRPSAddr:  p.resolveFRPSAddr(r, bindPort),
+		FRPSToken: p.db.GetSetting("frps_token"),
+		Tunnels:   tunnels,
+		// 来源链每轮下发，改设置立刻生效，不用重装客户端。
+		BinSources:  shared.ParseBinSourceChain(p.db.GetSetting("bin_source_chain")),
 		MirrorBase:  p.db.GetSetting("mirror_base"),
-		FRPVersion:  p.db.GetSetting("frp_version"),
+		FRPVersion:  p.concreteFRPVersion(agent.Os, agent.Arch),
 		FRPSRunning: p.frps.Status()["running"] == true,
 	}
 	json.NewEncoder(w).Encode(cfg)
@@ -107,6 +109,10 @@ func (p *Panel) agentHeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = p.db.UpdateAgentHeartbeat(req.AgentID, req.IPs, req.FRPVersion, req.AgentVersion)
+	// 客户端上报的"实际从哪儿拿到 frpc"。旧客户端不填这两个字段，存成空即可。
+	if req.BinSource != "" || req.BinNote != "" {
+		_ = p.db.UpdateAgentBinInfo(req.AgentID, req.BinSource, req.BinNote)
+	}
 	if len(req.Services) > 0 {
 		_ = p.db.UpdateAgentServices(req.AgentID, req.Services)
 	}
@@ -315,4 +321,26 @@ func (p *Panel) agentGoodbyeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[agent] %s（%s）报告本机卸载，已标记为已卸载", agent.Name, req.AgentID)
 	json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// concreteFRPVersion 返回要下发给客户端的 frpc 版本，尽量给具体版本而不是 latest。
+//
+// 为什么必须这么做：客户端选了 Git 源时是**直接拼**下载地址的
+// （.../releases/download/v<ver>/frp_<ver>_<os>_<arch>.tar.gz），
+// 拼不出来才会去问 api.github.com —— 而国内那条 API 经常连不上，镜像也帮不上忙。
+// 所以这里先把 latest 换成面板缓存里记着的真实版本，让客户端不必查 API。
+//
+// 缓存里没有该平台的版本戳时如实返回 latest：那种情况下客户端只能去查 API，
+// 查不到就明确失败，而不是猜一个版本号装上（装错版本连不上 frps）。
+func (p *Panel) concreteFRPVersion(osName, arch string) string {
+	v := strings.TrimSpace(p.db.GetSetting("frp_version"))
+	if v != "" && !strings.EqualFold(v, "latest") {
+		return v
+	}
+	if path := p.frpcCachePath(osName, arch); path != "" {
+		if stamp := p.frpcCachedVersion(path); stamp != "" {
+			return stamp
+		}
+	}
+	return v
 }

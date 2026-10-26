@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"frpeasy/internal/shared"
 )
 
 // 选了 Git 源就绝不去碰面板：两条通道是互斥选择，不是"优先 + 回退"。
@@ -35,7 +37,7 @@ func TestEnsureBinaryGitSourceNeverTouchesPanel(t *testing.T) {
 
 	m := NewFrpcManager(t.TempDir())
 	m.SetPanelBase(srv.URL)
-	m.SetSource(BinSourceGit)
+	m.SetSource(shared.BinSourceGit)
 
 	_, err := m.EnsureBinary("0.71.1", "")
 	if err == nil {
@@ -44,9 +46,12 @@ func TestEnsureBinaryGitSourceNeverTouchesPanel(t *testing.T) {
 	if got := atomic.LoadInt32(&panelHits); got != 0 {
 		t.Fatalf("选了 Git 源却仍然请求了面板 %d 次 —— 不许有交叉回退", got)
 	}
-	// 报错必须点明是哪个源失败，否则用户只会看到一句"拉取失败"，不知道该改哪边。
-	if !strings.Contains(err.Error(), "Git 源") {
-		t.Fatalf("错误信息应说明失败的是 Git 源: %v", err)
+	// 报错必须点明试了哪些源、每个源为什么失败，否则用户只看到一句"拉取失败"。
+	if !strings.Contains(err.Error(), "已按顺序尝试 git") {
+		t.Fatalf("错误信息应列出尝试过的来源: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Git：") {
+		t.Fatalf("错误信息应给出每个来源的失败原因: %v", err)
 	}
 }
 
@@ -76,7 +81,7 @@ func TestEnsureBinaryPanelSourceNeverResolvesUpstream(t *testing.T) {
 
 	m := NewFrpcManager(t.TempDir())
 	m.SetPanelBase(srv.URL)
-	m.SetSource(BinSourcePanel)
+	m.SetSource(shared.BinSourcePanel)
 
 	path, err := m.EnsureBinary("0.71.1", "")
 	if err != nil {
@@ -93,24 +98,53 @@ func TestEnsureBinaryPanelSourceNeverResolvesUpstream(t *testing.T) {
 	}
 }
 
-// 空串与乱写的值都按面板源处理：面板源是唯一在哪种环境下都能工作的选择。
+// 空串与乱写的值一律当 auto（跟随面板），不要因为一个写错的命令行参数起不来。
 func TestSetSourceNormalizes(t *testing.T) {
 	m := NewFrpcManager(t.TempDir())
 	cases := map[string]string{
-		"":          BinSourcePanel,
-		"panel":     BinSourcePanel,
-		"git":       BinSourceGit,
-		"gti":       BinSourcePanel, // 拼错了当成默认，不要因为一个 typo 起不来
-		"Git":       BinSourcePanel,
-		"git extra": BinSourcePanel,
+		"":          shared.BinSourceAuto,
+		"auto":      shared.BinSourceAuto,
+		"panel":     shared.BinSourcePanel,
+		"git":       shared.BinSourceGit,
+		"Git":       shared.BinSourceGit, // 大小写不敏感
+		"gti":       shared.BinSourceAuto,
+		"git extra": shared.BinSourceAuto,
 	}
 	for in, want := range cases {
 		m.SetSource(in)
 		m.mu.Lock()
-		got := m.source
+		got := m.pin
 		m.mu.Unlock()
 		if got != want {
 			t.Errorf("SetSource(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}
+
+// 来源链：钉死就只用那一个，不钉死才按链走。
+func TestSourceOrderPinsOrFollowsChain(t *testing.T) {
+	cases := []struct {
+		pin   string
+		chain []string
+		want  []string
+	}{
+		{shared.BinSourceGit, []string{"panel", "git"}, []string{"git"}}, // 钉死 git：只试 git
+		{shared.BinSourcePanel, []string{"git", "panel"}, []string{"panel"}},
+		{shared.BinSourceAuto, []string{"git", "panel"}, []string{"git", "panel"}},
+		{shared.BinSourceAuto, []string{"panel"}, []string{"panel"}},
+		{shared.BinSourceAuto, nil, []string{"panel"}},                  // 没下发链：只试面板
+		{shared.BinSourceAuto, []string{"bogus"}, []string{"panel"}},    // 链里是垃圾：退回面板
+		{shared.BinSourceAuto, []string{"git", "git"}, []string{"git"}}, // 去重
+	}
+	for _, c := range cases {
+		got := shared.SourceOrder(c.pin, c.chain)
+		if len(got) != len(c.want) {
+			t.Fatalf("SourceOrder(%q,%v) = %v，期望 %v", c.pin, c.chain, got, c.want)
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Fatalf("SourceOrder(%q,%v) = %v，期望 %v", c.pin, c.chain, got, c.want)
+			}
 		}
 	}
 }
@@ -137,7 +171,7 @@ func TestDownloadFromUpstreamExtractsAndRenames(t *testing.T) {
 	}
 
 	m := NewFrpcManager(t.TempDir())
-	m.SetSource(BinSourceGit)
+	m.SetSource(shared.BinSourceGit)
 	path, err := m.EnsureBinary("0.71.1", "")
 	if err != nil {
 		t.Fatalf("Git 源下载应当成功: %v", err)
@@ -193,4 +227,106 @@ func makeFrpTarball(t *testing.T, binName string, content []byte) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+// 回退链真的会回退，而且留下证据。
+//
+// 这是"允许回退"能成立的前提：早期那条静默回退之所以被删，不是因为它会尝试第二条，
+// 而是因为试完之后没人知道走了哪条。这里的断言就是盯着这一点 ——
+// 走的是谁、谁失败了、为什么失败，都必须留在 lastSource / lastNote 里。
+func TestEnsureBinaryFallsBackAlongChain(t *testing.T) {
+	payload := make([]byte, 1<<20+1)
+	for i := range payload {
+		payload[i] = 0x7f
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-FRPC-Version", "v0.71.1")
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	orig := resolveFrpcAsset
+	defer func() { resolveFrpcAsset = orig }()
+	resolveFrpcAsset = func(repo, version, keyword, mirror string) (string, string, error) {
+		return "", "", errors.New("上游不可达")
+	}
+
+	// 链：git → panel。Git 必然失败（上面注入），应当自动落到面板。
+	m := NewFrpcManager(t.TempDir())
+	m.SetPanelBase(srv.URL)
+	m.SetSource(shared.BinSourceAuto)
+	m.setPolicy([]string{shared.BinSourceGit, shared.BinSourcePanel})
+
+	if _, err := m.EnsureBinary("0.71.1", ""); err != nil {
+		t.Fatalf("链上有可用来源时不应当失败: %v", err)
+	}
+	src, note := m.LastFetch()
+	if src != shared.BinSourcePanel {
+		t.Fatalf("应当回退到面板，实际生效来源 %q", src)
+	}
+	if !strings.Contains(note, "上游不可达") {
+		t.Fatalf("回退原因必须留下（否则就是又一次静默回退），实际 %q", note)
+	}
+}
+
+// 钉死来源时不参与回退：明确指定了就照办，替用户改主意比失败更糟。
+func TestEnsureBinaryPinnedSourceDoesNotFallBack(t *testing.T) {
+	var panelHits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&panelHits, 1)
+		_, _ = w.Write(make([]byte, 1<<20+1))
+	}))
+	defer srv.Close()
+
+	orig := resolveFrpcAsset
+	defer func() { resolveFrpcAsset = orig }()
+	resolveFrpcAsset = func(repo, version, keyword, mirror string) (string, string, error) {
+		return "", "", errors.New("上游不可达")
+	}
+
+	m := NewFrpcManager(t.TempDir())
+	m.SetPanelBase(srv.URL)
+	m.SetSource(shared.BinSourceGit)                                  // 钉死 git
+	m.setPolicy([]string{shared.BinSourceGit, shared.BinSourcePanel}) // 面板明明也在链上
+
+	if _, err := m.EnsureBinary("0.71.1", ""); err == nil {
+		t.Fatal("钉死 git 且 git 不可用时应直接失败")
+	}
+	if got := atomic.LoadInt32(&panelHits); got != 0 {
+		t.Fatalf("钉死 git 却请求了面板 %d 次 —— 钉死就是不回退", got)
+	}
+	if _, note := m.LastFetch(); !strings.Contains(note, "上游不可达") {
+		t.Fatalf("失败原因没留下来: %q", note)
+	}
+}
+
+// 两条都失败时，错误里必须能同时看到两条的原因，而不是只报最后一条。
+func TestEnsureBinaryAllSourcesFailKeepsEveryReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "面板内部错误", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	orig := resolveFrpcAsset
+	defer func() { resolveFrpcAsset = orig }()
+	resolveFrpcAsset = func(repo, version, keyword, mirror string) (string, string, error) {
+		return "", "", errors.New("上游不可达")
+	}
+
+	m := NewFrpcManager(t.TempDir())
+	m.SetPanelBase(srv.URL)
+	m.SetSource(shared.BinSourceAuto)
+	m.setPolicy([]string{shared.BinSourcePanel, shared.BinSourceGit})
+
+	_, err := m.EnsureBinary("0.71.1", "")
+	if err == nil {
+		t.Fatal("两条都不通时应当报错")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "面板") || !strings.Contains(msg, "上游不可达") {
+		t.Fatalf("两条来源的失败原因都要带上，否则用户不知道该修哪边: %v", err)
+	}
+	if src, _ := m.LastFetch(); src != "" {
+		t.Fatalf("全部失败时不该报告一个生效来源，实际 %q", src)
+	}
 }

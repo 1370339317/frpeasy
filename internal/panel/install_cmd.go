@@ -281,6 +281,31 @@ func (p *Panel) gitAgentURL(osName, arch string) string {
 	return base + "/" + name
 }
 
+// gitAgentURLForVersion 同 gitAgentURL，但把地址锁到某个具体版本。
+//
+// update_base 通常是 .../releases/latest/download，直接拿来当升级地址是不行的：
+// 面板锁定的版本可能不是上游的 latest（面板缓存落后、或用户指定了旧版本），
+// 那样下到的文件与面板给的 sha256 不一致，客户端会拒绝安装 —— 明明有更好的地址
+// 却让升级白失败一次。所以这里把 latest/download 换成 download/v<ver>。
+//
+// 自建更新源（地址里没有 latest/download）不做改写：那种目录本来就只有一份文件，
+// 版本由发布者自己控制。
+func (p *Panel) gitAgentURLForVersion(osName, arch, version string) string {
+	base := p.gitBinBase()
+	if base == "" || !shared.IsSupportedPlatform(osName, arch) {
+		return ""
+	}
+	name := shared.AgentBinFileName(osName, arch)
+	if name == "" {
+		return ""
+	}
+	if v := strings.TrimPrefix(strings.TrimSpace(version), "v"); v != "" {
+		base = strings.Replace(base, "/releases/latest/download",
+			"/releases/download/v"+v, 1)
+	}
+	return base + "/" + name
+}
+
 // installCommandFields 生成与安装命令有关的响应字段（两个接口共用一份，避免走偏）。
 func (p *Panel) installCommandFields(r *http.Request) map[string]any {
 	base := p.gitBinBase()

@@ -51,6 +51,10 @@ export interface Agent {
   uninstall_sent_at?: string | null
   /** 这次卸载是在那台机器上执行的（跑了卸载命令），而不是面板云端下发 */
   uninstall_by_local: boolean
+  /** 客户端上报的「实际从哪儿拿到二进制」：panel / git（空 = 旧客户端没上报） */
+  bin_source: string
+  /** 最近一次取二进制失败的明细（回退原因），空 = 首选就成功 */
+  bin_note: string
 }
 
 export type ProxyState = 'online' | 'waiting_server' | 'not_deployed' | 'offline'
@@ -103,6 +107,8 @@ export interface Settings {
   install_token: string
   update_base: string
   agent_auto_update: string
+  /** 客户端取二进制的来源链，逗号分隔且有序：panel / panel,git / git / git,panel */
+  bin_source_chain: string
   [key: string]: string
 }
 
@@ -371,6 +377,7 @@ export interface SettingsBody {
   new_password?: string
   update_base?: string
   agent_auto_update?: string
+  bin_source_chain?: string
 }
 
 export interface SettingsSaveResult {

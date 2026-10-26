@@ -455,7 +455,11 @@ func (p *Panel) agentUpdateFor(r *http.Request, ag *shared.Agent) *shared.AgentU
 	return &shared.AgentUpdate{
 		Version: target,
 		URL:     p.resolvePanelBase(r) + "/api/agent/bin/" + ag.Os + "/" + ag.Arch,
-		SHA256:  sha,
-		Size:    size,
+		// 同一份文件的另一条取法。客户端按自己的来源链挑，
+		// 所以这里必须锁到**具体版本**：用 latest 地址在面板落后于上游时
+		// 会拿到另一个版本，客户端校验 sha 必然不过，白等一次下载。
+		URLGit: p.gitAgentURLForVersion(ag.Os, ag.Arch, target),
+		SHA256: sha,
+		Size:   size,
 	}
 }
