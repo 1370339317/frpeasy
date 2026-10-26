@@ -137,6 +137,9 @@ export interface VersionAgent {
   hosted_size: number
   hosted_note: string
   latest: string
+  // cache_behind 面板手上的可下发文件比清单旧。这时客户端升不上去，
+  // 而 outdated 会是 0（客户端和缓存版本一致），界面看起来一切正常。
+  cache_behind: boolean
   auto_update: boolean
   outdated: number
   legacy: number

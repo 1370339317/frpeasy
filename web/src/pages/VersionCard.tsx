@@ -356,6 +356,23 @@ export function VersionCard() {
             </>
           ) : null}
         </Hint>
+        {/* 缓存落后时「客户端升不上去」但 outdated=0，界面上一切正常 ——
+            必须单独说一句，否则用户只能自己对比两个版本号猜。 */}
+        {a?.cache_behind && (
+          <Hint>
+            <span className="text-warn-fg">
+              面板缓存还是 {a.hosted}，清单已到 {a.latest}。
+            </span>{' '}
+            有客户端心跳时会自动换成新版本，下一轮心跳再下发升级；不想等就去
+            <a
+              className="cursor-pointer font-semibold text-accent-fg underline"
+              onClick={() => (window.location.hash = '#/files')}
+            >
+              文件与更新
+            </a>
+            页点「预存」立刻拉。
+          </Hint>
+        )}
       </div>
     </Card>
   )

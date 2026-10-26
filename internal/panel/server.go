@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"frpeasy/internal/shared"
@@ -74,6 +75,9 @@ type Panel struct {
 	// 更新清单缓存。检查更新要访问外网，不能每次打开页面都去拉。
 	manifestMu   sync.Mutex
 	manifestInfo *manifestCache
+	// 清单预热是否正在跑。心跳路径发现「还没有清单」时会触发一次后台拉取，
+	// 这个标记保证多个心跳同时触发也只出去一次请求。
+	manifestWarming atomic.Bool
 }
 
 // NewPanel 构造面板：初始化数据库、管理员、frps 管理器，并确定 agent 二进制目录。
@@ -109,6 +113,11 @@ func NewPanel(dataDir, listen, version string) (*Panel, error) {
 	// 面板重启后自动拉起 frps（二进制已就绪时）。没有这一步，重启面板
 	// 就等于把所有隧道停掉，用户每次都得自己去点一下启动。
 	pnl.frps.AutoStart()
+	// 启动时预热一次更新清单：心跳路径只读缓存，没有这份预热的话，
+	// 「缓存落后 → 该给客户端升级」这件事要等用户打开「文件与更新」页才判得出来，
+	// 期间客户端一直停在旧版本而界面显示正常。放后台，不拖慢启动；
+	// update_base 为空（离线部署）时内部直接返回，不会发请求。
+	pnl.warmManifestAsync()
 	return pnl, nil
 }
 

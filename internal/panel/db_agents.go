@@ -76,8 +76,15 @@ func (db *DB) DeleteAgent(id string) error {
 
 func (db *DB) CreateAgent(a *shared.Agent) error {
 	ipsB, _ := json.Marshal(a.IPs)
+	// last_seen 必须和 online 一起写。
+	//
+	// 只写 online=1 而把 last_seen 留空的话，离线判定（距上次心跳超过 60 秒）
+	// 会因为拿到 NULL/零值而立刻判过期 —— 于是「刚装完、注册成功」的客户端
+	// 在面板上显示成「离线，最后心跳：从未」，要等第一次心跳（最长 15 秒）才好。
+	// 用户看到的就是「装完了但不在线、也没有心跳」，像是装失败了。
+	// 注册本身就是一次「它活着」的证据，直接当作一次心跳记下来。
 	_, err := db.Exec(
-		"INSERT INTO agents(id,name,os,arch,install_token,agent_token,online,created_at,services,ips,frp_version,agent_version) VALUES(?,?,?,?,?,?,1,CURRENT_TIMESTAMP,'',?,?,?)",
+		"INSERT INTO agents(id,name,os,arch,install_token,agent_token,online,last_seen,created_at,services,ips,frp_version,agent_version) VALUES(?,?,?,?,?,?,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'',?,?,?)",
 		a.ID, a.Name, a.Os, a.Arch, a.InstallToken, a.AgentToken, string(ipsB), a.FRPVersion, a.AgentVersion,
 	)
 	return err

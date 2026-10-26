@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"frpeasy/internal/shared"
 )
@@ -297,13 +298,45 @@ func (p *Panel) agentBinFor(path string) *agentBinInfo {
 //
 // 心跳路径（agentUpdateFor）绝对不能因为拉清单而阻塞：客户端 15 秒一次心跳，
 // 卡住一次就可能被判离线。需要新鲜清单的地方走 currentManifest(force)。
+//
+// 过期的缓存按「没有」处理：拿一份几小时前的清单去决定该下发哪个版本，
+// 会把已经发过的新版本又按旧指纹推一遍，客户端校验必然失败。
 func (p *Panel) cachedManifest() *shared.Manifest {
 	p.manifestMu.Lock()
 	defer p.manifestMu.Unlock()
-	if p.manifestInfo == nil {
+	if p.manifestInfo == nil || p.manifestInfo.Manifest == nil {
+		return nil
+	}
+	if time.Since(p.manifestInfo.At) > manifestCacheTTL {
 		return nil
 	}
 	return p.manifestInfo.Manifest
+}
+
+// warmManifestAsync 后台补一份清单。单飞：同时来多个心跳只出去一次请求。
+//
+// 存在理由很具体：面板重启后 manifestInfo 是空的，而心跳路径只读缓存。
+// 没有这层预热，只要没人打开「文件与更新」页，心跳就永远看不到清单 ——
+// 判不出「缓存落后」，也就永远不会给客户端下发升级，而界面上一切正常。
+// 实测过：面板发版后客户端卡在旧版本 5 分钟以上，正是这条。
+func (p *Panel) warmManifestAsync() {
+	// 上一次尝试太近就不再试。清单拉不到时（镜像不通、服务器离线）不能让
+	// 每 15 秒一次的心跳都出去撞一遍 —— 那会把「网络问题」放大成持续负载。
+	p.manifestMu.Lock()
+	recent := p.manifestInfo != nil && time.Since(p.manifestInfo.At) < manifestWarmInterval
+	p.manifestMu.Unlock()
+	if recent {
+		return
+	}
+	if !p.manifestWarming.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer p.manifestWarming.Store(false)
+		if m, err := p.currentManifest(true); m == nil {
+			log.Printf("[agent] 后台拉取更新清单失败: %s", err)
+		}
+	}()
 }
 
 // versionBySHA 用文件哈希向清单求证版本。拿不到清单或没匹配上返回 false。
@@ -324,6 +357,12 @@ func (p *Panel) versionBySHA(sha string) (string, bool) {
 func (p *Panel) agentCacheBehind(osName, arch string) bool {
 	m := p.cachedManifest()
 	if m == nil {
+		// 还没有可用清单（面板刚重启、或缓存已过期）。
+		// 这里必须主动补一份：只读缓存的话，重启后只要没人打开「文件与更新」页，
+		// 「缓存是否落后」就永远判不出来，客户端也就永远升不上去，
+		// 而面板上看起来一切正常（hosted 显示旧版本、outdated=0）。
+		// 补清单要出网，不能占着心跳，所以放后台，这一轮先不下发。
+		p.warmManifestAsync()
 		return false
 	}
 	if _, err := m.SelectAsset(shared.AssetAgent, osName, arch); err != nil {

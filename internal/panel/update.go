@@ -28,6 +28,11 @@ import (
 const (
 	// manifestCacheTTL 清单缓存时长。检查更新要出外网，不能每次打开页面都拉。
 	manifestCacheTTL = 10 * time.Minute
+	// manifestWarmInterval 后台预热清单的最小间隔。
+	//
+	// 心跳 15 秒一次，而拉清单失败时（镜像不通、服务器离线）缓存会一直是空的。
+	// 没有这个间隔，每次心跳都会去撞一次外网，把「网络问题」放大成持续负载。
+	manifestWarmInterval = time.Minute
 	// maxPanelBinaryBytes 面板二进制的合理上限（当前约 11MB）。
 	// 设上限是为了在清单被写错（比如 file 指向了一个 5GB 的镜像）时立刻失败，
 	// 而不是把磁盘写满才发现。
@@ -110,8 +115,14 @@ type versionAgent struct {
 	// UI 需要能说明"这不是故障"，否则用户会去追一个不存在的文件。
 	HostedNote string `json:"hosted_note"`
 	Latest     string `json:"latest"`
-	AutoUpdate bool   `json:"auto_update"`
-	Outdated   int    `json:"outdated"`
+	// CacheBehind 面板手上的可下发文件比清单旧。
+	//
+	// 这不是"客户端落后"，而是"面板还没来得及把缓存换成新版本"，表现是
+	// 客户端一直升不上去，而 outdated=0、界面显示一切正常 —— 之前实测卡过
+	// 5 分钟以上。必须单独暴露，否则用户只能靠对比两个版本号自己猜。
+	CacheBehind bool `json:"cache_behind"`
+	AutoUpdate  bool `json:"auto_update"`
+	Outdated    int  `json:"outdated"`
 	// Legacy 仍在心跳、但没上报版本号的客户端数。
 	// 这类客户端跑的是「还没有自更新能力」的老二进制 —— 它根本不认识心跳里的
 	// agent_update 字段，面板下发的升级对它完全无效。必须与 Outdated 分开计数：
@@ -185,12 +196,15 @@ func (p *Panel) collectVersions(force bool) versionResponse {
 	resp.Agent.HostedSize = bin.Size
 	resp.Agent.AutoUpdate = p.db.GetSetting("agent_auto_update") != "0"
 	if manifest != nil {
-		// 清单里的 agent 版本只用来回答"面板自带的这份是不是也旧了"。
-		// 客户端升级永远以面板自带的那份为准，见 agentUpdateFor。
-		if _, err := manifest.SelectAsset(shared.AssetAgent, runtime.GOOS, runtime.GOARCH); err == nil {
-			resp.Agent.Latest = manifest.Version
-		}
+		// 清单里的 agent 版本回答两件事：「面板手上这份旧了没有」，
+		// 以及给 UI 一个"最新应该是多少"的参照。客户端升级仍以
+		// agentUpdateFor 为准（它会先确保缓存与清单一致再下发）。
+		resp.Agent.Latest = manifest.Version
 		resp.Agent.MinSupported = manifest.MinAgentVersion
+		// 缓存比清单旧：说明还没换成新文件，客户端这一刻升不上去。
+		if resp.Agent.Hosted != "" && shared.IsNewer(manifest.Version, resp.Agent.Hosted) {
+			resp.Agent.CacheBehind = true
+		}
 	}
 	// 已接入客户端的平台各自会收到哪一版（取第一台作为展示代表）。
 	var clientVer string
