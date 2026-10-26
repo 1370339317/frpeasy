@@ -96,16 +96,18 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 				changedKeys = append(changedKeys, k)
 				publicAddrChanged = true
 			}
-		case "bin_source_chain":
-			// 来源链只允许 panel / git，且不能为空 —— 空链意味着「一次都不尝试」，
-			// 客户端会永远拿不到 frpc，而界面上看起来只是"拉取失败"。
-			chain := shared.ParseBinSourceChain(v)
-			if len(chain) == 0 {
-				http.Error(w, "来源链不能为空，且只能由 panel / git 组成（例如 panel 或 panel,git 或 git,panel）", http.StatusBadRequest)
+		case settingSourceMode:
+			// 只有两个合法值。写错就拒绝，不要"认不出就按手动"——
+			// 那样用户选了自动、实际一直在按旧顺序走，而界面显示已保存。
+			if v != SourceModeAuto && v != SourceModeManual {
+				http.Error(w, "下载策略只能是 auto（自动择优）或 manual（手动排序）", http.StatusBadRequest)
 				return
 			}
-			_ = p.db.SetSetting(k, strings.Join(chain, ","))
+			_ = p.db.SetSetting(k, v)
 			changedKeys = append(changedKeys, k)
+			// 换策略后缓存的排序不再适用：手动改回自动要重新测，
+			// 自动改手动则不该继续用测速排出来的顺序。
+			p.ranks = newRankCache()
 		case settingServerSources, settingClientSources:
 			// 源列表是有序候选，校验要严：认不出的 token、空列表都必须当场拒绝。
 			// 静默忽略一项会让「我配了三个只生效两个」变成没人能解释的现象，

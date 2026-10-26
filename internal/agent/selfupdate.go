@@ -157,7 +157,10 @@ func (c *Client) updateCandidateURLs(up *shared.AgentUpdate) []string {
 		seen[u] = true
 		out = append(out, u)
 	}
-	for _, src := range c.frpc.Sources() {
+	// 与 frpc 用同一套策略：auto 模式下临时测速排优（测的是同一批链路，
+	// 缓存共用，所以不会出现"frpc 测过了、升级又测一遍"）。
+	// 传空版本：这里只用它拼探测地址，实际升级版本由面板在 URL 里锁定。
+	for _, src := range c.frpc.orderedFor("") {
 		if src.IsPanel() {
 			add(up.URL)
 		} else {

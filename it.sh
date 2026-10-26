@@ -221,6 +221,29 @@ curl -s -X POST $B/api/agent/heartbeat -H 'Content-Type: application/json'   -d 
 chk "心跳上报来源被存下" "https://ghfast.top" "$(curl -s -b cj.txt $B/api/agents | jget "next((x['bin_source'] for x in d['agents'] if x['id']=='$AGID'), '')")"
 chk "回退原因被存下" 1 "$(curl -s -b cj.txt $B/api/agents | jget "next((x['bin_note'] for x in d['agents'] if x['id']=='$AGID'), '')" | grep -c '超时')"
 
+say "== 17d) 下载策略：手动 / 自动择优 + 排优记录 =="
+chk "默认策略是 manual" "manual" "$(curl -s -b cj.txt $B/api/settings | jget "d['source_mode']")"
+chk "非法策略被拒 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d '{"source_mode":"nonsense"}')"
+curl -s -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d '{"source_mode":"auto"}' >/dev/null
+chk "策略可保存" "auto" "$(curl -s -b cj.txt $B/api/settings | jget "d['source_mode']")"
+chk "config 下发策略" "auto" "$(curl -s "$B/api/agent/config?agent_id=$AGID&token=$AGTOK" | jget "d['source_mode']")"
+# 面板测不到客户端的网络，不能替它排序
+chk "客户端侧测速被拒 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/sources/probe -H 'Content-Type: application/json' -d '{"side":"client"}')"
+# 空列表必须是 [] 而不是 null（否则前端会保留旧记录）
+chk "事件列表是空数组" "[]" "$(curl -s -b cj.txt "$B/api/sources/events?side=client" | jget "d['events']")"
+# 客户端上报的排优与下载记录要能查到，且带失败原因
+curl -s -X POST $B/api/agent/source-event -H 'Content-Type: application/json' \
+  -d "{\"agent_id\":\"$AGID\",\"agent_token\":\"$AGTOK\",\"kind\":\"download\",\"what\":\"frpc\",\"source\":\"https://ghfast.top\",\"ok\":true,\"elapsed_ms\":2300}" >/dev/null
+curl -s -X POST $B/api/agent/source-event -H 'Content-Type: application/json' \
+  -d "{\"agent_id\":\"$AGID\",\"agent_token\":\"$AGTOK\",\"kind\":\"download\",\"what\":\"frpc\",\"source\":\"panel\",\"ok\":false,\"error\":\"面板中继超时\"}" >/dev/null
+chk "客户端上报被记录" 2 "$(curl -s -b cj.txt "$B/api/sources/events?side=client" | jget "len(d['events'])")"
+chk "失败原因能查到" 1 "$(curl -s -b cj.txt "$B/api/sources/events?side=client" | jget "d['events'][0]['error']" | grep -c '超时')"
+chk "记录带机器名" 1 "$(curl -s -b cj.txt "$B/api/sources/events?side=client" | jget "d['events'][0]['agent_name']" | grep -c .)"
+# 错误凭据不能写诊断数据
+chk "错误凭据被拒 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST $B/api/agent/source-event -H 'Content-Type: application/json' -d '{"agent_id":"x","agent_token":"y","kind":"rank"}')"
+# 恢复默认，后面的断言按 manual 预期
+curl -s -b cj.txt -X POST $B/api/settings -H 'Content-Type: application/json' -d '{"source_mode":"manual"}' >/dev/null
+
 say "== 18) 端口 / 防火墙清单 =="
 chk "未登录取端口被拦 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/ports)"
 PORTJ=$(curl -s -b cj.txt $B/api/ports)

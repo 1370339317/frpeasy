@@ -51,7 +51,7 @@ func TestEnsureBinaryStopsAtFirstWorkingSource(t *testing.T) {
 	m.SetSources([]shared.Source{
 		{Kind: shared.SourcePanel},
 		{Kind: shared.SourceDirect, Prefix: "https://ghfast.top"},
-	})
+	}, shared.SourceModeManual)
 
 	if _, err := m.EnsureBinary("0.71.1"); err != nil {
 		t.Fatalf("面板源可用时不应当失败: %v", err)
@@ -84,7 +84,7 @@ func TestEnsureBinaryFallsBackAndKeepsReason(t *testing.T) {
 	m.SetSources([]shared.Source{
 		{Kind: shared.SourcePanel},
 		{Kind: shared.SourceDirect, Prefix: "https://ghfast.top"},
-	})
+	}, shared.SourceModeManual)
 
 	_, err := m.EnsureBinary("0.71.1")
 	if err == nil {
@@ -122,7 +122,7 @@ func TestEnsureBinaryFallsBackToMirrorSuccessfully(t *testing.T) {
 	m.SetSources([]shared.Source{
 		{Kind: shared.SourcePanel}, // 没有 panelBase → 必然失败
 		{Kind: shared.SourceDirect, Prefix: "https://ghfast.top"},
-	})
+	}, shared.SourceModeManual)
 	path, err := m.EnsureBinary("0.71.1")
 	if err != nil {
 		t.Fatalf("镜像源应当成功: %v", err)
@@ -153,7 +153,7 @@ func TestEnsureBinaryFallsBackToMirrorSuccessfully(t *testing.T) {
 // 列表为空时退回「仅面板」：绝不能因为一次空配置就让客户端去够外网。
 func TestSetSourcesEmptyFallsBackToPanel(t *testing.T) {
 	m := NewFrpcManager(t.TempDir())
-	m.SetSources(nil)
+	m.SetSources(nil, shared.SourceModeManual)
 	got := m.Sources()
 	if len(got) != 1 || !got[0].IsPanel() {
 		t.Fatalf("空列表应退回仅面板，实际 %v", got)

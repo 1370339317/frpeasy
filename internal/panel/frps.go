@@ -50,6 +50,7 @@ type FrpsManager struct {
 	// 前者不能自动拉起（否则点了停也没用），后者应该自动恢复。
 	stoppedByUser bool
 	logPath       string
+	ranks         *rankCache
 
 	// 连续自动重启失败次数。进程每次异常退出都会触发一次自动重启；
 	// 如果原因是「端口被别的程序占着」这种自愈不了的问题，重启会永远失败，
@@ -89,6 +90,9 @@ func NewFrpsManager(db *DB, dataDir string) *FrpsManager {
 		binDir:  binDir,
 		cfgDir:  cfgDir,
 		logPath: filepath.Join(dataDir, "frps.log"),
+		// 自动择优的缓存。与 Panel 各持一份：两者取二进制的时机不同
+		// （frps 是启动/换版本，Panel 是装客户端/推升级），互不干扰更简单。
+		ranks: newRankCache(),
 	}
 }
 
@@ -186,7 +190,12 @@ func (m *FrpsManager) EnsureBinary() (string, error) {
 	keyword := shared.PlatformKeyword(runtime.GOOS, runtime.GOARCH)
 	// 按源列表依次尝试。面板自己取二进制同样需要回退：
 	// 某个镜像挂掉时，用户不该被迫先改设置再手动点一次重启。
-	return trySources("frps", sourcesFromSetting(m.db, settingServerSources),
+	return trySources("frps",
+		orderedWithCache(m.ranks, m.db, sideServer,
+			sourcesFromSetting(m.db, settingServerSources),
+			func(s shared.Source) string { return frpProbeURL(m.db, s) },
+			dbRecorder(m.db)),
+		dbRecorder(m.db),
 		func(src shared.Source) (string, error) {
 			url, tag, err := resolveFRPAsset(shared.FRPRepo, version, keyword, "")
 			if err != nil {

@@ -2,14 +2,17 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"frpeasy/internal/shared"
@@ -69,7 +72,52 @@ func NewClient(server, installTok, name, dataDir string) (*Client, error) {
 	}
 	// 面板地址始终注入：即使某个客户端一路走镜像，面板仍是配置与版本的唯一来源。
 	c.frpc.SetPanelBase(server)
+	// 排优/下载事件上报。用闭包而不是字段：agentID 是注册之后才有的，
+	// 闭包里每次读最新值，注册前后都能用。
+	c.frpc.SetReporter(func(ev SourceEvent) { c.postSourceEvent(ev) })
 	return c, nil
+}
+
+// postSourceEvent 把一次排优结果或下载尝试上报给面板。
+//
+// 为什么把这件小事做进协议：客户端排优是**在客户端那台机器上**发生的，
+// 面板看不到它的网络状况。只报一个"最终用了哪个源"不够 ——
+// 出问题时最需要的是"当时几个源各自多快、谁失败、为什么"，
+// 而这些只有客户端知道。上报失败只记日志，绝不影响下载。
+func (c *Client) postSourceEvent(ev SourceEvent) {
+	if c.agentID == "" {
+		return
+	}
+	body, err := json.Marshal(map[string]any{
+		"agent_id":    c.agentID,
+		"agent_token": c.agentTok,
+		"kind":        ev.Kind,
+		"what":        ev.What,
+		"source":      ev.Source,
+		"ok":          ev.OK,
+		"elapsed_ms":  ev.ElapsedMs,
+		"bytes":       ev.Bytes,
+		"detail":      ev.Detail,
+		"error":       ev.Error,
+	})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(c.server, "/")+"/api/agent/source-event", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		log.Printf("[agent] 上报源事件失败: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
 }
 
 func (c *Client) statePath() string {

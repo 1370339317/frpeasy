@@ -89,7 +89,11 @@ func (p *Panel) ensureFrpcBin(osName, arch string) (string, error) {
 		return "", fmt.Errorf("创建缓存目录 %s 失败：%v", binDir, err)
 	}
 	keyword := shared.PlatformKeyword(osName, arch)
-	return trySources("frpc "+osName+"/"+arch, sourcesFromSetting(p.db, settingServerSources),
+	return trySources("frpc "+osName+"/"+arch,
+		p.orderedSources(sideServer, p.serverSources(), func(s shared.Source) string {
+			return frpProbeURL(p.db, s)
+		}),
+		p.recorder(),
 		func(src shared.Source) (string, error) {
 			url, tag, err := resolveFRPAsset(shared.FRPRepo, version, keyword, "")
 			if err != nil {

@@ -16,6 +16,7 @@ import type {
   FrpsStatus,
   Me,
   NetworkResponse,
+  RankInfo,
   Settings,
   Tunnel,
   TunnelsResponse,
@@ -59,6 +60,10 @@ interface AppData {
   accessHost: string
   accessSource: AccessHostSource
   installBase: string
+  /** 下载策略：auto（自动择优）/ manual（手动排序） */
+  sourceMode: string
+  /** 最近一次自动排优结果（服务端侧）；没测过为 null */
+  lastRank: RankInfo | null
   panelPort: string
 }
 
@@ -114,6 +119,8 @@ export function AppProvider({
     accessHost: '',
     accessSource: 'fallback',
     installBase: '',
+    sourceMode: 'manual',
+    lastRank: null,
     panelPort: '',
   })
   const [ready, setReady] = useState(false)
@@ -187,6 +194,8 @@ export function AppProvider({
       accessHost: r.access_host || '',
       accessSource: r.access_host_source || 'fallback',
       installBase: r.install_base || '',
+      sourceMode: r.source_mode || 'manual',
+      lastRank: r.last_rank ?? null,
       panelPort: r.panel_listen_port || '',
     }))
     return r.tunnels ?? []

@@ -40,6 +40,16 @@ type FrpcManager struct {
 	// 两种都只是"从哪儿拿这个文件"，版本与内容始终由面板决定。
 	list []shared.Source
 
+	// sourceMode 下载策略（面板下发）：auto = 本地临时测速排优；manual = 按 list 顺序。
+	sourceMode string
+
+	// rank 本地排优缓存。与 m.mu 分开：测速要几秒，
+	// 不能占着配置下发与心跳要用的那把锁。
+	rank *rankState
+
+	// reportFn 上报排优/下载事件（由 Client 注入，指向面板）。
+	reportFn func(SourceEvent)
+
 	// lastSource / lastNote 最近一次真正生效的来源与失败明细，随心跳上报，
 	// 让界面能回答「这台机器最后是从哪儿拿到的、为什么没走首选」。
 	lastSource shared.Source
@@ -57,12 +67,27 @@ func (m *FrpcManager) SetPanelBase(base string) {
 //
 // 空列表退回「仅面板」：那是唯一在纯内网也成立的选择，绝不能因为
 // 一次配置为空就让客户端去够 github.com。
-func (m *FrpcManager) SetSources(list []shared.Source) {
+func (m *FrpcManager) SetSources(list []shared.Source, mode string) {
 	if len(list) == 0 {
 		list = []shared.Source{{Kind: shared.SourcePanel}}
 	}
 	m.mu.Lock()
+	changed := shared.FormatSources(m.list) != shared.FormatSources(list) ||
+		m.sourceMode != mode
 	m.list = list
+	m.sourceMode = mode
+	if changed {
+		// 候选集或策略变了，上一次排出来的顺序立即作废：
+		// 继续用它等于拿旧列表的结果去指导新列表，可能出现"排序里有已删掉的源"。
+		m.rank = &rankState{}
+	}
+	m.mu.Unlock()
+}
+
+// SetReporter 注入事件上报函数（Client 构造后调用）。
+func (m *FrpcManager) SetReporter(fn func(SourceEvent)) {
+	m.mu.Lock()
+	m.reportFn = fn
 	m.mu.Unlock()
 }
 
@@ -97,6 +122,7 @@ func NewFrpcManager(dataDir string) *FrpcManager {
 	return &FrpcManager{
 		binDir: filepath.Join(dataDir, "bin"),
 		cfgDir: filepath.Join(dataDir, "frpc"),
+		rank:   &rankState{},
 	}
 }
 
@@ -155,11 +181,11 @@ func (m *FrpcManager) EnsureBinary(version string) (string, error) {
 		return "", err
 	}
 	panelBase := m.panelBase
-	order := m.list
-	if len(order) == 0 {
-		order = []shared.Source{{Kind: shared.SourcePanel}}
-	}
 	m.mu.Unlock()
+
+	// 顺序由策略决定：manual 用面板下发的顺序；auto 先在本地测一遍再排。
+	// 放在锁外：测速要几秒，占着锁会把心跳与配置下发一起拖住。
+	order := m.orderedFor(version)
 
 	// 按来源链依次尝试，**每次失败的明细都留着**。
 	//
@@ -176,6 +202,7 @@ func (m *FrpcManager) EnsureBinary(version string) (string, error) {
 			dst string
 			err error
 		)
+		start := time.Now()
 		if src.IsPanel() {
 			if panelBase == "" {
 				err = fmt.Errorf("还没有面板地址，无法获取 frpc（agent 尚未成功拉取过一次配置）")
@@ -185,17 +212,27 @@ func (m *FrpcManager) EnsureBinary(version string) (string, error) {
 		} else {
 			dst, err = m.downloadFromUpstream(src, version)
 		}
+		elapsed := time.Since(start).Milliseconds()
+		ev := SourceEvent{
+			Kind:      "download",
+			What:      "frpc",
+			Source:    src.Token(),
+			OK:        err == nil,
+			ElapsedMs: elapsed,
+		}
+		if err != nil {
+			ev.Error = err.Error()
+		}
+		m.report(ev)
+
 		if err == nil {
+			note := rankNote(order, src, notes)
 			m.mu.Lock()
 			m.lastSource = src
-			if len(notes) > 0 {
-				m.lastNote = strings.Join(notes, "；")
-			} else {
-				m.lastNote = ""
-			}
+			m.lastNote = note
 			m.mu.Unlock()
-			if len(notes) > 0 {
-				fmt.Println("[agent] frpc 已从 " + src.Label() + " 取到（先前失败：" + strings.Join(notes, "；") + "）")
+			if note != "" {
+				fmt.Println("[agent] frpc 已从 " + src.Label() + " 取到（" + note + "）")
 			}
 			return dst, nil
 		}
@@ -362,7 +399,7 @@ func (m *FrpcManager) Reconcile(cfg shared.AgentConfig, force bool) error {
 	}
 	// 源列表随配置一起下发：面板改设置后，客户端下一轮配置就生效，
 	// 不需要重装。放在这里而不是 EnsureBinary 里，是为了让"配置"只有一个入口。
-	m.SetSources(shared.SourceListFromTokens(cfg.Sources))
+	m.SetSources(shared.SourceListFromTokens(cfg.Sources), cfg.SourceMode)
 	bin, err := m.EnsureBinary(version)
 	if err != nil {
 		return fmt.Errorf("frpc 二进制拉取失败: %w", err)

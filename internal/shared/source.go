@@ -26,6 +26,14 @@ const (
 	SourcePanel = "panel"
 	// SourceDirect 直连官方地址（无前缀）。
 	SourceDirect = "github"
+	// 下载策略。与源列表一起下发：面板决定"要不要测"，客户端负责"在哪儿测"
+	// （面板测不到客户端那台机器的网络）。
+	//
+	// SourceModeAuto 每次真要下载前临时测一遍候选源，按实测排这一次的顺序；
+	// SourceModeManual 严格按用户排的顺序。
+	SourceModeAuto   = "auto"
+	SourceModeManual = "manual"
+
 	// sourceTokenPanel 与 SourcePanel 相同，保留给解析时的可读性。
 	sourceTokenPanel = SourcePanel
 	// sourceTokenDirect 前端/设置里写的 "github"。

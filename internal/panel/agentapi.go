@@ -75,6 +75,7 @@ func (p *Panel) agentConfigHandler(w http.ResponseWriter, r *http.Request) {
 		Tunnels:   tunnels,
 		// 源列表每轮下发，改设置立刻生效，不用重装客户端。
 		Sources:     sourceTokens(p.clientSources()),
+		SourceMode:  p.sourceMode(),
 		MirrorBase:  p.db.GetSetting("mirror_base"),
 		FRPVersion:  p.concreteFRPVersion(agent.Os, agent.Arch),
 		FRPSRunning: p.frps.Status()["running"] == true,

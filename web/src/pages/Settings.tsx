@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useApp } from '../store'
-import { api, qs } from '../lib/api'
+import { api } from '../lib/api'
 import { copyText } from '../lib/format'
 import {
   Button,
@@ -11,7 +11,15 @@ import {
   Input,
   cx,
 } from '../components/ui'
-import type { MirrorTestResult, Settings as SettingsShape, SettingsBody, SettingsSaveResult } from '../types'
+import type {
+  ProbeResult,
+  RankInfo,
+  Settings as SettingsShape,
+  SettingsBody,
+  SettingsSaveResult,
+  SourceEvent,
+  SourceEventsResponse,
+} from '../types'
 
 // 内置候选源。用户也可以自己填前缀 —— 镜像会挂、会改名，写死清单不现实。
 const SOURCE_PRESETS: { token: string; label: string; note: string }[] = [
@@ -55,7 +63,7 @@ function SourceListEditor({
   value: string
   onChange: (v: string) => void
   allowPanel: boolean
-  probe: Record<string, MirrorTestResult>
+  probe: Record<string, ProbeResult>
 }) {
   const list = parseSources(value)
   const set = (next: string[]) => onChange(next.join(','))
@@ -96,8 +104,23 @@ function SourceListEditor({
                 <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-dim">{tok}</span>
               )}
               {r && (
-                <span className={cx('ml-auto shrink-0 text-[11.5px]', r.ok ? 'text-ok-fg' : 'text-bad-fg')}>
-                  {r.ok ? `${r.elapsed_ms}ms · ${Math.round((r.speed_kbps ?? 0))}KB/s` : '不通'}
+                // 不只是速度：延迟、抖动、综合分都要露出来。
+                // 只显示 "483KB/s" 时，一个忽快忽慢的源看起来和稳定的一样好，
+                // 而实际下载卡住的往往正是前者。
+                <span
+                  className={cx(
+                    'ml-auto shrink-0 whitespace-nowrap text-[11.5px] tabular-nums',
+                    r.ok ? 'text-dim' : 'text-bad-fg',
+                  )}
+                  title={
+                    r.ok
+                      ? `${r.label}：首字节 ${r.ttfb_ms}ms，速度 ${Math.round(r.speed_kbps)}KB/s，抖动 ${r.jitter}，评分 ${r.score}`
+                      : `${r.label}：${r.error || '不可用'}`
+                  }
+                >
+                  {r.ok
+                    ? `${Math.round(r.speed_kbps)}KB/s · ${r.ttfb_ms}ms · 抖${r.jitter} · ${r.score}分`
+                    : '不可用'}
                 </span>
               )}
               <span className="ml-auto flex shrink-0 items-center gap-1">
@@ -172,7 +195,6 @@ export function SettingsPage() {
   const {
     settings,
     net,
-    versions,
     theme,
     setTheme,
     loadSettings,
@@ -189,7 +211,13 @@ export function SettingsPage() {
   const [clientSources, setClientSources] = useState('panel')
   // 逐项测速结果，key 是源 token。面板测得到自己的网络，测不到客户端的，
   // 所以只有服务端列表能测。
-  const [probe, setProbe] = useState<Record<string, MirrorTestResult>>({})
+  const [probe, setProbe] = useState<Record<string, ProbeResult>>({})
+  // 下载策略。auto = 每次真要下载前临时测速排优（推荐）；manual = 严格按列表顺序。
+  const [mode, setMode] = useState('manual')
+  // 最近一次排优结果 + 最近的排优/下载记录。都是"事后追查"用的，
+  // 所以从接口读而不是只依赖本次页面会话里点了什么。
+  const [rank, setRank] = useState<RankInfo | null>(null)
+  const [events, setEvents] = useState<SourceEvent[]>([])
   const [pStart, setPStart] = useState('')
   const [pEnd, setPEnd] = useState('')
   const [bindPort, setBindPort] = useState('')
@@ -215,6 +243,7 @@ export function SettingsPage() {
   // 不再回填，于是点了没反应。
   const fillForm = useCallback((s: SettingsShape) => {
     setPublicAddr(s.public_addr ?? '')
+    setMode(s.source_mode || 'manual')
     setServerSources(s.server_sources || 'github')
     setClientSources(s.client_sources || 'panel')
     setPStart(s.port_range_start ?? '')
@@ -260,6 +289,7 @@ export function SettingsPage() {
         // 必须显式带上 clear 标记，服务端才允许写入空值。
         if (!body.public_addr) body.clear_public_addr = '1'
       }
+      if (mode !== (settings.source_mode || 'manual')) body.source_mode = mode
       if (serverSources !== (settings.server_sources || 'github')) body.server_sources = serverSources
       if (clientSources !== (settings.client_sources || 'panel')) body.client_sources = clientSources
       if (trim(pStart) !== trim(settings.port_range_start ?? '')) body.port_range_start = trim(pStart)
@@ -317,25 +347,47 @@ export function SettingsPage() {
     toast,
   ])
 
-  // 按源测速。面板只能测自己这台机器的网络，所以只对服务端列表提供。
-  async function probeSource(tok: string) {
-    try {
-      const q = qs({ mirror: tok === 'github' ? '' : tok, version: versions?.target_version || 'latest' })
-      const r = await api<MirrorTestResult>('GET', `/api/system/mirror-test?${q}`)
-      setProbe((p) => ({ ...p, [tok]: r }))
-    } catch (e) {
-      setProbe((p) => ({ ...p, [tok]: { ok: false, error: (e as Error).message } }))
-    }
-  }
+  // 排优记录与最近一次自动排优。打开页面时取一次，测速后再取一次。
+  const loadSourceLog = useCallback(async () => {
+    const r = await api<SourceEventsResponse>('GET', '/api/sources/events?limit=30')
+    setEvents(r.events ?? [])
+    setRank(r.last_rank ?? null)
+  }, [])
 
-  async function probeAll() {
+  useEffect(() => {
+    void loadSourceLog().catch(() => {
+      /* 记录读不到不影响改设置，静默即可 */
+    })
+  }, [loadSourceLog])
+
+  // 测速并按实测结果重排。
+  //
+  // 这是"自动择优"的手动版：同一套探测（可用性 / 稳定性 / 速度），
+  // 区别只在排序结果要不要立刻写回列表。面板只测服务端侧 ——
+  // 客户端那台机器的网络面板看不到，替它排序等于凭空造一个顺序。
+  async function probeAndRank() {
     if (testing) return
     setTesting(true)
     try {
-      // 顺序测，不并发：并发会让每个源的测速结果互相抢带宽，排出来的顺序反而不可信。
-      for (const tok of parseSources(serverSources)) {
-        await probeSource(tok)
-      }
+      const r = await api<{ results: ProbeResult[]; order: string[]; summary: string; applied: boolean }>(
+        'POST',
+        '/api/sources/probe',
+        { side: 'server', apply: true },
+      )
+      const next: Record<string, ProbeResult> = {}
+      for (const x of r.results ?? []) next[x.token] = x
+      setProbe(next)
+      setServerSources(r.order.join(','))
+      await Promise.all([loadSettings(), loadSourceLog()])
+      const bad = (r.results ?? []).filter((x) => !x.ok)
+      toast(
+        bad.length
+          ? `已按实测重排；${bad.length} 个源不可用（${bad.map((x) => x.label).join('、')}）`
+          : '已按实测速度与稳定性重排',
+        'ok',
+      )
+    } catch (e) {
+      toast((e as Error).message, 'bad')
     } finally {
       setTesting(false)
     }
@@ -402,9 +454,39 @@ export function SettingsPage() {
 
       <Card
         title="二进制下载"
-        desc="两个有序列表：面板自己取、客户端取。从左往右试，第一个能用的就停"
+        desc="先选策略；两个有序列表从左往右试，第一个能用的就停"
       >
-        <div className="mb-2 text-[13px] font-semibold text-fg">
+        <Field label="下载策略">
+          <div className="flex flex-wrap gap-2">
+            <Chip
+              selected={mode === 'auto'}
+              sub="触发下载时临时测速排优，推荐"
+              onClick={() => setMode('auto')}
+            >
+              自动择优
+            </Chip>
+            <Chip
+              selected={mode === 'manual'}
+              sub="严格按下面两个列表的顺序"
+              onClick={() => setMode('manual')}
+            >
+              手动排序
+            </Chip>
+          </div>
+        </Field>
+        <Hint>
+          <b>自动择优</b>：每次真要下载二进制之前，临时把候选源挨个测一遍（能不能下、
+          快不快、稳不稳），按这一次的实测结果排序，再按这个顺序回退重试。
+          测速结果与最终顺序都会记进下面的记录，出问题能追。
+          代价是下载前多花几秒（结果缓存 10 分钟，连续下载不会重复测）。
+          <br />
+          <b>手动排序</b>：完全按你排的顺序走，一秒不多等。
+          <br />
+          两种策略下<b>列表本身都还有用</b>：手动时它就是顺序；自动时它是候选集合，
+          同时作为同分时的偏好。客户端也会按这个策略自己测 —— 面板测不到它那台机器的网络。
+        </Hint>
+
+        <div className="mb-2 mt-4 text-[13px] font-semibold text-fg">
           ① 面板自己取 frps / frpc / 自己的更新
         </div>
         <SourceListEditor
@@ -414,17 +496,15 @@ export function SettingsPage() {
           probe={probe}
         />
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <Button variant="ghost" size="sm" disabled={testing} onClick={() => void probeAll()}>
-            {testing ? '测速中…' : '逐个测速'}
+          <Button size="sm" disabled={testing} onClick={() => void probeAndRank()}>
+            {testing ? '测速中…' : '测速并按结果重排'}
           </Button>
           <span className="text-xs text-dim">
-            每项实下 512KB 测速，按结果调整顺序比凭感觉猜可靠
+            实下 512KB × 2 轮：能看出「能不能下」「多快」「稳不稳」，只测一次的峰值会骗人
           </span>
         </div>
         <Hint>
           这是<b>面板这台机器</b>自己出网取二进制时的顺序（frps、frpc 缓存、agent 缓存、面板自更新）。
-          某项失败才试下一项，失败原因记进日志。
-          <br />
           没有 panel 选项：面板不能给自己中继。
         </Hint>
 
@@ -433,19 +513,60 @@ export function SettingsPage() {
           value={clientSources}
           onChange={setClientSources}
           allowPanel
-          probe={probe}
+          probe={{}}
         />
         <Hint>
           这是<b>客户端那台机器</b>从哪儿取。两种通道：
           <b>面板中继</b>（客户端只连面板，由面板转发；任何环境都能用，但占面板出口带宽）
           和<b>镜像前缀</b>（客户端经该前缀自己取 GitHub 上的文件，不占面板带宽，要求它能出网）。
-          最后一项可以是「GitHub 直连」——没配任何前缀时它最慢，先测一下再排。
+          最后一项可以是「GitHub 直连」——没配任何前缀时它最慢。
           <br />
-          这里没有测速：面板测不到客户端那台机器的网络。
+          这里测不了速：面板测不到客户端那台机器的网络。选「自动择优」后由客户端自己测；
+          它的实测结果会随心跳回到面板，显示在客户端卡片的「二进制来源」里。
           <br />
           改完下一轮心跳就生效，<b>不用重装客户端</b>。安装那一步固定经面板（装的时候 agent
           还没跑起来、这份顺序还没下发，而且装不上比走慢一点的通道严重得多）。
         </Hint>
+
+        {rank && (
+          <div className="mt-4 rounded-[9px] border border-border bg-chip px-3 py-2 text-[12.5px]">
+            <div className="flex flex-wrap items-center gap-2">
+              <b>最近一次排优</b>
+              <span className="text-dim">{new Date(rank.at).toLocaleString()}</span>
+              {rank.stale && <span className="text-warn-fg">（已超过 10 分钟，仅供参考）</span>}
+              <span className="text-dim">顺序：{rank.order.join(' → ') || '—'}</span>
+            </div>
+            <div className="mt-1 text-dim">{rank.summary}</div>
+          </div>
+        )}
+
+        <details className="mt-3">
+          <summary className="cursor-pointer text-[12.5px] text-dim">
+            排优 / 下载记录（最近 {events.length} 条，出问题先看这里）
+          </summary>
+          <div className="mt-2 max-h-[320px] overflow-y-auto rounded-[9px] border border-border">
+            {events.length === 0 ? (
+              <div className="px-3 py-2.5 text-[12px] text-dim">还没有记录。</div>
+            ) : (
+              events.map((e) => (
+                <div
+                  key={e.id}
+                  className="flex flex-wrap items-baseline gap-x-2 border-b border-border px-3 py-1.5 text-[12px] last:border-b-0"
+                >
+                  <span className="text-dim tabular-nums">{e.at}</span>
+                  <span className={e.kind === 'rank' ? 'text-info-fg' : e.ok ? 'text-ok-fg' : 'text-bad-fg'}>
+                    {e.kind === 'rank' ? '排优' : e.ok ? '下载成功' : '下载失败'}
+                  </span>
+                  <span className="text-dim">{e.side === 'client' ? e.agent_name || '客户端' : '面板'}</span>
+                  <span>{e.what}</span>
+                  {e.source && <span className="font-mono text-[11px]">{e.source}</span>}
+                  {e.elapsed_ms > 0 && <span className="text-dim">{e.elapsed_ms}ms</span>}
+                  <span className="w-full text-dim">{e.detail || e.error}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </details>
       </Card>
 
       <Card title="端口池" desc="自动分配公网端口的范围">

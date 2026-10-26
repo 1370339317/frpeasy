@@ -111,6 +111,8 @@ export interface Settings {
   server_sources: string
   /** 客户端取二进制时的源顺序：panel / github / https://前缀,… */
   client_sources: string
+  /** 下载策略：auto = 下载前临时测速排优；manual = 按上面的顺序 */
+  source_mode: string
   [key: string]: string
 }
 
@@ -187,6 +189,61 @@ export interface PanelUpdateStart {
 
 export type AccessHostSource = 'settings' | 'request' | 'fallback'
 
+/** 一个源的实测画像。字段含义见 internal/shared/probe.go。 */
+export interface ProbeResult {
+  token: string
+  label: string
+  url: string
+  /** 至少一轮成功并拿到数据 */
+  ok: boolean
+  /** 测了几轮 / 其中几轮失败 —— 失败过就不是稳定链路 */
+  attempts: number
+  failures: number
+  /** 首字节延迟（毫秒） */
+  ttfb_ms: number
+  /** 中位速度（KB/s）。用中位数而非最大值：峰值会被"刚好赶上一次快"骗到 */
+  speed_kbps: number
+  /** 速度抖动 (max-min)/max，0 表示两轮几乎一致 */
+  jitter: number
+  /** 0-100 综合分，仅用于排序与展示 */
+  score: number
+  error: string
+}
+
+/** 最近一次自动排优的结果。 */
+export interface RankInfo {
+  at: string
+  side: string
+  order: string[]
+  summary: string
+  results: ProbeResult[] | null
+  /** 超过缓存时长：能看，但不该拿它判断"现在该排什么" */
+  stale: boolean
+}
+
+/** 一条排优 / 下载记录（诊断用）。 */
+export interface SourceEvent {
+  id: number
+  at: string
+  side: string
+  kind: string
+  agent_id: string
+  agent_name: string
+  what: string
+  source: string
+  ok: boolean
+  elapsed_ms: number
+  bytes: number
+  detail: string
+  error: string
+}
+
+export interface SourceEventsResponse {
+  events: SourceEvent[]
+  mode: string
+  last_rank: RankInfo | null
+}
+
 export interface TunnelsResponse {
   tunnels: Tunnel[]
   agents: Agent[]
@@ -204,6 +261,9 @@ export interface TunnelsResponse {
   /** 安装命令实际用的基址 */
   install_base: string
   panel_listen_port: string
+  /** 下载策略与最近一次自动排优（设置页据此显示"上次测出来什么顺序"） */
+  source_mode: string
+  last_rank: RankInfo | null
 }
 
 export interface AgentsResponse {
@@ -370,6 +430,7 @@ export interface SettingsBody {
   agent_auto_update?: string
   server_sources?: string
   client_sources?: string
+  source_mode?: string
 }
 
 export interface SettingsSaveResult {

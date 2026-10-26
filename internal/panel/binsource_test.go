@@ -19,13 +19,13 @@ func TestSettingsValidatesSourceLists(t *testing.T) {
 	p := newTestPanel(t)
 
 	bad := []string{
-		`{"server_sources":"panel"}`,           // 面板不能给自己中继
-		`{"server_sources":"panel,github"}`,    // 同上
-		`{"server_sources":"ftp://x"}`,         // 只能 http(s)
-		`{"server_sources":"nonsense"}`,        // 认不出的 token
-		`{"server_sources":""}`,                // 空列表 = 一次都不尝试
-		`{"client_sources":""}`,                // 同上
-		`{"client_sources":"a,b,c,d,e"}`,       // 超过上限
+		`{"server_sources":"panel"}`,        // 面板不能给自己中继
+		`{"server_sources":"panel,github"}`, // 同上
+		`{"server_sources":"ftp://x"}`,      // 只能 http(s)
+		`{"server_sources":"nonsense"}`,     // 认不出的 token
+		`{"server_sources":""}`,             // 空列表 = 一次都不尝试
+		`{"client_sources":""}`,             // 同上
+		`{"client_sources":"a,b,c,d,e"}`,    // 超过上限
 	}
 	for _, body := range bad {
 		if code, _ := postSettings(t, p, body); code != http.StatusBadRequest {

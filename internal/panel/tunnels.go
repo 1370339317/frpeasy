@@ -125,10 +125,14 @@ func (p *Panel) listTunnelsHandler(w http.ResponseWriter, r *http.Request) {
 		"install_base":      p.resolvePanelBase(r),
 		"panel_listen_port": p.listenPort,
 	}
-	// 安装命令（面板源 / Git 源两套）与 Git 可用性
+	// 安装命令（只有一个版本：源顺序由设置决定）
 	for k, v := range p.installCommandFields(r) {
 		out[k] = v
 	}
+	// 下载策略与最近一次自动排优结果：设置页要显示「上次测出来什么顺序」，
+	// 而不是让用户自己回忆点了测速之后看到了什么。
+	out["source_mode"] = p.sourceMode()
+	out["last_rank"] = p.LastRank(sideServer)
 	json.NewEncoder(w).Encode(out)
 }
 

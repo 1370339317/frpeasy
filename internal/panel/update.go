@@ -70,7 +70,11 @@ func (p *Panel) currentManifest(force bool) (*shared.Manifest, string) {
 
 	// 清单也按源列表回退：清单拉不到等于「检查更新」整页失效，
 	// 而它恰恰是最需要多一条路的地方（某个前缀只是在 GitHub API 上不通）。
-	m, err := trySources[*shared.Manifest]("更新清单", p.serverSources(),
+	m, err := trySources[*shared.Manifest]("更新清单",
+		p.orderedSources(sideServer, p.serverSources(), func(s shared.Source) string {
+			return frpProbeURL(p.db, s)
+		}),
+		p.recorder(),
 		func(src shared.Source) (*shared.Manifest, error) {
 			return shared.FetchManifest(src.Apply(base), "")
 		})

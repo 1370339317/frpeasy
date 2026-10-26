@@ -18,6 +18,7 @@ func newTestPanel(t *testing.T) *Panel {
 		listenAddr: ":18080",
 		listenPort: "18080",
 		version:    "test",
+		ranks:      newRankCache(),
 	}
 }
 

@@ -117,7 +117,13 @@ func (p *Panel) ensureAgentBin(osName, arch string) (string, error) {
 
 	// 每个源各自去拉清单：清单地址本身带前缀，所以清单里写的相对文件名
 	// （m.URL(asset)）自然也是经同一个前缀取的，不用再单独拼一次。
-	path, err := trySources("agent "+name, sourcesFromSetting(p.db, settingServerSources),
+	// 顺序由策略决定（手动 = 用户排的；自动 = 这次临时测速排的）。
+	// 探测地址统一用 frp 资产：测的是"这个源到我这台机器的链路"，而排序要的正是链路质量。
+	path, err := trySources("agent "+name,
+		p.orderedSources(sideServer, p.serverSources(), func(s shared.Source) string {
+			return frpProbeURL(p.db, s)
+		}),
+		p.recorder(),
 		func(src shared.Source) (string, error) {
 			m, ferr := shared.FetchManifest(src.Apply(base), "")
 			if ferr != nil {

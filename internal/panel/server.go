@@ -78,6 +78,12 @@ type Panel struct {
 	// 清单预热是否正在跑。心跳路径发现「还没有清单」时会触发一次后台拉取，
 	// 这个标记保证多个心跳同时触发也只出去一次请求。
 	manifestWarming atomic.Bool
+
+	// 自动择优的最近一次结果，按侧（server / client）分别缓存。
+	//
+	// 只放内存：它是"这一次该按什么顺序"的运行时判断，重启后重测一遍就好。
+	// 需要事后追查的是落库的 source_events（见 db_sources.go），不是这份缓存。
+	ranks *rankCache
 }
 
 // NewPanel 构造面板：初始化数据库、管理员、frps 管理器，并确定 agent 二进制目录。
@@ -107,6 +113,8 @@ func NewPanel(dataDir, listen, version string) (*Panel, error) {
 		listenPort: port,
 		version:    version,
 		uiSource:   "embed",
+		// 自动择优的缓存（按侧 + 列表签名索引）
+		ranks: newRankCache(),
 	}
 	// 后台周期性读取 frps 侧真实代理状态（在线判定与流量的权威来源）
 	pnl.frps.StartProxyPoller()
@@ -142,6 +150,8 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("POST /api/agent/register", p.agentRegisterHandler)
 	mux.HandleFunc("GET /api/agent/config", p.agentConfigHandler)
 	mux.HandleFunc("POST /api/agent/heartbeat", p.agentHeartbeatHandler)
+	// 客户端上报自己测速排优的结果与每次下载尝试（诊断用，见 source_events.go）。
+	mux.HandleFunc("POST /api/agent/source-event", p.agentSourceEventHandler)
 	// 本机执行卸载前的报备（agent --goodbye）。与心跳同源的凭据校验。
 	mux.HandleFunc("POST /api/agent/goodbye", p.agentGoodbyeHandler)
 	mux.HandleFunc("GET /api/agent/services", func(w http.ResponseWriter, r *http.Request) {
@@ -191,6 +201,10 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("GET /api/system/network", p.requireAuth(p.systemNetworkHandler))
 	mux.HandleFunc("GET /api/system/versions", p.requireAuth(p.systemVersionsHandler))
 	mux.HandleFunc("GET /api/system/mirror-test", p.requireAuth(p.systemMirrorTestHandler))
+	// 排优 / 下载记录：回答「刚才那次到底走了哪个源、为什么」。
+	mux.HandleFunc("GET /api/sources/events", p.requireAuth(p.sourceEventsHandler))
+	// 手动测速 +（可选）直接按实测结果重排。自动择优是它的自动版。
+	mux.HandleFunc("POST /api/sources/probe", p.requireAuth(p.sourcesProbeHandler))
 	mux.HandleFunc("GET /api/frps/log", p.requireAuth(p.frpsLogHandler))
 	// 端口 / 防火墙：清单 + 放行命令 + 可达性检测（含第三方节点回访）
 	mux.HandleFunc("GET /api/ports", p.requireAuth(p.portsHandler))

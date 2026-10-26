@@ -152,6 +152,9 @@ type AgentConfig struct {
 	// 或补上镜像前缀，已经装好的机器仍按旧地址去取，必须重装才生效。
 	// 每轮配置下发就没这个问题，而且改设置立刻对全站生效。
 	Sources []string `json:"sources"`
+	// SourceMode 下载策略：auto = 每次下载前临时测速排优；manual = 严格按 Sources 顺序。
+	// 与 Sources 一起下发，客户端据此决定要不要自己测 —— 面板测不到客户端那台机器的网络。
+	SourceMode string `json:"source_mode"`
 
 	// FRPSRunning 面板侧 frps 当前是否在运行（运行时字段，不进配置内容）。
 	//

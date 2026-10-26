@@ -30,6 +30,11 @@ func NewDB(path string) (*DB, error) {
 		return nil, err
 	}
 	db := &DB{sqlDB}
+	// source_events 是新表，用 CREATE TABLE IF NOT EXISTS，不参与列迁移。
+	// 它记录每次排优与下载，供「为什么这次拉取慢/失败」追查。
+	if err := db.ensureSourceEvents(); err != nil {
+		return nil, err
+	}
 	if err := db.migrate(); err != nil {
 		return nil, err
 	}
@@ -183,6 +188,14 @@ func (db *DB) initSettings() error {
 			v = shared.SourceDirect + "," + shared.SourcePanel
 		}
 		if err := db.SetSetting(settingClientSources, v); err != nil {
+			return err
+		}
+	}
+	// 下载策略。默认手动：自动择优要先测速（每个源最坏一个超时），
+	// 对已经调好的部署来说是没有收益的多余等待。界面上把它标成推荐，
+	// 但默认值不偷偷改行为 —— 升级后"什么都没变"比"变快了一点但说不清"重要。
+	if db.GetSetting(settingSourceMode) == "" {
+		if err := db.SetSetting(settingSourceMode, SourceModeManual); err != nil {
 			return err
 		}
 	}
