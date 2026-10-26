@@ -77,3 +77,25 @@ func TestAutoStartDoesNotAdoptWhenPortFree(t *testing.T) {
 		t.Fatal("刚释放的端口不该被判定为在监听")
 	}
 }
+
+// 接管来的实例没有 cmd 句柄，Stop 仍必须让状态回到"已停"。
+//
+// 否则 Restart = Stop（空转）+ Start（因 running=true 早退），
+// 表现为"改了版本/端口，保存成功，服务端一点没变"。
+func TestStopClearsAdoptedInstance(t *testing.T) {
+	db := newTestDB(t)
+	m := NewFrpsManager(db, t.TempDir())
+	m.mu.Lock()
+	m.running = true // 模拟接管后的状态：running=true 但 cmd=nil
+	m.mu.Unlock()
+
+	if err := m.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	running := m.running
+	m.mu.Unlock()
+	if running {
+		t.Fatal("Stop 之后 running 必须为 false —— 否则 Restart 会全程空转")
+	}
+}

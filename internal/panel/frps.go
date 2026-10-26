@@ -560,7 +560,29 @@ func (m *FrpsManager) Stop() error {
 	defer m.mu.Unlock()
 	// 先标记为用户主动停止，否则 Wait 的自动重启逻辑会立刻把它拉回来。
 	m.stoppedByUser = true
-	if m.cmd == nil || !m.running {
+	if m.cmd == nil {
+		// 接管来的实例（面板重启后接手的那个）：我们手里没有 cmd 句柄。
+		//
+		// 这里**必须把 running 置 false**，否则会出现一条完全静默的死路：
+		// Restart() = Stop() + Start()，Stop 什么都不做、Start 又因为
+		// running==true 直接早退 —— 于是"改了 frp 版本/端口，保存成功，
+		// 但服务端一点没变"，而接口还老老实实返回 ok。
+		//
+		// 真正的进程按可执行文件路径回收（与 Start 里同一套判断，不会误杀
+		// 用户自己的另一份 frp）。
+		m.running = false
+		m.proxyMu.Lock()
+		m.proxy = nil
+		m.proxyOK = false
+		m.proxyErr = "frps 未运行"
+		m.proxyMu.Unlock()
+		if n := m.killStrayFrps(); n > 0 {
+			log.Printf("[frps] 按可执行文件路径回收了 %d 个接管的实例", n)
+			m.waitPortFree(3 * time.Second)
+		}
+		return nil
+	}
+	if !m.running {
 		return nil
 	}
 	_ = m.cmd.Process.Kill()
