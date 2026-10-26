@@ -42,8 +42,8 @@ function isUninstalling(a: Agent): boolean {
 
 const TABS: { key: CommandKind; label: string }[] = [
   { key: 'linux', label: 'Linux' },
-  { key: 'win', label: 'Windows' },  { key: 'android', label: 'Android · adb' },
-  { key: 'androidRoot', label: 'Android · root' },
+  { key: 'win', label: 'Windows' },
+  { key: 'android', label: 'Android' },
 ]
 
 const HINTS: Record<CommandKind, React.ReactNode> = {
@@ -63,15 +63,14 @@ const HINTS: Record<CommandKind, React.ReactNode> = {
   ),
   android: (
     <>
-      手机/车机连上 adb 后执行（无需 root）。安装到{' '}
-      <span className="font-mono">/data/local/tmp/frpeasy-agent</span>
-      ，Android 没有 systemd，靠自带看护脚本保活。设备上通常没有 curl，命令里已带 toybox wget 兜底。
-    </>
-  ),
-  androidRoot: (
-    <>
-      设备已 root（su 可用）时用这条：会额外把启动脚本挂到{' '}
-      <span className="font-mono">/data/adb/service.d</span>（Magisk），重启后自动拉起。
+      手机/车机连上 adb 后执行，<b>不需要 root</b>。只把二进制放到{' '}
+      <span className="font-mono">/data/local/tmp/frpeasy-agent</span> 并启动一次 ——
+      <b>不注册任何开机自启、不挂看护循环</b>。设备和 root 方案的差别太大（Magisk / KernelSU /
+      APatch / adb su 各自的自启目录都不同），写错位置轻则静默无效，重则系统升级后
+      留下一份失效脚本，所以这里一律不碰。启停由你控制：
+      <span className="font-mono">sh run.sh start|stop|restart|status</span>。
+      探测本机服务与转发端口都不需要 root；确实要绑低端口时，自己在命令末尾加{' '}
+      <span className="font-mono">--elevate</span>。
     </>
   ),
 }
@@ -165,8 +164,17 @@ function agentState(a: Agent): {
       gone: true,
       note: (
         <>
-          那台机器上的 agent 已经卸载（最后心跳 {fmtAgo(a.last_seen)}）。面板这条记录只是残留，
-          不影响隧道之外的任何东西，点「移除」就能清掉。
+          {a.uninstall_by_local ? (
+            <>
+              那台机器<b>在本机执行了卸载</b>（跑的是卸载命令），临退出前通知了面板
+              （最后心跳 {fmtAgo(a.last_seen)}）。
+            </>
+          ) : (
+            <>
+              面板下发的卸载已完成，那台机器上的 agent 已经退出（最后心跳 {fmtAgo(a.last_seen)}）。
+            </>
+          )}{' '}
+          面板这条记录只是残留，不影响隧道之外的任何东西，点「移除」就能清掉。
         </>
       ),
     }
@@ -297,10 +305,10 @@ export function Clients() {
         <div className="mt-2 text-xs leading-[1.6] text-dim">
           卸载命令<b>不需要令牌</b>：它只做三件事 —— 停掉进程、摘掉开机自启（systemd / OpenRC /
           计划任务）、删掉二进制和数据目录。跑完那台机器上不留 frpeasy 的任何东西。
-          {kind === 'android' || kind === 'androidRoot' ? (
+          {kind === 'android' ? (
             <>
               {' '}
-              Android 卸载同样<b>不会</b>注册或删除任何自启，只是把{' '}
+              Android 上没有自启可摘（本来就没注册过），卸载只是把{' '}
               <span className="font-mono">/data/local/tmp/frpeasy-agent</span> 整个删掉。
             </>
           ) : null}

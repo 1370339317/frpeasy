@@ -234,18 +234,19 @@ func TestBuildInstallCommands(t *testing.T) {
 		t.Fatalf("Android 命令应带上服务器地址与安装令牌: %s", android)
 	}
 
-	root := p.buildInstallCommandAndroidRoot(nil)
-	if !strings.Contains(root, "--elevate") {
-		t.Fatalf("root 命令应带 --elevate，由设备侧探测 su 形状: %s", root)
+	// Android 不再有"root 版"命令：那边的 agent 不做安装（不注册自启、不挂看护），
+	// 只是把二进制放下去跑起来，是否需要 root 由用户自己决定（加 --elevate）。
+	if strings.Contains(android, "--elevate") {
+		t.Fatalf("默认的 Android 命令不该带 --elevate（提权是用户的选择，不是默认）: %s", android)
 	}
 	// 面板侧绝不能写死 su 的调用形式：Magisk / KernelSU / APatch / adbsu 各不相同，
 	// 猜错就是一条看不出原因的失败命令。
-	if strings.Contains(root, "su -c") || strings.Contains(root, "su 0") {
-		t.Fatalf("面板侧不应假设 su 的调用形状（应交给脚本探测）: %s", root)
+	if strings.Contains(android, "su -c") || strings.Contains(android, "su 0") {
+		t.Fatalf("面板侧不应假设 su 的调用形状（应交给脚本探测）: %s", android)
 	}
 	// 下载失败要明确退出，而不是继续去 sh 一个不存在的文件
-	if !strings.Contains(root, "[ -s ") || !strings.Contains(root, "download failed on device") {
-		t.Fatalf("命令应在脚本落地失败时明确退出: %s", root)
+	if !strings.Contains(android, "[ -s ") || !strings.Contains(android, "download failed on device") {
+		t.Fatalf("命令应在脚本落地失败时明确退出: %s", android)
 	}
 
 	linux := p.buildInstallCommand(nil)

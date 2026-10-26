@@ -223,7 +223,14 @@ do_uninstall() {
   esac
 
   if [ "$KEEP_DATA" -eq 1 ]; then
-    say "    保留数据目录 $DATA"
+    # 只留数据库本体（frpeasy.db 及 -wal/-shm）。其余都是可重建的：
+    # bin/ 是 frps/frpc/agent 二进制缓存（40MB+）、update/ 是自更新临时文件、
+    # *.log 是日志、frps.toml 每次启动重新生成。
+    # 「保留配置」就该只保留配置 —— 否则用户以为省了空间，实际还占着几十兆。
+    if [ -d "$DATA" ]; then
+      find "$DATA" -mindepth 1 -maxdepth 1 ! -name 'frpeasy.db*' -exec rm -rf {} + 2>/dev/null || true
+    fi
+    say "    保留数据目录 $DATA（仅数据库，已清掉二进制缓存与日志）"
   elif [ -d "$DATA" ]; then
     rm -rf "$DATA"
     say "    removed $DATA"

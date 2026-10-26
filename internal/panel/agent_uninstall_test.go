@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -221,5 +222,75 @@ func TestCancelUninstallOnlyBeforeDelivery(t *testing.T) {
 	got, _ := db.GetAgent("u5")
 	if got.UninstallSentAt == nil {
 		t.Fatal("撤销失败不应动 sent_at")
+	}
+}
+
+// 本机执行卸载后的报备：面板必须把它标成「已卸载（本机执行）」。
+//
+// 不报备时面板只能看到心跳停了 —— 那和「关机了」在数据上完全一样，
+// 记录会一直挂着，用户没法判断该不该清。
+func TestGoodbyeMarksLocalUninstall(t *testing.T) {
+	db := newTestDB(t)
+	p := &Panel{db: db}
+	if err := db.CreateAgent(&shared.Agent{ID: "g1", Name: "box-g", Os: "linux", Arch: "amd64", InstallToken: "it", AgentToken: "tok-g"}); err != nil {
+		t.Fatal(err)
+	}
+	// 还在心跳中，先确保是"在线且没卸载过"
+	if err := db.UpdateAgentHeartbeat("g1", nil, "", "0.7.8"); err != nil {
+		t.Fatal(err)
+	}
+
+	r := httptest.NewRequest(http.MethodPost, "/api/agent/goodbye",
+		strings.NewReader(`{"agent_id":"g1","agent_token":"tok-g"}`))
+	w := httptest.NewRecorder()
+	p.agentGoodbyeHandler(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("报备应成功，实际 %d: %s", w.Code, w.Body.String())
+	}
+
+	got, err := db.GetAgent("g1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UninstallSentAt == nil {
+		t.Fatal("报备后必须写 uninstall_sent_at，否则界面会一直显示成普通「离线」")
+	}
+	if !got.UninstallByLocal {
+		t.Fatal("必须标出这次是本机执行卸载，而不是面板下发")
+	}
+	if got.UninstallRequested {
+		t.Fatal("报备后不该还留着待下发的卸载指令")
+	}
+}
+
+// 凭据不对必须 401：这个接口能改变记录状态，不能谁都调得动。
+func TestGoodbyeRejectsWrongToken(t *testing.T) {
+	db := newTestDB(t)
+	p := &Panel{db: db}
+	if err := db.CreateAgent(&shared.Agent{ID: "g2", Name: "box-g2", Os: "linux", Arch: "arm64", InstallToken: "it", AgentToken: "right"}); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/api/agent/goodbye",
+		strings.NewReader(`{"agent_id":"g2","agent_token":"wrong"}`))
+	w := httptest.NewRecorder()
+	p.agentGoodbyeHandler(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("错误令牌应 401，实际 %d", w.Code)
+	}
+	if got, _ := db.GetAgent("g2"); got.UninstallSentAt != nil || got.UninstallByLocal {
+		t.Fatal("鉴权失败时不该改动记录")
+	}
+}
+
+// 未知客户端不该被当成成功（否则客户端会以为已经通报过了）。
+func TestGoodbyeUnknownAgent(t *testing.T) {
+	db := newTestDB(t)
+	p := &Panel{db: db}
+	r := httptest.NewRequest(http.MethodPost, "/api/agent/goodbye",
+		strings.NewReader(`{"agent_id":"nope","agent_token":"x"}`))
+	w := httptest.NewRecorder()
+	p.agentGoodbyeHandler(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("未知客户端应 401，实际 %d", w.Code)
 	}
 }

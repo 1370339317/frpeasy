@@ -3,6 +3,7 @@ package panel
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -284,4 +285,34 @@ func (p *Panel) agentUninstallCancelHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]any{"ok": true, "message": "已撤销卸载指令，客户端不会再收到它"})
+}
+
+// agentGoodbyeHandler POST /api/agent/goodbye
+//
+// 客户端在本机执行卸载（install.sh --uninstall）前调一次，把「它是被卸载了」
+// 这件事告诉面板。
+//
+// 为什么需要：卸载后 agent 直接从面板视野里消失，面板只能看到「心跳停了」——
+// 而「被卸载」和「关机了」在数据上完全一样，于是记录永远挂着，要人判断该不该清。
+// 报备一次就能把这两件事分开，且能标出「这条是本机执行卸载的」。
+//
+// 鉴权与心跳同一套（agent_id + agent_token）。失败不影响卸载：
+// 调用方在客户端一侧是 `|| true`。
+func (p *Panel) agentGoodbyeHandler(w http.ResponseWriter, r *http.Request) {
+	var req shared.HeartbeatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	agent, err := p.db.GetAgent(req.AgentID)
+	if err != nil || agent.AgentToken != req.AgentToken {
+		http.Error(w, "凭据无效", http.StatusUnauthorized)
+		return
+	}
+	if err := p.db.MarkAgentLocalUninstall(req.AgentID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	log.Printf("[agent] %s（%s）报告本机卸载，已标记为已卸载", agent.Name, req.AgentID)
+	json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }

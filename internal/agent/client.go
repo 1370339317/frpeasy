@@ -43,6 +43,11 @@ type Client struct {
 type state struct {
 	AgentID  string `json:"agent_id"`
 	AgentTok string `json:"agent_token"`
+	// Server 面板基址。存下来只为一件事：卸载前报备。
+	// 那时跑的是 `install.sh --uninstall`，不会带 --server，
+	// 只能靠这里记下的地址回调面板；否则面板只能看到它「离线」，
+	// 分不清是被卸载了还是关机了。
+	Server string `json:"server,omitempty"`
 }
 
 func NewClient(server, installTok, name, dataDir string) (*Client, error) {
@@ -80,7 +85,9 @@ func (c *Client) loadState() error {
 }
 
 func (c *Client) saveState() {
-	b, _ := json.Marshal(state{AgentID: c.agentID, AgentTok: c.agentTok})
+	// 每次都带上当前 server：用户在面板里改过公网地址后，
+	// 「卸载前报备」必须用到新地址，否则报备会打到旧主机上。
+	b, _ := json.Marshal(state{AgentID: c.agentID, AgentTok: c.agentTok, Server: c.server})
 	_ = os.WriteFile(c.statePath(), b, 0o600)
 }
 
@@ -187,6 +194,10 @@ func (c *Client) Run() error {
 			return fmt.Errorf("注册失败: %w", err)
 		}
 		fmt.Println("[agent] 已注册 agent_id=", c.agentID)
+	} else {
+		// 复用已有身份，但面板地址可能在两次启动之间变过（设置里改了公网地址）。
+		// 顺手写回 state，保证「卸载前报备」打到的是当前地址。
+		c.saveState()
 	}
 
 	for {

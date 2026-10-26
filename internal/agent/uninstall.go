@@ -37,6 +37,12 @@ func (c *Client) selfUninstall() {
 	if c.frpc != nil {
 		c.frpc.Stop()
 	}
+	// 先报备再删：清理脚本会把 agent.state 一起删掉，之后就没凭据了。
+	// 面板收到后立刻把这条记录标成「已卸载」，而不是等 60 秒心跳超时后
+	// 显示「离线」—— 后者分不清「被卸载」和「关机了」。
+	if err := c.goodbye(); err != nil {
+		fmt.Println("[agent] 卸载前报备失败（不影响卸载）:", err)
+	}
 	if err := startSelfCleanup(c.dataDir); err != nil {
 		fmt.Println("[agent] 无法启动清理进程，请手动卸载:", err)
 		return

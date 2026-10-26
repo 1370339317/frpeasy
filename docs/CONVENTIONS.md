@@ -258,3 +258,58 @@ journalctl -u frpeasy | grep '\[settings\]'
 配置本体在 `<数据目录>/frpeasy.db`(SQLite)。面板自更新只替换二进制、沿用同一个
 `--data`,升级不会动这个文件;真丢了只有两种可能:某个请求把它写成了空
 (现在被 H1/H3 挡住),或者换了数据目录(查 `systemctl cat frpeasy` 里的 `--data`)。
+
+---
+
+## I. 安装/卸载与平台边界
+
+### I1. 只有面板碰 Git,客户端一律从面板取
+
+除面板本体(deploy.sh 从 Release 装)以外,**任何客户端二进制都只从面板下载**:
+
+| 文件 | 面板怎么拿到 | 客户端从哪取 |
+|---|---|---|
+| frps | 按 `frp_version` + 镜像从上游拉,缓存 `<data>/bin` | 不用(面板自己跑) |
+| frpc | 首次被请求时拉,校验后缓存 | `GET /api/frpc/bin/<os>/<arch>` |
+| agent | 同上 | `GET /api/agent/bin/<os>/<arch>` |
+| 安装脚本 | 内嵌在二进制里 | `/install`、`/install.ps1` |
+
+**frpc 曾经有一条「面板取不到就直连 GitHub」的回退,已删除。** 那条路让客户端绕过面板,
+面板上配的镜像变成摆设,内网机器上表现为「有时通有时不通」,而日志里看不出走了哪条。
+现在取不到就明确失败,错误信息直接指向「文件与更新」页的预存按钮。
+
+### I2. 本机执行卸载必须向面板报备
+
+两条卸载路径(面板云端下发 / 在那台机器上跑卸载命令)最终都会让 agent 从面板视野里消失。
+**如果不报备,面板只能看到「心跳停了」——「被卸载」和「关机了」在数据上完全一样**,
+记录会一直挂着,用户没法判断该不该清。
+
+- 云端下发:心跳带回 `uninstall:true`,由 `ConsumeAgentUninstall` 写 `uninstall_sent_at`。
+- 本机执行:agent 删自己之前调 `POST /api/agent/goodbye`(凭据同心跳),
+  `MarkAgentLocalUninstall` 写 `uninstall_sent_at` + `uninstall_by_local=1`,
+  界面显示成「已卸载(**本机执行**)」,与面板下发区分开。
+
+`install.sh --uninstall` 靠 `agent --goodbye --data <dir>` 完成报备 —— 脚本不解析
+`agent.state` 里的 JSON。面板不可达时报备失败、卸载照做(删自己优先级更高)。
+
+**`agent.state` 里必须存面板地址**:卸载时不会带 `--server`,只能靠注册时记下的这个。
+老版本 state 没有该字段时报备静默跳过,不报错。
+
+### I3. Android 只有一个入口,且没有「安装」
+
+Android 上的 agent **不注册任何自启、不挂看护循环**,只是把二进制放下去跑一次:
+
+- 不写 `/data/adb/service.d`、不碰 Magisk/KernelSU/APatch/adb su 的任何目录。
+  这些方案的目录各不相同,系统版本差异又大,**猜错轻则静默无效,重则设备起不来**。
+- 面板**不提供**「adb 版 / root 版」两条命令。`--elevate` 的语义是「以 root 身份运行」,
+  不是「root 安装」;要提权的人自己在命令后加,脚本会依次试 `su -c` / `su 0` / `su root -c`,
+  拿到 uid 0 才算成功。
+- 探测本机服务读 `/proc/net/tcp`、转发端口都不需要 root,所以默认命令不带 `--elevate`。
+
+### I4. 卸载要清缓存,`--keep-data` 只留数据库
+
+- 面板默认卸载:删 unit、停进程、清 frp 孤儿、删 data(含 `<data>/bin` 里的 frps/frpc/agent
+  缓存,40MB+)、删程序目录。
+- `--keep-data`:只保留 `frpeasy.db*`。`bin/` 是二进制缓存、`update/` 是自更新临时文件、
+  `*.log` 是日志 —— 全部可重建,留着只是白占空间。「保留配置」就该只保留配置。
+- 客户端卸载:删自启、二进制、整个数据目录(含 frpc 缓存与 `agent.state`)。

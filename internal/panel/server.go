@@ -142,6 +142,8 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("POST /api/agent/register", p.agentRegisterHandler)
 	mux.HandleFunc("GET /api/agent/config", p.agentConfigHandler)
 	mux.HandleFunc("POST /api/agent/heartbeat", p.agentHeartbeatHandler)
+	// 本机执行卸载前的报备（agent --goodbye）。与心跳同源的凭据校验。
+	mux.HandleFunc("POST /api/agent/goodbye", p.agentGoodbyeHandler)
 	mux.HandleFunc("GET /api/agent/services", func(w http.ResponseWriter, r *http.Request) {
 		p.agentServicesHandler(w, r)
 	})

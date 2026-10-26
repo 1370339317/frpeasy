@@ -107,33 +107,25 @@ func (m *FrpcManager) EnsureBinary(version, mirror string) (string, error) {
 	panelBase := m.panelBase
 	m.mu.Unlock()
 
-	// 先向面板要。理由：内网机器往往能连面板、却连不上 GitHub；
-	// 面板那边拉一次就缓存住，后面所有同平台客户端都从面板拿，还顺带
-	// 让镜像配置只需在面板做一次。面板没有这个接口（老版本）或上游不通时，
-	// 再按原来的方式直连 —— 回退保证兼容。
-	if panelBase != "" {
-		if p, err := m.downloadFromPanel(panelBase); err == nil {
-			return p, nil
-		} else {
-			m.lastPullErr = err
-		}
+	// 只从面板取。
+	//
+	// 这里原来还有「面板取不到就直连 GitHub」的回退，已经删掉：那条路让客户端
+	// 绕过面板，面板上配的镜像等于摆设；在只能连面板的内网机器上，它还表现为
+	// 「有时能通、有时不能」，而日志里根本看不出这一次走的是哪条路。
+	// 现在取不到就明确失败并说清怎么办。
+	if panelBase == "" {
+		return "", fmt.Errorf("还没有面板地址，无法获取 frpc（agent 尚未成功拉取过一次配置）")
 	}
-
-	keyword := shared.PlatformKeyword(runtime.GOOS, runtime.GOARCH)
-	url, tag, err := shared.ResolveAssetURL(shared.FRPRepo, version, keyword, mirror)
-	if err == nil {
-		var p string
-		p, err = shared.DownloadAndExtract(url, m.binDir, "frpc")
-		if err == nil {
-			_ = os.WriteFile(m.versionPath(), []byte(tag), 0o644)
-			return p, nil
-		}
+	p, err := m.downloadFromPanel(panelBase)
+	if err != nil {
+		m.mu.Lock()
+		m.pullCooldownUntil = time.Now().Add(pullRetryCooldown)
+		m.lastPullErr = err
+		m.mu.Unlock()
+		return "", fmt.Errorf("从面板获取 frpc 失败：%w。客户端不会直连 GitHub —— "+
+			"请确认面板能拉到该平台的 frpc（面板「文件与更新」页点一次「预存」即可验证）", err)
 	}
-	m.mu.Lock()
-	m.pullCooldownUntil = time.Now().Add(pullRetryCooldown)
-	m.lastPullErr = err
-	m.mu.Unlock()
-	return "", err
+	return p, nil
 }
 
 // downloadFromPanel 从面板取 frpc 裸二进制。

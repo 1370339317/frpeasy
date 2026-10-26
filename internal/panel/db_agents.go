@@ -133,7 +133,7 @@ func parseStringList(s string) []string {
 // 列名和扫描参数必须严格一一对应，而 GetAgent / ListAgents 各写一遍的话，
 // 加一列忘一处就会「某个接口整张表读不出来」，编译期毫无提示 —— 历史上踩过。
 // 所以列名只在这里出现一次，扫描参数按同一份定义动态拼。
-const agentColsTail = "online,last_seen,created_at,services,ips,frp_version,agent_version,uninstall_requested,uninstall_sent_at"
+const agentColsTail = "online,last_seen,created_at,services,ips,frp_version,agent_version,uninstall_requested,uninstall_sent_at,uninstall_by_local"
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -151,19 +151,20 @@ func agentColumns(withTokens bool) string {
 
 func scanAgentRow(s rowScanner, a *shared.Agent, withTokens bool) error {
 	var svc, ips, ver, aver string
-	var online, uninstallReq int
+	var online, uninstallReq, uninstallLocal int
 	var lastSeen, createdAt, sentAt sql.NullTime
 	dest := []any{&a.ID, &a.Name, &a.Os, &a.Arch}
 	if withTokens {
 		dest = append(dest, &a.InstallToken, &a.AgentToken)
 	}
-	dest = append(dest, &online, &lastSeen, &createdAt, &svc, &ips, &ver, &aver, &uninstallReq, &sentAt)
+	dest = append(dest, &online, &lastSeen, &createdAt, &svc, &ips, &ver, &aver, &uninstallReq, &sentAt, &uninstallLocal)
 	if err := s.Scan(dest...); err != nil {
 		return err
 	}
 	// modernc sqlite 不允许把 INTEGER 直接扫进 bool，必须经 int 中转
 	a.Online = online == 1
 	a.UninstallRequested = uninstallReq == 1
+	a.UninstallByLocal = uninstallLocal == 1
 	if sentAt.Valid {
 		t := sentAt.Time
 		a.UninstallSentAt = &t
@@ -241,6 +242,19 @@ func (db *DB) ConsumeAgentUninstall(id string) bool {
 	}
 	n, err := res.RowsAffected()
 	return err == nil && n > 0
+}
+
+// MarkAgentLocalUninstall 记录「这台机器在本机执行了卸载」。
+//
+// 与云端下发（ConsumeAgentUninstall）的区别只在来源：两者都会让记录进入
+// 「已卸载」状态，但界面要把它们分开说 —— 一个是你在面板上点的，
+// 一个是有人在那台机器上跑了卸载命令。后者如果不知道，用户会以为是面板出了问题。
+func (db *DB) MarkAgentLocalUninstall(id string) error {
+	_, err := db.Exec(
+		"UPDATE agents SET uninstall_requested=0, uninstall_sent_at=CURRENT_TIMESTAMP, uninstall_by_local=1 WHERE id=?",
+		id,
+	)
+	return err
 }
 
 // CancelAgentUninstall 撤销一条还没被领走的卸载指令。

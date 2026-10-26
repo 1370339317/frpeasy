@@ -97,6 +97,13 @@ func (db *DB) migrate() error {
 	// 清掉之后面板就再也分不清「从没下发过」和「已下发、正在等它死」，
 	// 于是卸载完的客户端只能一直显示成普通的「离线」。
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN uninstall_sent_at DATETIME`)
+
+	// uninstall_by_local 标记这次卸载是「在那台机器上执行的」，而不是面板下发。
+	//
+	// 两条路径都要把记录变成「已卸载」，但用户需要知道是哪种：本机执行的话，
+	// 面板上那条记录不是它自己变出来的，而是那台机器临死前报备的 ——
+	// 不区分的话，用户会怀疑「我没点过卸载，它怎么自己没了」。
+	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN uninstall_by_local INTEGER NOT NULL DEFAULT 0`)
 	return nil
 }
 

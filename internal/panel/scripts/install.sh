@@ -275,6 +275,15 @@ do_uninstall() {
   esac
   say "uninstalling frpeasy agent ..."
   stop_existing
+  # 先向面板报备「我要走了」，再删文件。
+  #
+  # 不报备的话，面板只能看到心跳停了 —— 而「被卸载」和「关机了」在数据上
+  # 完全一样，那条记录会一直挂着，让人分不清该不该清。
+  # 用二进制自己读 agent.state（里面有面板地址和凭据），脚本不解析 JSON；
+  # 老版本二进制不认识这个参数，报错被忽略，行为与以前一致。
+  if [ -x "$BIN" ]; then
+    "$BIN" --goodbye --data "$DATA_DIR" >/dev/null 2>&1 || true
+  fi
   purge_units
   for f in "$MAGISK_BOOT"; do
     [ -f "$f" ] && $SUDO rm -f "$f" && say "removed $f"

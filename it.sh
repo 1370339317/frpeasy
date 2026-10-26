@@ -97,6 +97,15 @@ chk "无法撤销时 sent_at 仍在" 1 "$(curl -s -b cj.txt $B/api/agents | jget
 chk "不存在的客户端下发 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/agents/nosuchagent/uninstall)"
 # 0.3.0 的客户端：必须明确拒绝，而不是「已下发」然后客户端毫无反应
 chk "过旧客户端被拒 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/agents/$AGID/uninstall)"
+
+# 本机执行卸载后的报备：agent 临退出前调这个接口。
+# 不报备的话面板只看到心跳停了，「被卸载」和「关机了」在数据上完全一样。
+chk "goodbye 未知客户端 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST $B/api/agent/goodbye -H 'Content-Type: application/json' -d '{"agent_id":"nosuch","agent_token":"x"}')"
+chk "goodbye 错误令牌 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST $B/api/agent/goodbye -H 'Content-Type: application/json' -d "{\"agent_id\":\"$AG2\",\"agent_token\":\"bad\"}")"
+chk "goodbye 正确凭据 ok" True "$(curl -s -X POST $B/api/agent/goodbye -H 'Content-Type: application/json' -d "{\"agent_id\":\"$AG2\",\"agent_token\":\"$AG2TOK\"}" | jget "d['ok']")"
+chk "报备后标记为本机卸载" True "$(curl -s -b cj.txt $B/api/agents | jget "$AG2Q['uninstall_by_local']")"
+chk "报备后 sent_at 有值" 0 "$(curl -s -b cj.txt $B/api/agents | jget "0 if $AG2Q.get('uninstall_sent_at') else 1")"
+
 curl -s -b cj.txt -X DELETE $B/api/agents/$AG2 >/dev/null
 IC2=$(curl -s -b cj.txt $B/api/tunnels | jget "d['uninstall_command']")
 chk "卸载命令已下发" 1 "$(case "$IC2" in *--uninstall*) echo 1;; *) echo 0;; esac)"
@@ -174,9 +183,12 @@ chk "含 adb shell" 1 "$(echo "$AND" | grep -c 'adb shell')"
 chk "含设备侧落盘路径" 1 "$(echo "$AND" | grep -c '/data/local/tmp/frpeasy-install.sh')"
 chk "含 toybox wget 兜底" 1 "$(echo "$AND" | grep -c 'toybox wget')"
 chk "含安装令牌" 1 "$(echo "$AND" | grep -c -- "--token $TOKEN")"
-ANDROOT=$(curl -s -b cj.txt $B/api/tunnels | jget "d['install_command_android_root']")
-chk "root 命令带 --elevate" 1 "$(echo "$ANDROOT" | grep -c -- '--elevate')"
-chk "root 命令不写死 su 形状" 0 "$(echo "$ANDROOT" | grep -c 'su -c')"
+# Android 只有一个入口：agent 在 Android 上不做"安装"（不注册自启、不挂看护），
+# 只是把二进制放下去跑起来。所以不存在"adb 版"和"root 版"两条命令，
+# 也不再单独给出 --elevate 版本（需要的人自己加后缀）。
+chk "Android 只有一条命令（无 root 专用版本）" None "$(curl -s -b cj.txt $B/api/tunnels | jget "d.get('install_command_android_root')")"
+chk "Android 命令默认不提权" 0 "$(echo "$AND" | grep -c -- '--elevate')"
+chk "Android 命令不写死 su 形状" 0 "$(echo "$AND" | grep -c 'su -c')"
 chk "安装脚本落地失败时明确退出" 1 "$(echo "$AND" | grep -c 'download failed on device')"
 
 say "== 18) 端口 / 防火墙清单 =="

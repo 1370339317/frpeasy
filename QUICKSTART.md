@@ -157,19 +157,24 @@ FRPEASY_UPDATE_BASE='https://github.com/1370339317/frpeasy/releases/latest/downl
 
 ## 三、客户端平台与安装/升级
 
-面板「客户端」页有四个页签，复制哪条都行，脚本都是**幂等**的。
+面板「客户端」页有三个页签（Linux / Windows / Android），复制哪条都行，脚本都是**幂等**的。
 
 | 平台 | 命令形式 | 装完的自启行为 | 安装位置 |
 |---|---|---|---|
-| Linux | `curl -sSL <面板>/install \| sh -s -- --server ... --token ...` | systemd / OpenRC 注册开机自启；两者都没有则挂看护循环（开机自启需手动） | `/usr/local/bin/frpeasy-agent`，数据 `/var/lib/frpeasy-agent` |
+| Linux | `curl -sSL <面板>/install \| sh -s -- --server ... --token ...` | systemd / OpenRC 注册开机自启；两者都没有则前台运行（自启需手动） | `/usr/local/bin/frpeasy-agent`，数据 `/var/lib/frpeasy-agent` |
 | Windows | `powershell -ExecutionPolicy Bypass -Command "iwr .../install.ps1 ..."` | 计划任务（SYSTEM 身份，开机即启） | `%ProgramData%\frpeasy-agent` |
-| Android（adb，免 root） | `adb shell "curl ... \|\| toybox wget ...; sh /data/local/tmp/frpeasy-install.sh ..."` | **只启动一次，不注册自启、不挂看护** | `/data/local/tmp/frpeasy-agent` |
-| Android（root） | 同上，外面套 `su -c '...'` 或加 `--elevate` | **同上，只启动一次** | 同上 |
+| Android | `adb shell "curl ... \|\| toybox wget ...; sh /data/local/tmp/frpeasy-install.sh ..."` | **只启动一次，不注册自启、不挂看护** | `/data/local/tmp/frpeasy-agent` |
 
-**Android 有意不注册任何自启。** 原因是不猜 `su` 的实现：Magisk / KernelSU / APatch /
-adbsu 的自启目录各不相同，系统版本差异又大，写错位置轻则静默无效，重则在系统升级后
-留下一份失效脚本 —— 猜错的代价远大于收益。所以 Android 上安装器只做「正常启动一次」，
-之后启停完全归你：
+**Android 上没有「安装」这个概念，只有一次运行。** 不需要 root：探测本机服务是读
+`/proc/net/tcp`，转发端口也不需要特权。面板不再提供「adb 版 / root 版」两条命令 ——
+两者的差别只是结尾有没有 `--elevate`，而 `--elevate` 的语义是「以 root 身份运行」，
+不是「root 安装」。确实需要绑低端口的人自己加即可（脚本会依次试
+`su -c` / `su 0` / `su root -c`，拿到 uid 0 才算成功，不预设是哪一种 su 实现）。
+
+**Android 有意不注册任何自启、也不挂看护循环。** 不猜 `su` 的实现：Magisk / KernelSU /
+APatch / adbsu 的自启目录各不相同，系统版本差异又大，写错位置轻则静默无效，
+重则在系统升级后留下一份失效脚本（甚至打不开机）—— 猜错的代价远大于收益。
+启停完全归你：
 
 ```bash
 sh <数据目录>/run.sh start|stop|restart|status|log
@@ -213,6 +218,11 @@ arm64-v8a → `linux/arm64`，armeabi-v7a → `linux/arm`，frp 官方也是这�
 curl -sSL http://你的面板:28080/install | sh -s -- --uninstall          # Linux / Android
 powershell -ExecutionPolicy Bypass -Command "iwr http://你的面板:28080/install.ps1 -OutFile $env:TEMP\frpeasy-install.ps1 -UseBasicParsing; & $env:TEMP\frpeasy-install.ps1 -Uninstall"   # Windows
 ```
+
+**卸载前它会先通知面板。** agent 在删自己之前调一次 `POST /api/agent/goodbye`，
+面板立刻把这条记录标成「已卸载（本机执行）」。不这么做的话，面板只能看到心跳停了 ——
+那和「那台机器关机了」在数据上完全一样，记录会一直挂着，让你没法判断该不该清。
+面板不可达时就跳过报备、卸载照做（删自己优先级更高）。
 
 > 卡片上的「移除」**只是删面板记录**：那台机器上的 agent 还在跑，下次心跳会重新
 > 注册回来，隧道也可能重新绑上。要真正卸载用上面的两种方式。

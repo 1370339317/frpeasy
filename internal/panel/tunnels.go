@@ -60,7 +60,6 @@ func (p *Panel) createTunnelHandler(w http.ResponseWriter, r *http.Request) {
 		"install_command":              p.buildInstallCommand(r),
 		"install_command_windows":      p.buildInstallCommandWindows(r),
 		"install_command_android":      p.buildInstallCommandAndroid(r),
-		"install_command_android_root": p.buildInstallCommandAndroidRoot(r),
 	}
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(resp)
@@ -116,7 +115,6 @@ func (p *Panel) listTunnelsHandler(w http.ResponseWriter, r *http.Request) {
 		"install_command":              p.buildInstallCommand(r),
 		"install_command_windows":      p.buildInstallCommandWindows(r),
 		"install_command_android":      p.buildInstallCommandAndroid(r),
-		"install_command_android_root": p.buildInstallCommandAndroidRoot(r),
 		// 卸载命令：给「现在的面板上直接复制一条命令去那台机器执行」用。
 		// 与云端一键卸载（POST /api/agents/{id}/uninstall）互补：
 		// 前者适合客户端已失联/面板换了地址，后者适合它还在线。

@@ -76,16 +76,6 @@ func (p *Panel) buildUninstallCommandAndroid(r *http.Request) string {
 // （有的要 `su -c "cmd"`，有的要 `su 0 cmd`），在面板侧写死任何一种都是在猜，
 // 猜对了是运气、猜错了用户面对的是一条看不出原因的失败命令。
 // 所以这里只多带一个 --elevate，由设备上的脚本按行为依次探测三种常见形状，
-// 每种都要求真的拿到 uid 0 才认；全失败就明确报错，并给出「自己进 root shell 手跑」的退路。
-func (p *Panel) buildInstallCommandAndroidRoot(r *http.Request) string {
-	panelHTTP := p.resolvePanelBase(r)
-	token := p.db.GetSetting("install_token")
-	sh := "/data/local/tmp/frpeasy-install.sh"
-	return "adb shell \"curl -fsSL " + panelHTTP + "/install -o " + sh +
-		" || toybox wget -O " + sh + " " + panelHTTP + "/install; " +
-		"[ -s " + sh + " ] || { echo 'download failed on device: neither curl nor toybox wget worked'; exit 1; }; " +
-		"sh " + sh + " --server " + panelHTTP + " --token " + token + " --elevate\""
-}
 
 // resolvePanelBase 决定「客户端访问本面板」所用的基址（带 scheme，无尾斜杠）。
 //

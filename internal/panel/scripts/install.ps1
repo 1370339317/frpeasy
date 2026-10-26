@@ -92,6 +92,14 @@ if (-not (Test-Admin)) {
 
 if ($Uninstall) {
   Remove-AgentTask
+  # Tell the panel "this machine is being uninstalled" before the state file goes
+  # away. Without it the panel only sees heartbeats stop, which looks exactly the
+  # same as "machine powered off" - the record then sits there forever.
+  # Best effort only: an old binary does not know --goodbye, and removing our own
+  # files must never depend on the panel being reachable.
+  if (Test-Path $exe) {
+    try { & $exe --goodbye --data $dir *> $null } catch { }
+  }
   [void](Stop-AgentProcess)
   if (Test-Path $dir) { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
   Write-Host "[frpeasy] uninstalled (task, process and $dir removed)."

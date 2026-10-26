@@ -112,8 +112,15 @@ make build
 Android（arm64-v8a / armeabi-v7a）。
 
 agent 进程**本身不需要 root 运行**；装到系统目录时会自动用 `sudo`（没有 sudo 就装不动
-默认路径，可以用 `--data` 指到可写目录）。装完注册自启、保活 frpc、周期上报状态。
+默认路径，可以用 `--data` 指到可写目录）。Linux / Windows 上装完会注册自启、保活 frpc、
+周期上报状态；**Android 上只启动一次，不注册自启也不挂看护**（见下）。
 各平台的具体命令和自启方式见 [QUICKSTART 第三节](QUICKSTART.md#三客户端平台与安装升级)。
+
+**Android 只有一个入口，不需要 root。** 探测本机服务读 `/proc/net/tcp`、转发端口都不需要特权。
+面板不再给「adb 版 / root 版」两条命令 —— 差别只是结尾有没有 `--elevate`，而那是
+「以 root 身份运行」的意思，不是「root 安装」。Android 上也没有「安装」这回事：
+不写任何自启目录（Magisk / KernelSU / APatch / adb su 各不相同，猜错代价是设备起不来），
+只是把二进制放下去跑起来，启停归你。
 
 ## 升级
 

@@ -81,6 +81,11 @@ type Agent struct {
 	//   SentAt 非零 && Online   → 已下发但仍在心跳 = 卸载没生效（多为权限不足）
 	UninstallRequested bool       `json:"uninstall_requested"`
 	UninstallSentAt    *time.Time `json:"uninstall_sent_at,omitempty"`
+	// UninstallByLocal 这次卸载是在那台机器上执行的（install.sh --uninstall 或
+	// agent 的 --goodbye 报备），而不是面板云端下发。
+	// 区分它的理由：面板上那条记录是「那台机器临死前告诉我们的」，
+	// 不标出来，用户会怀疑「我没点过卸载，它怎么自己变已卸载了」。
+	UninstallByLocal bool `json:"uninstall_by_local"`
 }
 
 // DiscoveredService Agent 在客户端机器上探测到的本地监听服务。

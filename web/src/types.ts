@@ -49,6 +49,8 @@ export interface Agent {
    * 配合 online 判断结果 —— 仍在线=没生效，已离线=卸载成功。
    */
   uninstall_sent_at?: string | null
+  /** 这次卸载是在那台机器上执行的（跑了卸载命令），而不是面板云端下发 */
+  uninstall_by_local: boolean
 }
 
 export type ProxyState = 'online' | 'waiting_server' | 'not_deployed' | 'offline'
@@ -184,7 +186,6 @@ export interface TunnelsResponse {
   install_command: string
   install_command_windows: string
   install_command_android: string
-  install_command_android_root: string
   /** 卸载命令：在那台机器上直接执行即可（与云端下发卸载互补） */
   uninstall_command: string
   uninstall_command_windows: string

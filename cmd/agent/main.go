@@ -36,7 +36,21 @@ func main() {
 	// 不这样的话，两个 agent 会同时连着面板、各起一个 frpc，
 	// frps 那边会因为 proxy 名重复把后来的踢掉，症状是隧道反复抖动。
 	reexecWait := flag.Int("reexec-wait", 0, "内部使用：等待指定 PID 退出后接管")
+	// 卸载前报备：读 --data 下的 agent.state（含面板地址与凭据），
+	// 通知面板「这台机器是被卸载了」而不是掉线。安装脚本的 --uninstall
+	// 分支在删文件之前调它，因为那时代码里已经没有 server 参数了。
+	goodbye := flag.Bool("goodbye", false, "内部使用：卸载前向面板报备一次，然后退出")
 	flag.Parse()
+
+	if *goodbye {
+		if err := agent.Goodbye(*dataDir); err != nil {
+			// 报备失败不影响卸载，只说一声；调用方也会忽略返回码。
+			fmt.Fprintln(os.Stderr, "[agent] 卸载报备失败:", err)
+			os.Exit(1)
+		}
+		fmt.Println("[agent] 已通知面板：本机正在卸载")
+		return
+	}
 
 	if *showVersion {
 		// 第一行必须是 "frpeasy-agent <ver> <os>/<arch>"：安装脚本靠它判活，

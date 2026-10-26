@@ -30,7 +30,14 @@ import type {
  * 不会再出现"改了设置但隧道页还是旧地址"这种漏渲染。
  */
 
-export type CommandKind = 'linux' | 'win' | 'android' | 'androidRoot'
+// Android 只有一个入口。
+//
+// 原来分成 'android' 和 'androidRoot' 两个页签，两条命令唯一的差别是结尾有没有
+// --elevate。但 Android 上的 agent 根本不做"安装"：不注册自启、不挂看护，
+// 只是把二进制放下去跑起来（绿色运行）。所以"root 安装"这个说法本身是错的 ——
+// --elevate 只是"以 root 身份运行"。要不要 root 是用户自己的事，
+// 面板不该强迫他先选一个页签。CLI 的 --elevate 仍然保留，需要的人自己加。
+export type CommandKind = 'linux' | 'win' | 'android'
 
 interface ToastItem {
   id: number
@@ -47,7 +54,7 @@ interface AppData {
   versions: VersionsResponse | null
   net: NetworkResponse | null
   install: Record<CommandKind, string>
-  /** 卸载命令：同样按平台分，androidRoot 复用 android 那条 */
+  /** 卸载命令：同样按平台分 */
   uninstall: Record<CommandKind, string>
   accessHost: string
   accessSource: AccessHostSource
@@ -82,7 +89,6 @@ const EMPTY_INSTALL: Record<CommandKind, string> = {
   linux: '',
   win: '',
   android: '',
-  androidRoot: '',
 }
 
 const AppContext = createContext<AppContextValue | null>(null)
@@ -170,14 +176,12 @@ export function AppProvider({
         linux: r.install_command || '',
         win: r.install_command_windows || '',
         android: r.install_command_android || '',
-        androidRoot: r.install_command_android_root || '',
       },
       uninstall: {
         linux: r.uninstall_command || '',
         win: r.uninstall_command_windows || '',
         android: r.uninstall_command_android || '',
         // Android 的卸载与是否 root 无关（同一个脚本、同一套目录），复用一条
-        androidRoot: r.uninstall_command_android || '',
       },
       accessHost: r.access_host || '',
       accessSource: r.access_host_source || 'fallback',
