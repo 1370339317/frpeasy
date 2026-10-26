@@ -82,7 +82,7 @@ function SourcePicker({
       label: '自动',
       // 自动 = 跟随面板设置里的顺序。把当前顺序直接写在提示里，
       // 否则"自动"对用户来说等于黑箱。
-      hint: '跟随面板设置里的取二进制顺序，改设置下一轮心跳即生效',
+      hint: '安装固定经面板；装好后 frpc 与自动更新跟随设置里的顺序',
       disabled: false,
     },
     {
@@ -402,8 +402,8 @@ export function Clients() {
               </>
             ) : (
               <>
-                跟随面板设置（当前：<b>{chainLabel(settings?.bin_source_chain)}</b>），
-                改设置后下一轮心跳生效，不用重装
+                安装这一步<b>固定经面板</b>；装好之后 frpc 与自动更新按「
+                <b>{chainLabel(settings?.bin_source_chain)}</b>」走，改设置下一轮心跳生效
               </>
             )}
           </span>
