@@ -11,7 +11,6 @@ import (
 	"frpeasy/internal/shared"
 )
 
-
 // --- Tunnels ---
 
 // NextFreePort 从端口池中取一个「没被隧道占用、且系统当前真能绑定」的公网端口。
@@ -79,7 +78,6 @@ func portBindable(protocol string, port int) bool {
 	return true
 }
 
-
 // CreateTunnel 新建隧道：自动分配端口与令牌。manualPort>0 时采用手动端口（校验占用）。
 // agentID 绑定承载该隧道的客户端（为空表示全局，所有 Agent 都可拉取）。
 func (db *DB) CreateTunnel(name, localAddr, protocol string, manualPort int, agentID string) (*shared.Tunnel, error) {
@@ -122,7 +120,6 @@ func (db *DB) CreateTunnel(name, localAddr, protocol string, manualPort int, age
 	id, _ := res.LastInsertId()
 	return db.GetTunnel(id)
 }
-
 
 // UpdateTunnel 修改隧道。空字段表示保持不变；localAddr 为空则保留原值；
 // manualPort>0 且与原端口不同且未被占用时，更新公网端口。
@@ -172,7 +169,6 @@ func (db *DB) UpdateTunnel(id int64, name, localAddr, protocol, agentID string, 
 	return err
 }
 
-
 func (db *DB) GetTunnel(id int64) (*shared.Tunnel, error) {
 	t := &shared.Tunnel{}
 	var created sql.NullTime
@@ -191,12 +187,10 @@ func (db *DB) GetTunnel(id int64) (*shared.Tunnel, error) {
 	return t, nil
 }
 
-
 // ListTunnels 返回全部隧道，并合并最近一次心跳得到的运行时状态。
 func (db *DB) ListTunnels() ([]shared.Tunnel, error) {
 	return db.queryTunnels("ORDER BY id DESC")
 }
-
 
 // ListTunnelsForAgent 返回显式绑定该 Agent 的隧道。
 //
@@ -210,7 +204,6 @@ func (db *DB) ListTunnelsForAgent(agentID string) ([]shared.Tunnel, error) {
 	return db.queryTunnels("WHERE COALESCE(agent_id,'')=? ORDER BY id DESC", agentID)
 }
 
-
 func (db *DB) queryTunnels(where string, args ...any) ([]shared.Tunnel, error) {
 	rows, err := db.Query(
 		"SELECT id,name,local_addr,public_port,protocol,token,agent_id,created_at FROM tunnels "+where, args...,
@@ -219,7 +212,8 @@ func (db *DB) queryTunnels(where string, args ...any) ([]shared.Tunnel, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []shared.Tunnel
+	// 空切片而非 nil，见 db_agents.go 里 ListAgents 的同款说明。
+	out := []shared.Tunnel{}
 	for rows.Next() {
 		t := shared.Tunnel{}
 		var created sql.NullTime
@@ -250,7 +244,6 @@ func (db *DB) queryTunnels(where string, args ...any) ([]shared.Tunnel, error) {
 	return out, nil
 }
 
-
 // tunnelStatus 运行时状态暂存表（也可放内存，这里落库便于重启后保留）。
 func (db *DB) ensureStatusTable() {
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS tunnel_status (
@@ -261,7 +254,6 @@ func (db *DB) ensureStatusTable() {
 		last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
 }
-
 
 func (db *DB) loadTunnelStatus() (map[int64]shared.Tunnel, error) {
 	db.ensureStatusTable()
@@ -286,7 +278,6 @@ func (db *DB) loadTunnelStatus() (map[int64]shared.Tunnel, error) {
 	return m, nil
 }
 
-
 // ApplyHeartbeat 写入 Agent 上报的各隧道状态。
 func (db *DB) ApplyHeartbeat(statuses []shared.TunnelStatus) error {
 	db.ensureStatusTable()
@@ -302,7 +293,6 @@ func (db *DB) ApplyHeartbeat(statuses []shared.TunnelStatus) error {
 	}
 	return nil
 }
-
 
 func (db *DB) DeleteTunnel(id int64) error {
 	_, err := db.Exec("DELETE FROM tunnels WHERE id=?", id)

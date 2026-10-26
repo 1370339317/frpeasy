@@ -39,7 +39,8 @@ type PortNeed struct {
 // 只列"真的在用"的端口：未分配端口的草稿隧道、未绑定机器的隧道都不会出现在
 // 公网端口表里 —— 它们此刻不会在 frps 上监听，列出来只会让用户白放行一堆口子。
 func (p *Panel) collectPortNeeds() []PortNeed {
-	var out []PortNeed
+	// 空切片而非 nil：nil 序列化成 null，前端拿到后不会清空旧清单。
+	out := []PortNeed{}
 
 	panelPort, _ := strconv.Atoi(p.listenPort)
 	if panelPort > 0 {
@@ -126,7 +127,6 @@ func (p *Panel) collectPortNeeds() []PortNeed {
 	return out
 }
 
-
 func requiredPorts(items []PortNeed) []int {
 	var out []int
 	seen := map[int]bool{}
@@ -139,7 +139,6 @@ func requiredPorts(items []PortNeed) []int {
 	sort.Ints(out)
 	return out
 }
-
 
 // ---------------------------------------------------------------------------
 // HTTP 接口
@@ -185,7 +184,6 @@ func (p *Panel) portsHandler(w http.ResponseWriter, r *http.Request) {
 		"frps_running":       p.frps.IsRunning(),
 	})
 }
-
 
 // portsCheckHandler POST /api/ports/check —— 逐个端口探测。
 //

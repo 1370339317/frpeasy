@@ -44,6 +44,12 @@ export function Files() {
 
   useEffect(() => {
     void load()
+    // 文件状态会自己变：全平台预存是后台在跑的，单个平台的预存也可能刚下载完。
+    // 原来只在进页面时取一次，预存完了界面上还是「缺失」，只能手动刷新。
+    const h = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load()
+    }, 5000)
+    return () => window.clearInterval(h)
   }, [load])
 
   const keyOf = (f: { kind: string; os: string; arch: string }) => `${f.kind}/${f.os}/${f.arch}`

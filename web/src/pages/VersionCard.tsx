@@ -66,10 +66,24 @@ export function VersionCard() {
 
   useEffect(() => {
     void load(false)
+    // 版本与文件状态会自己变：后台把缓存刷成新版本、客户端陆续升级完成、
+    // 上游又发了新版。原来只在挂载时取一次，用户停在这一页等升级时
+    // 看不到任何变化，只能手动刷新。load(false) 走已缓存的清单，不出网，很轻。
+    const h = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load(false)
+    }, 10000)
+    return () => window.clearInterval(h)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 只在第一次拿到设置时回填。
+  //
+  // 依赖写成 [settings] 是不够的：store 每次 loadSettings 都会放一个新对象进来，
+  // 依赖每次都变，于是用户正在输入更新源地址时会被冲回库里的旧值 ——
+  // 和设置页那个坑一模一样（那次导致「填了没生效 / 配置像是丢了」）。
+  const srcHydrated = useRef(false)
   useEffect(() => {
-    if (!settings) return
+    if (!settings || srcHydrated.current) return
+    srcHydrated.current = true
     setSrc(settings.update_base ?? '')
   }, [settings])
 
@@ -164,6 +178,7 @@ export function VersionCard() {
     setSavingSrc(true)
     try {
       await api('POST', '/api/settings', { update_base: src.trim() })
+      srcHydrated.current = false // 允许回填，显示服务端规范化后的值
       await loadSettings()
       const r = await load(true)
       if (r) toast(r.update_error ? `更新源已保存，但拉取失败：${r.update_error}` : '更新源已保存', r.update_error ? 'bad' : 'ok')

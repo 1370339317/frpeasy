@@ -160,7 +160,11 @@ export function AppProvider({
     setData((d) => ({
       ...d,
       tunnels: r.tunnels ?? [],
-      agents: r.agents ?? d.agents,
+      // 必须用 `?? []` 而不是 `?? d.agents`：
+      // Go 的空切片序列化成 null，`?? d.agents` 会把 null 当成「没返回」，
+      // 于是保留旧列表 —— 删掉最后一台客户端后界面还显示着它，必须手动刷新。
+      // 这个坑在 tunnels 上也踩过，两处统一成 `?? []`。
+      agents: r.agents ?? [],
       frps: r.frps ?? d.frps,
       install: {
         linux: r.install_command || '',
@@ -216,13 +220,49 @@ export function AppProvider({
     // 并行拉，任一失败不影响其它（guard 已把 401 转成登出）
     await Promise.all([
       loadMe(),
+      // 显式拉一次客户端列表：不能指望 /api/tunnels 顺带回来的那份 ——
+      // 之前就是这样，一旦那份是空的（null）就会保留旧值，删完客户端界面不更新。
+      loadAgents(),
       loadTunnels().catch((e) => toast(String((e as Error).message), 'bad')),
       loadSettings(),
     ])
     setReady(true)
     // 版本列表要联网查 GitHub，慢，放最后不阻塞首屏
     void loadVersions()
-  }, [loadMe, loadTunnels, loadSettings, loadVersions, toast])
+  }, [loadMe, loadAgents, loadTunnels, loadSettings, loadVersions, toast])
+
+  // 全局状态轮询。
+  //
+  // 面板不推事件，而「客户端在不在线」「隧道通不通」「frps 在不在跑」一直在变。
+  // 原来只有客户端页和 frps 页各自写了轮询，概览页和隧道页**完全没有** ——
+  // 用户停在概览上看到「1 台在线」，那台机器可能一小时前就离线了，只能手刷。
+  // 各页自写还有两个副作用：间隔互不相同；frps 那个还带 40 次上限（3 秒 × 40），
+  // 两分钟后就不再刷新，界面从此静止。
+  //
+  // 现在统一在这里跑，所有页面共享同一份新鲜数据。
+  useEffect(() => {
+    if (!ready) return
+    let alive = true
+    const tick = () => {
+      if (!alive || document.visibilityState !== 'visible') return
+      void loadFrps()
+      // loadTunnels 一次带回隧道状态 + 客户端列表 + frps 概要，
+      // 比分别调 /api/tunnels 和 /api/agents 省一个请求。
+      void loadTunnels().catch(() => {})
+    }
+    const h = window.setInterval(tick, 5000)
+    // 从后台切回前台立刻补一次：后台标签的定时器会被浏览器节流到分钟级，
+    // 不补这一下，用户切回来看到的就是几分钟前的状态。
+    const onVis = () => {
+      if (document.visibilityState === 'visible') tick()
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      alive = false
+      window.clearInterval(h)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [ready, loadFrps, loadTunnels])
 
   const agentMap = useMemo(() => {
     const m: Record<string, Agent> = {}
@@ -278,28 +318,4 @@ export function useApp(): AppContextValue {
   const ctx = useContext(AppContext)
   if (!ctx) throw new Error('useApp 必须在 AppProvider 内使用')
   return ctx
-}
-
-/**
- * 轮询 frps 状态。
- *
- * 用途：启动/切换版本时 frps 要先下载二进制再起进程，状态会连续变化，
- * 只拉一次会停在"拉取中"，用户以为卡住了。
- */
-export function useFrpsPolling(active: boolean, onTick?: () => void) {
-  const { loadFrps } = useApp()
-  const tick = useRef(onTick)
-  tick.current = onTick
-
-  useEffect(() => {
-    if (!active) return
-    let n = 0
-    const h = window.setInterval(() => {
-      n += 1
-      void loadFrps()
-      tick.current?.()
-      if (n >= 40) window.clearInterval(h)
-    }, 3000)
-    return () => window.clearInterval(h)
-  }, [active, loadFrps])
 }

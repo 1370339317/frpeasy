@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useApp, useFrpsPolling } from '../store'
+import { useApp } from '../store'
 import { api } from '../lib/api'
 import { Badge, Button, Card, Field, Hint, Input, Led, Select, Stats, Stat, Alert } from '../components/ui'
 import type { VersionsResponse } from '../types'
@@ -42,8 +42,17 @@ export function Frps() {
     void loadVersions()
   }, [loadLog, loadVersions])
 
-  // 启动/换版本时 frps 要先下载再起进程，状态会连续变化，必须盯着
-  useFrpsPolling(true, () => void loadLog())
+  // frps 状态由 store 的全局轮询负责（5 秒，页面可见时才跑）；这里只补日志。
+  //
+  // 原来用 useFrpsPolling：3 秒一次、**40 次后自动停**。于是页面打开两分钟后
+  // 状态和日志就再也不更新了 —— 用户盯着一个静止的「运行中」以为一切正常。
+  // 日志单次 8KB，不塞进全局轮询，单独在这里按 5 秒节奏拉。
+  useEffect(() => {
+    const h = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void loadLog()
+    }, 5000)
+    return () => window.clearInterval(h)
+  }, [loadLog])
 
   /** 启动后盯一段时间，直到已绑定的隧道全部回到在线。只拉一次往往还是 offline。 */
   const waitReconnect = useCallback(

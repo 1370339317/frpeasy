@@ -267,7 +267,9 @@ func (db *DB) ListAgents() ([]shared.Agent, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []shared.Agent
+	// 用空切片而不是 nil：nil 会被序列化成 JSON null，前端 `?? 旧值` 就
+	// 会把空列表当成「没返回」而不更新（删空后界面残留）。
+	out := []shared.Agent{}
 	for rows.Next() {
 		a := shared.Agent{}
 		if err := scanAgentRow(rows, &a, false); err != nil {

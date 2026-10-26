@@ -207,20 +207,14 @@ export function Clients() {
   const cmd = install[kind] || '加载中…'
   const unCmd = uninstall[kind] || '加载中…'
 
-  // 客户端状态必须自己刷。
-  //
-  // 面板不推事件，这个页面原来只在进入时取一次数据，于是「agent 早就停了、
-  // 甚至已经卸载了，卡片还一直显示在线」—— 而离线判定（心跳过期）是在
-  // 后端读取时算的，前端不来取就永远看不到。
-  //
-  // 常规 10 秒一轮，比心跳 15 秒略快。但**有客户端正在卸载时加快到 3 秒**：
-  // 那几秒里状态正在变，10 秒粒度会让用户以为卡住了（「过了一分钟还在转」）。
+  // 常规刷新交给 store 里的全局轮询（5 秒）；这里只处理一种例外：
+  // 「正在卸载」那几秒状态在快速变化，5 秒粒度会显得卡住，加密到 3 秒。
   const uninstalling = agents.some(isUninstalling)
   useEffect(() => {
-    const ms = uninstalling ? 3000 : 10000
-    const h = window.setInterval(() => void loadAgents(), ms)
+    if (!uninstalling) return
+    const h = window.setInterval(() => void loadAgents(), 3000)
     return () => window.clearInterval(h)
-  }, [loadAgents, uninstalling])
+  }, [uninstalling, loadAgents])
 
   /** 云端下发卸载：标记随该客户端下一次心跳下发，由它自己清理并退出。 */
   async function uninstallAgent(id: string, name: string, online: boolean) {

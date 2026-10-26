@@ -60,6 +60,13 @@ export function Ports() {
 
   useEffect(() => {
     void loadPorts()
+    // 端口清单会随「建隧道 / 删隧道 / 改端口设置」变化。停在页面上不动时
+    // 原来永远是进页面那一刻的快照，别人在另一处建了隧道这里也看不到。
+    // 10 秒足够（清单变化不频繁），且只在页面可见时跑。
+    const h = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void loadPorts()
+    }, 10000)
+    return () => window.clearInterval(h)
   }, [loadPorts])
 
   const itemList = ports?.items ?? []
