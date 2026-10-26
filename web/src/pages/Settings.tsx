@@ -280,6 +280,10 @@ export function SettingsPage() {
       // （最典型的就是设置还没加载完、或输入被冲掉），保存就会把它在库里的
       // 值覆盖成空，而用户完全看不出是哪一步弄丢的。改成逐字段比对后，
       // 「没动过的字段」永远不会被写，丢配置这条路就被堵死了。
+      //
+      // 注意：新增字段除了在这里比对，**还必须加进下面 useCallback 的依赖数组**。
+      // 漏了依赖，save 会捕获旧的 state 值 —— 表现是"界面上选了、保存后没变"，
+      // 而且完全没有报错（source_mode 就这样漏过一次）。
       const trim = (v: string) => v.trim()
       const body: SettingsBody = {}
 
@@ -333,6 +337,7 @@ export function SettingsPage() {
     saving,
     settings,
     publicAddr,
+    mode,
     serverSources,
     clientSources,
     pStart,

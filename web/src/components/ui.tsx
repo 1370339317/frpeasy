@@ -235,6 +235,21 @@ export function Chip({
   return (
     <div
       onClick={isStatic ? undefined : onClick}
+      // Chip 是可点击的 div。补上 role / tabIndex / 键盘响应，
+      // 否则键盘与读屏用户完全用不到它（全站的镜像预设、策略与来源选项都是它）。
+      role={isStatic ? undefined : 'button'}
+      tabIndex={isStatic ? undefined : 0}
+      aria-pressed={isStatic ? undefined : !!selected}
+      onKeyDown={
+        isStatic
+          ? undefined
+          : (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onClick?.()
+              }
+            }
+      }
       title={title}
       className={cx(
         'flex items-center gap-[7px] rounded-[9px] border px-3 py-1.5 text-[12.5px] transition',

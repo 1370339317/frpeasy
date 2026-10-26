@@ -221,6 +221,11 @@ func SourceListFromTokens(toks []string) []Source {
 
 // FirstPrefix 返回列表里第一个镜像前缀（没有则空）。
 //
+// 这里**刻意不看"首选源"**，而是找第一个前缀。原因在读者那头：
+// mirror_base 只喂给不认识 panel / sources 的老客户端（≤0.7.13），
+// 对它们来说列表首选是「面板中继」等于没有信息 —— 它们会直接去连 github.com。
+// 给一个前缀，至少还有一条比直连更快的路。
+//
 // 用途有两个，都不是判定：
 //   - 老版本客户端只认 AgentConfig.MirrorBase，得给它一个能用的前缀；
 //   - 遗留字段 mirror_base 保持有值，免得界面与第三方脚本突然读不到。
