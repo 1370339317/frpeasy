@@ -187,8 +187,14 @@ func (p *Panel) applyProxyStates(ts []shared.Tunnel) {
 			if ps, ok := p.frps.ProxyLookup(name); ok {
 				t.Online = ProxyOnline(ps)
 				// dashboard 给的是"今日"累计流量，是目前唯一真实来源
+				// （agent 那边只能测本地端口通不通，统计不了字节）。
 				t.TrafficIn = ps.TodayIn
 				t.TrafficOut = ps.TodayOut
+				// 活跃时间优先用连接信息，而不是心跳时间 ——
+				// 心跳每 15 秒一次，用它会让这里永远显示"刚刚"。
+				if t2 := ProxyLastActive(ps, time.Now()); t2.After(t.LastSeen) {
+					t.LastSeen = t2
+				}
 			} else {
 				t.Online = false
 				t.TrafficIn, t.TrafficOut = 0, 0

@@ -6,7 +6,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"time"
 
 	"frpeasy/internal/shared"
 )
@@ -81,8 +80,17 @@ func portBindable(protocol string, port int) bool {
 // CreateTunnel 新建隧道：自动分配端口与令牌。manualPort>0 时采用手动端口（校验占用）。
 // agentID 绑定承载该隧道的客户端（为空表示全局，所有 Agent 都可拉取）。
 func (db *DB) CreateTunnel(name, localAddr, protocol string, manualPort int, agentID string) (*shared.Tunnel, error) {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
 	if protocol == "" {
 		protocol = "tcp"
+	}
+	// 只支持 TCP。这不只是"暂时不做"，而是放任它会**拖垮整台客户端**：
+	// frpc 的 [[proxies]] 里 http 类型不接受 remotePort，生成出来的配置
+	// frpc 解析失败会直接退出 —— 于是同一客户端上所有隧道一起掉线，
+	// 而界面上只看到"全都离线"，完全没有指向那条非法隧道。
+	if protocol != "tcp" {
+		return nil, fmt.Errorf("当前只支持 TCP 隧道（收到 %q）：HTTP 需要域名与 frps 的 vhost 配置，"+
+			"UDP 还没有端口池与防火墙支持", protocol)
 	}
 	if localAddr == "" {
 		return nil, fmt.Errorf("本地服务地址不能为空（可由调用方按 Agent 探测结果自动填充）")
@@ -90,6 +98,12 @@ func (db *DB) CreateTunnel(name, localAddr, protocol string, manualPort int, age
 	var port int
 	var err error
 	if manualPort > 0 {
+		// 先校验范围。不校验的话，99999 这种值会走到 portBindable，
+		// 那里 listen 失败被当成"端口被占用"，于是报出一句
+		// 「已被其它服务监听（比如 nginx）」—— 提示的方向完全错了。
+		if manualPort > 65535 {
+			return nil, fmt.Errorf("端口 %d 不合法：公网端口必须在 1-65535 之间", manualPort)
+		}
 		// 校验占用：先看有没有别的隧道占着，再看本机此刻能不能绑
 		var cnt int
 		if err := db.QueryRow("SELECT COUNT(*) FROM tunnels WHERE public_port=?", manualPort).Scan(&cnt); err != nil {
@@ -133,6 +147,10 @@ func (db *DB) UpdateTunnel(id int64, name, localAddr, protocol, agentID string, 
 		t.Name = name
 	}
 	if protocol != "" {
+		protocol = strings.ToLower(strings.TrimSpace(protocol))
+		if protocol != "tcp" {
+			return fmt.Errorf("当前只支持 TCP 隧道（收到 %q）", protocol)
+		}
 		t.Protocol = protocol
 	}
 	if clearAgent {
@@ -147,6 +165,9 @@ func (db *DB) UpdateTunnel(id int64, name, localAddr, protocol, agentID string, 
 		t.LocalAddr = localAddr
 	}
 	if manualPort > 0 && manualPort != t.PublicPort {
+		if manualPort > 65535 {
+			return fmt.Errorf("端口 %d 不合法：公网端口必须在 1-65535 之间", manualPort)
+		}
 		var cnt int
 		if err := db.QueryRow("SELECT COUNT(*) FROM tunnels WHERE public_port=? AND id<>?", manualPort, id).Scan(&cnt); err != nil {
 			return err
@@ -267,12 +288,18 @@ func (db *DB) loadTunnelStatus() (map[int64]shared.Tunnel, error) {
 		var id int64
 		var online int
 		var in, out int64
-		var seen string
+		// last_seen 是 DATETIME，驱动交回来的是 time.Time，
+		// 扫进 string 会直接报 "unsupported Scan" —— 而这行错误以前被调用方
+		// `if err == nil` 吞掉，表现为整张状态表静默失效：
+		// 流量永远是 0、活跃时间永远是零值，界面上却没有任何异常。
+		var seen sql.NullTime
 		if err := rows.Scan(&id, &online, &in, &out, &seen); err != nil {
 			return nil, err
 		}
 		ts := shared.Tunnel{ID: id, Online: online == 1, TrafficIn: in, TrafficOut: out}
-		ts.LastSeen, _ = time.Parse("2006-01-02 15:04:05", seen)
+		if seen.Valid {
+			ts.LastSeen = seen.Time
+		}
 		m[id] = ts
 	}
 	return m, nil

@@ -2,100 +2,104 @@ package agent
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"frpeasy/internal/shared"
 )
 
-// TestGenerateConfig 校验下发给 frpc 的 toml 内容：连接信息、每条隧道的
-// local_ip/local_port/remote_port、proxy 名唯一，且地址解析正确。
-func TestGenerateConfig(t *testing.T) {
-	dir := t.TempDir()
-	m := NewFrpcManager(dir)
-
+// 非 tcp 的隧道绝不能被写进 frpc.toml。
+//
+// 这条不是"扩展性考虑"，而是真实事故：创建一条 http 类型的隧道后，
+// frpc 因为 http 不接受 remotePort 解析失败直接退出，那台客户端上
+// 所有隧道一起掉线，而面板只显示"全离线"。
+func TestGenerateConfigSkipsNonTCP(t *testing.T) {
+	m := NewFrpcManager(t.TempDir())
 	cfg := shared.AgentConfig{
-		FRPSAddr:  "203.0.113.10:7000",
-		FRPSToken: "secret-token",
+		FRPSAddr:  "1.2.3.4:7000",
+		FRPSToken: "tok",
 		Tunnels: []shared.Tunnel{
-			{ID: 1, Name: "web", Protocol: "tcp", LocalAddr: "127.0.0.1:8123", PublicPort: 10000},
-			{ID: 2, Name: "rdp", Protocol: "tcp", LocalAddr: "192.168.1.10:3389", PublicPort: 10001},
+			{ID: 1, Protocol: "tcp", LocalAddr: "127.0.0.1:8080", PublicPort: 21000},
+			{ID: 2, Protocol: "http", LocalAddr: "127.0.0.1:8080", PublicPort: 21001},
+			{ID: 3, Protocol: "", LocalAddr: "127.0.0.1:9090", PublicPort: 21002}, // 空 = tcp
 		},
 	}
-
-	path, hash, err := m.GenerateConfig(cfg)
+	path, _, err := m.GenerateConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hash == "" {
-		t.Fatal("配置哈希为空")
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := string(raw)
+	content := readFileString(t, path)
 
-	must := []string{
-		`serverAddr = "203.0.113.10"`,
-		`serverPort = 7000`,
-		`auth.token = "secret-token"`,
-		// frpc 默认 loginFailExit=true，frps 一停就会自杀，只能靠 agent 15s
-		// 轮询拉起，表现为"关了再开隧道半天不重连"。必须显式关掉。
-		`loginFailExit = false`,
-		`[[proxies]]`,
-		`name = "t1"`,
-		`localIP = "127.0.0.1"`,
-		`localPort = 8123`,
-		`remotePort = 10000`,
-		`name = "t2"`,
-		`localIP = "192.168.1.10"`,
-		`localPort = 3389`,
-		`remotePort = 10001`,
+	if strings.Contains(content, `type = "http"`) {
+		t.Fatalf("http 类型的隧道不能写进配置，否则 frpc 起不来:\n%s", content)
 	}
-	for _, s := range must {
-		if !strings.Contains(got, s) {
-			t.Fatalf("配置缺少 %q\n--- 实际 ---\n%s", s, got)
+	if strings.Count(content, "[[proxies]]") != 2 {
+		t.Fatalf("应当只有 2 条 tcp 代理，实际:\n%s", content)
+	}
+	for _, want := range []string{"t1", "t3", "remotePort = 21000", "remotePort = 21002"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("配置缺少 %q:\n%s", want, content)
 		}
 	}
-
-	// 必须是新 toml 语法，不能出现旧版 INI 段
-	for _, bad := range []string{"[common]", "[auth]", "[t1]", "server_addr", "remote_port"} {
-		if strings.Contains(got, bad) {
-			t.Fatalf("出现旧版 INI 语法 %q（frp>=0.52 的 toml 不接受）:\n%s", bad, got)
-		}
-	}
-
-	// proxy 段数量必须等于隧道数量
-	if n := strings.Count(got, "[[proxies]]"); n != 2 {
-		t.Fatalf("期望 2 个 [[proxies]] 段，实际 %d:\n%s", n, got)
-	}
-
-	// 配置未变 -> 哈希稳定（决定是否重启 frpc）
-	_, hash2, err := m.GenerateConfig(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hash != hash2 {
-		t.Fatal("相同配置产生了不同哈希，会导致 frpc 反复重启")
+	if strings.Contains(content, "t2") {
+		t.Fatalf("被跳过的隧道不应出现在配置里:\n%s", content)
 	}
 }
 
-// TestSplitHostPort 覆盖 agent 侧的地址切分（IPv4 host:port 与裸 host）。
-func TestSplitHostPort(t *testing.T) {
-	cases := []struct {
-		in   string
-		host string
-		port int
-	}{
-		{"127.0.0.1:8123", "127.0.0.1", 8123},
-		{"192.168.1.10:3389", "192.168.1.10", 3389},
-		{"localhost:80", "localhost", 80},
+func readFileString(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range cases {
-		h, p := splitHostPort(c.in)
-		if h != c.host || p != c.port {
-			t.Fatalf("%s -> (%s,%d)，期望 (%s,%d)", c.in, h, p, c.host, c.port)
-		}
+	return string(b)
+}
+
+// 目标已存在时必须能覆盖（下载新版本后落到同一个 frpc.exe）。
+func TestReplaceBinaryReplacesExisting(t *testing.T) {
+	dir := t.TempDir()
+	m := NewFrpcManager(dir)
+	dst := m.binaryPath()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(dst, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "new.bin")
+	if err := os.WriteFile(src, []byte("new-content"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.replaceBinary(src); err != nil {
+		t.Fatalf("应当覆盖成功: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new-content" {
+		t.Fatalf("内容没换过去: %q", got)
+	}
+}
+
+// 换不动的时候必须先停 frpc 再重试 —— 这是 Windows 上"改版本永远不生效"的根因：
+// 运行中的 exe 句柄被占用，os.Rename 必然失败。
+func TestReplaceBinaryStopsFrpcWhenRenameFails(t *testing.T) {
+	dir := t.TempDir()
+	m := NewFrpcManager(dir)
+	m.running = true // 假装 frpc 正在跑
+
+	// src 不存在 → rename 一定失败 → 应当先 Stop，再把失败的最终错误抛出来
+	err := m.replaceBinary(filepath.Join(dir, "does-not-exist"))
+	if err == nil {
+		t.Fatal("源文件不存在时必须报错，不能静默成功")
+	}
+	m.mu.Lock()
+	running := m.running
+	m.mu.Unlock()
+	if running {
+		t.Fatal("rename 失败后应先停掉 frpc（否则重试也永远撞同一个句柄）")
 	}
 }

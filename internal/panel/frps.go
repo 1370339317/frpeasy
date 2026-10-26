@@ -22,14 +22,45 @@ import (
 
 // ProxyStats frps dashboard 返回的单条代理状态。
 // 字段按 frp 各版本兼容解析：老版本没有 status，只有 last_start_time/last_close_time。
+// ProxyStats frps dashboard 的 /api/proxy/tcp 单条代理状态。
+//
+// **JSON tag 必须是 camelCase**：frps 返回的是 todayTrafficIn / curConns /
+// lastStartTime 这种写法。之前写成 today_traffic_in，解码永远得到 0 ——
+// 于是"今日流量"一栏恒为 0，而 online 判定用的 name/status 恰好同名，
+// 所以界面上一切正常，只有流量是假的。
 type ProxyStats struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"`
-	TodayIn   int64  `json:"today_traffic_in"`
-	TodayOut  int64  `json:"today_traffic_out"`
-	CurConns  int64  `json:"cur_conns"`
-	LastStart string `json:"last_start_time"`
-	LastClose string `json:"last_close_time"`
+	TodayIn   int64  `json:"todayTrafficIn"`
+	TodayOut  int64  `json:"todayTrafficOut"`
+	CurConns  int64  `json:"curConns"`
+	LastStart string `json:"lastStartTime"`
+	LastClose string `json:"lastCloseTime"`
+}
+
+// ProxyLastActive 从 dashboard 状态推算"最近一次有连接"的时间。
+//
+// dashboard 没有"最近请求时间"字段，只有 curConns 与 lastCloseTime：
+//   - 有活连接 → 就是现在；
+//   - 没有 → 用最后一次连接关闭的时间（frps 在从未连接过时给的是零值字符串）。
+//
+// 为什么不能直接用 agent 心跳写的 last_seen：心跳每 15 秒一次，
+// 那个值永远等于"刚刚"，表达不了"这条隧道多久没人用了"。
+func ProxyLastActive(ps ProxyStats, now time.Time) time.Time {
+	if ps.CurConns > 0 {
+		return now
+	}
+	// frps 的时间戳是 "2006-01-02 15:04:05"（本地时区），零值是 0001-01-01。
+	for _, raw := range []string{ps.LastClose, ps.LastStart} {
+		v := strings.TrimSpace(raw)
+		if v == "" || strings.HasPrefix(v, "0001-01-01") {
+			continue
+		}
+		if t, err := time.ParseInLocation("2006-01-02 15:04:05", v, time.Local); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 // maxRestartAttempts 连续自动重启的次数上限。

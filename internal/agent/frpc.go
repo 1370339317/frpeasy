@@ -280,7 +280,7 @@ func (m *FrpcManager) downloadFromUpstream(src shared.Source, version string) (s
 		return "", fmt.Errorf("下载 %s 失败：%w", url, err)
 	}
 	dst := m.binaryPath()
-	if err := os.Rename(extracted, dst); err != nil {
+	if err := m.replaceBinary(extracted); err != nil {
 		return "", fmt.Errorf("保存 frpc 失败：%w", err)
 	}
 	_ = os.Chmod(dst, 0o755)
@@ -293,6 +293,34 @@ func (m *FrpcManager) downloadFromUpstream(src shared.Source, version string) (s
 // 面板返回的是可执行文件本身（不是压缩包），所以这里不用解包；但必须做一次
 // 基本校验 —— 502 的错误文本、反代登录页 HTML 都可能被原样存成"frpc"，
 // 那种文件执行时报 exec format error，排查方向会被彻底带偏。
+// replaceBinary 把下载好的文件放到最终位置。
+//
+// **必须先停掉正在运行的 frpc 再换**（Windows 上尤其）：正在运行的 exe 句柄被占用，
+// os.Rename 直接返回 ACCESS_DENIED。原来没有这一步，表现为
+// 「面板上改了 frp 版本，客户端永远还是旧版本」——而且下载、校验全成功，
+// 只在最后一步静默失败，重试 60 秒一次也没用，因为每次都会撞同一个句柄。
+//
+// 只有下载与校验都通过了才会走到这里，所以停旧进程不会让一次失败的下载
+// 白白断掉现有隧道。
+func (m *FrpcManager) replaceBinary(src string) error {
+	dst := m.binaryPath()
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	// 换不动，多半是目标正在运行。停掉再等句柄释放（Kill 是异步的）。
+	m.Stop()
+	var lastErr error
+	for i := 0; i < 20; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if err := os.Rename(src, dst); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	return fmt.Errorf("替换 frpc 失败（旧进程可能仍占用 %s）：%w", dst, lastErr)
+}
+
 func (m *FrpcManager) downloadFromPanel(base string) (string, error) {
 	u := base + "/api/frpc/bin/" + runtime.GOOS + "/" + runtime.GOARCH
 	if err := os.MkdirAll(m.binDir, 0o755); err != nil {
@@ -331,7 +359,7 @@ func (m *FrpcManager) downloadFromPanel(base string) (string, error) {
 	}
 	dst := m.binaryPath()
 	_ = os.Chmod(tmp, 0o755)
-	if err := os.Rename(tmp, dst); err != nil {
+	if err := m.replaceBinary(tmp); err != nil {
 		return "", fmt.Errorf("保存 frpc 失败: %w", err)
 	}
 	// 面板知道这份文件的版本，写在响应头里；有就记下，省掉一次 `frpc -v` 探测
@@ -359,9 +387,15 @@ func (m *FrpcManager) GenerateConfig(cfg shared.AgentConfig) (string, string, er
 	// （已用隔离实验实测：停 60s 期间 frpc 存活，重启后 2s 内端口重新可连）。
 	b.WriteString("loginFailExit = false\n")
 	for _, t := range cfg.Tunnels {
+		// 只生成 tcp。历史脏数据（http/udp）在这里必须跳过，否则 frpc 会因为
+		// "http 类型不接受 remotePort" 解析失败直接退出 —— 一条坏记录
+		// 就把这台机器上所有隧道一起拖下线，而界面上只看得到"全都离线"。
+		if svc := strings.ToLower(strings.TrimSpace(t.Protocol)); svc != "" && svc != "tcp" {
+			continue
+		}
 		host, port := splitHostPort(t.LocalAddr)
 		fmt.Fprintf(&b, "\n[[proxies]]\nname = %q\ntype = %q\nlocalIP = %q\nlocalPort = %d\nremotePort = %d\n",
-			fmt.Sprintf("t%d", t.ID), t.Protocol, host, port, t.PublicPort)
+			fmt.Sprintf("t%d", t.ID), "tcp", host, port, t.PublicPort)
 	}
 	out := filepath.Join(m.cfgDir, "frpc.toml")
 	content := []byte(b.String())
