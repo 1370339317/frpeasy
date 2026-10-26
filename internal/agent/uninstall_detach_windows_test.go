@@ -29,21 +29,37 @@ func TestCleanupRunsWithProductionDetachFlags(t *testing.T) {
 	// 任务名故意用不存在的：避免测试把真正在跑的 agent 杀掉
 	script := cleanupScript(dir, logPath, "", "frpeasy-test-nonexistent")
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	// 复现生产条件：agent 由计划任务从安装目录启动，清理进程会继承这个 CWD。
+	// Windows 不允许删除任何进程的 CWD，所以脚本必须自己先 Set-Location 挪出去，
+	// 否则 Remove-Item 永远报"在使用中"（实测连试 10 次全部失败）。
+	cmd.Dir = dir
 	cmd.SysProcAttr = detachAttr()
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("启动清理进程失败: %v", err)
 	}
 	_ = cmd.Process.Release()
 
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(25 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
+		// 成功标准是"不再占空间、不留可执行文件"，而不是"目录必须消失"：
+		// Windows 上只要有一项被占用（Defender、索引、残留 CWD），目录本身
+		// 就可能删不掉；此时空目录无害，但里面留着 frpc 20MB 才是真问题。
+		entries, statErr := os.ReadDir(dir)
+		if os.IsNotExist(statErr) || (statErr == nil && len(entries) == 0) {
 			if b, _ := os.ReadFile(logPath); len(b) == 0 {
-				t.Fatal("目录删了但日志没写 —— 卸载出问题时将无从追查")
+				t.Fatal("清理后没写日志 —— 卸载出问题时将无从追查")
 			}
 			return
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatal("用 detachAttr 启动时清理脚本没有生效（DETACHED_PROCESS 的老问题）")
+	entries, _ := os.ReadDir(dir)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if logRaw, _ := os.ReadFile(logPath); len(logRaw) > 0 {
+		t.Logf("卸载日志:\n%s", string(logRaw))
+	}
+	t.Fatalf("卸载后目录里还剩文件（应逐个删掉子项）: %v", names)
 }

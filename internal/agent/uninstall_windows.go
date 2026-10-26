@@ -4,6 +4,7 @@ package agent
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 )
 
@@ -26,6 +27,13 @@ func startSelfCleanup(dataDir string) error {
 	}
 	script := cleanupScript(dataDir, uninstallLogPath(), exe, "frpeasy-agent")
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	// **工作目录必须挪出去**。agent 由计划任务从安装目录启动，子进程会继承这个 CWD；
+	// 而 Windows 不允许删除任何仍被当作 CWD 的目录 —— 于是清理进程自己把安装目录
+	// "占用"了，Remove-Item 永远报"在使用中"，重试多少次都没用
+	// （实测连试 10 次全失败，最后剩 bin/、frpc/、agent.state）。
+	if tmp := os.TempDir(); tmp != "" {
+		cmd.Dir = tmp
+	}
 	if attr := detachAttr(); attr != nil {
 		cmd.SysProcAttr = attr
 	}
@@ -63,6 +71,9 @@ func cleanupScript(dataDir, logPath, exePath, taskName string) string {
 	// function 定义与 try/catch 很容易被粘错。
 	return "Start-Sleep 1\n" +
 		"$ErrorActionPreference = 'Continue'\n" +
+		// 双保险：即使被别处以安装目录为 CWD 启动，也先把自身挪出去，
+		// 否则后面删目录必然失败（Windows 不允许删任何进程的 CWD）。
+		"Set-Location -LiteralPath $env:TEMP\n" +
 		"$log = " + log + "\n" +
 		"function L($m) { \"$(Get-Date -Format o) $m\" | Out-File -Append -Encoding utf8 $log }\n" +
 		"L '=== 开始卸载 ==='\n" +
@@ -82,6 +93,19 @@ func cleanupScript(dataDir, logPath, exePath, taskName string) string {
 		"  Start-Sleep -Milliseconds 500\n" +
 		"}\n" +
 		"L 'agent 进程已退出'\n" +
+		// 先逐个删子项，再删目录本身。
+		//
+		// Windows 上"删目录"是原子操作：只要有一项被占用（Defender 扫描、
+		// 索引服务、某个进程的 CWD 还挂在里面），整个 Remove-Item 就失败，
+		// 结果几十 MB 的 bin/、frpc/ 全都留在盘上。逐项删能把"删不掉的"缩小到
+		// 真正被占用的那一项，其余空间先释放掉。
+		"Get-ChildItem -LiteralPath " + dir + " -Force -ErrorAction SilentlyContinue | ForEach-Object {\n" +
+		"  try {\n" +
+		"    Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop\n" +
+		"  } catch {\n" +
+		"    L ('删子项失败: ' + $_.Name + ' — ' + $_.Exception.Message)\n" +
+		"  }\n" +
+		"}\n" +
 		"for ($i = 1; $i -le 10; $i++) {\n" +
 		"  try {\n" +
 		"    Remove-Item -LiteralPath " + dir + " -Recurse -Force -ErrorAction Stop\n" +
