@@ -153,3 +153,54 @@ func TestAgentTTLGreaterThanHeartbeat(t *testing.T) {
 		t.Fatalf("TTL %v 必须大于心跳间隔 %ds", agentOfflineAfter, shared.HeartbeatIntervalSec)
 	}
 }
+
+// 已下发卸载的客户端必须用更短的离线判定。
+//
+// 真机时间线：点卸载 → agent 下一次心跳领走（写 sent_at）→ 8 秒后退出。
+// 如果继续按 60 秒 TTL 判离线，界面会在「正在卸载」和「卸载未生效」之间
+// 空转一分钟，用户以为卡住了（实测 75 秒才出结果）。
+func TestAgentOfflineFasterWhenUninstalling(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.CreateAgent(&shared.Agent{ID: "ag2", Name: "pc2", Os: "linux", Arch: "amd64", InstallToken: "it", AgentToken: "at"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateAgentHeartbeat("ag2", nil, "", "0.7.5"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RequestAgentUninstall("ag2"); err != nil {
+		t.Fatal(err)
+	}
+	if !db.ConsumeAgentUninstall("ag2") {
+		t.Fatal("心跳没领到卸载指令")
+	}
+
+	// 把 last_seen 拨到 25 秒前：常规 TTL（60s）下仍应在线，卸载 TTL（20s）下应离线。
+	if _, err := db.Exec("UPDATE agents SET last_seen=datetime('now','-25 seconds') WHERE id=?", "ag2"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetAgent("ag2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Online {
+		t.Fatalf("已下发卸载的客户端 25 秒没心跳就应判离线（卸载 TTL %v），实际仍在线", agentOfflineAfterUninstall)
+	}
+
+	// 但没下发过卸载的客户端，25 秒不能判离线（网络抖一下就会误报）。
+	if err := db.CreateAgent(&shared.Agent{ID: "ag3", Name: "pc3", Os: "linux", Arch: "arm64", InstallToken: "it", AgentToken: "at"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateAgentHeartbeat("ag3", nil, "", "0.7.5"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE agents SET last_seen=datetime('now','-25 seconds') WHERE id=?", "ag3"); err != nil {
+		t.Fatal(err)
+	}
+	normal, err := db.GetAgent("ag3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !normal.Online {
+		t.Fatal("普通客户端 25 秒没心跳不该判离线（常规 TTL 是 60 秒）")
+	}
+}

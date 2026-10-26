@@ -282,6 +282,14 @@ func (db *DB) ListAgents() ([]shared.Agent, error) {
 // 心跳间隔是 15 秒，取 4 个周期，留出抖动与短时网络故障的余量。
 const agentOfflineAfter = 60 * time.Second
 
+// agentOfflineAfterUninstall 已下发卸载的客户端用更短的判定。
+//
+// 它被明确要求停止，不会再有心跳。继续按 60 秒等，界面就会在「正在卸载」和
+// 「卸载未生效」之间空转一分钟 —— 用户看到的是「点了没反应」，而 agent 其实
+// 8 秒就退出了（真机实测：面板要 75 秒才肯认它走了）。
+// 20 秒足够覆盖「最后一次心跳 + 清理脚本执行」这个窗口。
+const agentOfflineAfterUninstall = 20 * time.Second
+
 // applyAgentTTL 把「心跳已过期」的客户端标成离线。
 //
 // 没有这条规则时 online 只会被心跳置 1、永远不会回到 0：客户端被卸载、宕机、
@@ -290,7 +298,12 @@ func applyAgentTTL(a *shared.Agent) {
 	if !a.Online {
 		return
 	}
-	if a.LastSeen.IsZero() || time.Since(a.LastSeen) > agentOfflineAfter {
+	ttl := agentOfflineAfter
+	// 卸载中的客户端等不了 60 秒：它已被要求退出，不会再有新心跳。
+	if a.UninstallSentAt != nil {
+		ttl = agentOfflineAfterUninstall
+	}
+	if a.LastSeen.IsZero() || time.Since(a.LastSeen) > ttl {
 		a.Online = false
 	}
 }

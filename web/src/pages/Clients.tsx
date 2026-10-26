@@ -18,12 +18,13 @@ import {
 // 卸载宽限期。
 //
 // 客户端收到指令后：先停 frpc，再起一个独立的清理进程删文件，agent 本身还要
-// 多存活 8 秒（否则清理进程会被 systemd 的 cgroup 回收一起杀掉），而本页是
-// 10 秒一轮询。这段时间里它必然还会心跳好几轮 —— 早期实现把「还在心跳」直接
-// 判成失败，还写死了「多半是 agent 没有 root / 管理员权限」。
-// 但 Windows 客户端是以 SYSTEM 身份由计划任务跑的，权限根本不是瓶颈；
-// 这句结论只会把用户带到错误的方向（去提权，而真正的原因可能是自启没摘掉）。
-const UNINSTALL_GRACE_MS = 60_000
+// 多存活 8 秒（否则清理进程会被 systemd 的 cgroup 回收一起杀掉）。
+// 面板侧这时还认它在线（离线判定走的是「卸载中」的短 TTL，20 秒），
+// 所以宽限期只需要覆盖「清理脚本执行 + 一次离线判定」这一段。
+//
+// 早期取值 60 秒：配合常规 60 秒离线 TTL，用户要等 75 秒才看到结果，
+// 期间界面一直停在「正在卸载」，看起来就是卡住了（真机反馈过）。
+const UNINSTALL_GRACE_MS = 30_000
 
 /** 距卸载指令被心跳领走过了多久（毫秒）。解析不出来按「已超时」处理。 */
 function sinceUninstallSent(a: Agent): number {
@@ -32,6 +33,11 @@ function sinceUninstallSent(a: Agent): number {
   const t = Date.parse(raw)
   if (Number.isNaN(t)) return Number.POSITIVE_INFINITY
   return Date.now() - t
+}
+
+/** 这台机器是否正处在「已下发卸载、还在等它退干净」的窗口里。 */
+function isUninstalling(a: Agent): boolean {
+  return !!a.uninstall_sent_at && a.online && sinceUninstallSent(a) < UNINSTALL_GRACE_MS
 }
 
 const TABS: { key: CommandKind; label: string }[] = [
@@ -114,6 +120,7 @@ function agentState(a: Agent): {
 } {
   const sent = !!a.uninstall_sent_at
   if (sent && a.online && sinceUninstallSent(a) < UNINSTALL_GRACE_MS) {
+    const waited = Math.max(0, Math.round(sinceUninstallSent(a) / 1000))
     return {
       label: '正在卸载',
       tone: 'warn',
@@ -121,9 +128,11 @@ function agentState(a: Agent): {
       gone: false,
       note: (
         <>
-          客户端已收到卸载指令，正在停服务、摘开机自启、删文件。它要退干净大约需要几秒，
-          这期间仍会心跳一两轮 —— <b>这时显示「在线」是正常的，不是没生效</b>。
-          一分钟后它还在心跳，才会判成「卸载未生效」。
+          客户端已收到卸载指令，正在停服务、摘开机自启、删文件。
+          <b>这期间它还会心跳一两轮，显示「在线」是正常的</b>，不是没生效。
+          <br />
+          已等待 <b>{waited} 秒</b>（一般 30 秒内退干净，超过才会判「卸载未生效」）。
+          页面切到后台时浏览器会限制定时器，回来点一下刷新即可。
         </>
       ),
     }
@@ -201,13 +210,17 @@ export function Clients() {
   // 客户端状态必须自己刷。
   //
   // 面板不推事件，这个页面原来只在进入时取一次数据，于是「agent 早就停了、
-  // 甚至已经卸载了，卡片还一直显示在线」—— 而离线判定（60 秒无心跳）是在
-  // 后端读取时算的，前端不来取就永远看不到。10 秒一轮，比心跳 15 秒略快，
-  // 状态最多滞后一个周期。
+  // 甚至已经卸载了，卡片还一直显示在线」—— 而离线判定（心跳过期）是在
+  // 后端读取时算的，前端不来取就永远看不到。
+  //
+  // 常规 10 秒一轮，比心跳 15 秒略快。但**有客户端正在卸载时加快到 3 秒**：
+  // 那几秒里状态正在变，10 秒粒度会让用户以为卡住了（「过了一分钟还在转」）。
+  const uninstalling = agents.some(isUninstalling)
   useEffect(() => {
-    const h = window.setInterval(() => void loadAgents(), 10000)
+    const ms = uninstalling ? 3000 : 10000
+    const h = window.setInterval(() => void loadAgents(), ms)
     return () => window.clearInterval(h)
-  }, [loadAgents])
+  }, [loadAgents, uninstalling])
 
   /** 云端下发卸载：标记随该客户端下一次心跳下发，由它自己清理并退出。 */
   async function uninstallAgent(id: string, name: string, online: boolean) {
