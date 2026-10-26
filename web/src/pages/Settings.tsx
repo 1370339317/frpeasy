@@ -209,6 +209,29 @@ function Btn({
   )
 }
 
+/**
+ * 表单草稿：留在模块作用域里，切走页面（组件卸载）再回来不会丢。
+ *
+ * 设置页的输入是"一次性工作"：加一个源、再去别的页面看一眼隧道、回来继续 ——
+ * 这是最自然的操作。而 SPA 切页会卸载组件，所有 useState 一起消失，
+ * 表现就是「刚加的那个源没了」「刚才测出来的数据没了」，且没有任何提示。
+ * 草稿只影响显示，**不写库**；要不要落库仍然只由「保存」决定。
+ */
+type SettingsDraft = {
+  publicAddr: string
+  serverSources: string
+  clientSources: string
+  pStart: string
+  pEnd: string
+  bindPort: string
+  dashPort: string
+  mode: string
+  probe: Record<string, ProbeResult>
+  clientProbe: Record<string, ProbeResult>
+}
+
+let draft: SettingsDraft | null = null
+
 export function SettingsPage() {
   const {
     settings,
@@ -222,31 +245,62 @@ export function SettingsPage() {
     toast,
   } = useApp()
 
-  // 表单是受控的：只在 settings 真的刷新时回填，避免每次渲染把用户输入冲掉
-  const [publicAddr, setPublicAddr] = useState('')
+  // 表单是受控的：只在 settings 真的刷新时回填，避免每次渲染把用户输入冲掉。
+  // 初值优先取草稿（上次离开这个页面时的样子），其次才是库里的默认。
+  const [publicAddr, setPublicAddr] = useState(draft?.publicAddr ?? '')
   // 两个源列表（有序、逗号分隔）。以前的单值 mirror_base 已被它们取代。
-  const [serverSources, setServerSources] = useState('github')
-  const [clientSources, setClientSources] = useState('panel')
+  const [serverSources, setServerSources] = useState(draft?.serverSources ?? 'github')
+  const [clientSources, setClientSources] = useState(draft?.clientSources ?? 'panel')
   // 逐项测速结果，key 是源 token。两个列表各一份 ——
   // ① 是面板自己的链路，测完可以据此重排；② 测的是"这个前缀能不能取出文件"，
   // 结论以面板网络为准，**不重排**（排序交给客户端按自己的网络测）。
-  const [probe, setProbe] = useState<Record<string, ProbeResult>>({})
-  const [clientProbe, setClientProbe] = useState<Record<string, ProbeResult>>({})
+  const [probe, setProbe] = useState<Record<string, ProbeResult>>(draft?.probe ?? {})
+  const [clientProbe, setClientProbe] = useState<Record<string, ProbeResult>>(draft?.clientProbe ?? {})
   // 下载策略。auto = 每次真要下载前临时测速排优（推荐）；manual = 严格按列表顺序。
-  const [mode, setMode] = useState('manual')
+  const [mode, setMode] = useState(draft?.mode ?? 'manual')
   // 最近一次排优结果 + 最近的排优/下载记录。都是"事后追查"用的，
   // 所以从接口读而不是只依赖本次页面会话里点了什么。
   const [rank, setRank] = useState<RankInfo | null>(null)
+  // 客户端列表那侧的「上次测速」（面板经该前缀取文件的结果），与上面那份分开存。
+  const [clientRank, setClientRank] = useState<RankInfo | null>(null)
   const [events, setEvents] = useState<SourceEvent[]>([])
-  const [pStart, setPStart] = useState('')
-  const [pEnd, setPEnd] = useState('')
-  const [bindPort, setBindPort] = useState('')
-  const [dashPort, setDashPort] = useState('')
+  const [pStart, setPStart] = useState(draft?.pStart ?? '')
+  const [pEnd, setPEnd] = useState(draft?.pEnd ?? '')
+  const [bindPort, setBindPort] = useState(draft?.bindPort ?? '')
+  const [dashPort, setDashPort] = useState(draft?.dashPort ?? '')
   const [token, setToken] = useState('')
   const [pass, setPass] = useState('')
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testingClient, setTestingClient] = useState(false)
+
+  // 每次改动都记进草稿。切页面回来时从这里恢复，而不是从库里 ——
+  // 用户没点保存的输入不该因为换了个页面就消失。
+  useEffect(() => {
+    draft = {
+      publicAddr,
+      serverSources,
+      clientSources,
+      pStart,
+      pEnd,
+      bindPort,
+      dashPort,
+      mode,
+      probe,
+      clientProbe,
+    }
+  }, [
+    publicAddr,
+    serverSources,
+    clientSources,
+    pStart,
+    pEnd,
+    bindPort,
+    dashPort,
+    mode,
+    probe,
+    clientProbe,
+  ])
 
   // 表单只在「第一次拿到设置」时回填一次。
   //
@@ -257,7 +311,8 @@ export function SettingsPage() {
   // 用户看到的现象就是「填了没生效 / 更新后配置消失」。
   //
   // hydrated 标记保证：除非保存成功后再显式重新回填，否则不动用户的输入。
-  const hydrated = useRef(false)
+  // 有草稿时直接当作已回填：草稿就是用户正在编辑的那份。
+  const hydrated = useRef(draft !== null)
 
   // fillForm 把「库里的值」灌进表单。抽出来是为了让「放弃修改」也能复用：
   // 那个按钮原来只是重新 loadSettings，而 loadSettings 会因为 hydrated 已置位
@@ -373,11 +428,36 @@ export function SettingsPage() {
     toast,
   ])
 
-  // 排优记录与最近一次自动排优。打开页面时取一次，测速后再取一次。
+  // 排优记录与两侧「上次测速」。打开页面时取一次，测速后再取一次。
+  //
+  // 两侧各取一次：`last_rank` 是按侧存的（面板自己测的 / 面板测客户端列表的），
+  // 只取一次会把另一侧的结论丢掉。事件列表合并展示 —— 记录区本来就要看两边。
   const loadSourceLog = useCallback(async () => {
-    const r = await api<SourceEventsResponse>('GET', '/api/sources/events?limit=30')
-    setEvents(r.events ?? [])
-    setRank(r.last_rank ?? null)
+    const [srv, cli] = await Promise.all([
+      api<SourceEventsResponse>('GET', '/api/sources/events?side=server&limit=30'),
+      api<SourceEventsResponse>('GET', '/api/sources/events?side=client&limit=30'),
+    ])
+    setRank(srv.last_rank ?? null)
+    setClientRank(cli.last_rank ?? null)
+    const merged = [...(srv.events ?? []), ...(cli.events ?? [])]
+      .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
+      .slice(0, 30)
+    setEvents(merged)
+
+    // 把上次的逐项结果铺回列表行上。
+    //
+    // 原来这些结果只存在组件状态里，切走页面（组件卸载）就没了 ——
+    // 回来只看到"没有测速数据"，而结论其实还在服务端（rank 缓存）。
+    // 排优缓存过期也照样铺回去，rank 块上会标「已超过 10 分钟」。
+    const seed = (rs?: ProbeResult[] | null) => {
+      const m: Record<string, ProbeResult> = {}
+      for (const x of rs ?? []) if (x.token) m[x.token] = x
+      return m
+    }
+    const sp = seed(srv.last_rank?.results)
+    if (Object.keys(sp).length) setProbe(sp)
+    const cp = seed(cli.last_rank?.results)
+    if (Object.keys(cp).length) setClientProbe(cp)
   }, [])
 
   useEffect(() => {
@@ -468,6 +548,10 @@ export function SettingsPage() {
     }
   }
 
+  // 最近一次「客户端自己测」的记录：只有 agent 上报的那条才有 agent_name
+  // （面板替客户端列表测的那条没有）。用它证明客户端确实在做本地排优。
+  const agentRank = events.find((e) => e.kind === 'rank' && (e.agent_name ?? '').trim() !== '') ?? null
+
   const nicChips = [
     ...(net?.public_ip
       ? [{ ip: net.public_ip, name: '公网出口 IP · 推荐', tone: 'info' as const }]
@@ -531,11 +615,11 @@ export function SettingsPage() {
         title="二进制下载"
         desc="先选策略；两个有序列表从左往右试，第一个能用的就停"
       >
-        <Field label="下载策略">
+        <Field label="下载策略（① 面板自己取、② 客户端取，两个列表共用这一个策略）">
           <div className="flex flex-wrap gap-2">
             <Chip
               selected={mode === 'auto'}
-              sub="触发下载时临时测速排优，推荐"
+              sub="下载前各自测速排优，推荐"
               onClick={() => setMode('auto')}
             >
               自动择优
@@ -558,7 +642,12 @@ export function SettingsPage() {
           <b>手动排序</b>：完全按你排的顺序走，一秒不多等。
           <br />
           两种策略下<b>列表本身都还有用</b>：手动时它就是顺序；自动时它是候选集合，
-          同时作为同分时的偏好。客户端也会按这个策略自己测 —— 面板测不到它那台机器的网络。
+          同时作为同分时的偏好。
+          <br />
+          <b>策略对两侧都生效，但测速是各测各自的</b>：面板测面板这台机器的链路，
+          客户端测它自己那台机器的（两块网络可能完全不同）。所以 ② 那份列表的
+          「自动」不在面板上执行，而是随配置下发、由客户端本地执行 ——
+          这正是下面 ② 里那块状态说明在讲的事。
         </Hint>
 
         <div className="mb-2 mt-4 text-[13px] font-semibold text-fg">
@@ -607,13 +696,41 @@ export function SettingsPage() {
           最后一项可以是「GitHub 直连」——没配任何前缀时它最慢。
           <br />
           上面那个测速<b>按面板这条链路算</b>：能判「这个前缀是不是死的、拼没拼错」，
-          但速度不代表客户端那台机器，也<b>不会替你排序</b>。排序由客户端自己来 ——
-          选「自动择优」后它每次下载前在本地测一遍，结果随心跳回到面板，
-          显示在客户端卡片的「二进制来源」里。
+          但速度不代表客户端那台机器，也<b>不会替你排序</b>。
           <br />
           改完下一轮心跳就生效，<b>不用重装客户端</b>。安装那一步固定经面板（装的时候 agent
           还没跑起来、这份顺序还没下发，而且装不上比走慢一点的通道严重得多）。
         </Hint>
+
+        {/* 这一块是他反复问的问题：「客户端到底按不按这个顺序、会不会自己测」。
+            把当前策略下客户端的确切行为写出来，并把真机器上报的结果摆在下面。 */}
+        <div className="mt-2 rounded-[9px] border border-border bg-chip px-3 py-2 text-[12.5px] leading-relaxed">
+          {mode === 'auto' ? (
+            <>
+              当前策略 <b>自动择优</b>：客户端每次真要下载前，<b>在它自己那台机器上</b>
+              把候选源测一遍（能不能下 / 中位速度 / 抖动，2 轮 × 512KB），按这次实测排序后
+              逐个回退，结果缓存 10 分钟。排优与每次下载尝试都会上报到这里。
+            </>
+          ) : (
+            <>
+              当前策略 <b>手动排序</b>：客户端<b>严格按上面这个顺序</b>逐个试，<b>不测速</b>。
+              想让它自己做稳定性测试与择优，把上面的「下载策略」切成「自动择优」——
+              切换后下一轮心跳（约 15 秒）就下发，不用重装。
+            </>
+          )}
+        </div>
+        {agentRank && (
+          <div className="mt-1.5 text-[12px] text-dim">
+            最近一次<b>客户端自己测</b>：{agentRank.agent_name} ·{' '}
+            {new Date(agentRank.at).toLocaleString()} · {agentRank.detail || agentRank.source || '—'}
+          </div>
+        )}
+        {clientRank && (
+          <div className="mt-1 text-[12px] text-dim">
+            上次在<b>面板这边</b>测这份列表：{clientRank.summary || '—'}
+            {clientRank.stale && '（已超过 10 分钟，仅供参考）'}
+          </div>
+        )}
 
         {rank && (
           <div className="mt-4 rounded-[9px] border border-border bg-chip px-3 py-2 text-[12.5px]">

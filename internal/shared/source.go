@@ -40,9 +40,14 @@ const (
 	sourceTokenDirect = SourceDirect
 )
 
-// maxSources 列表上限。三个已经够用（国内前缀 → 备用前缀 → 直连），
-// 再多只会让每次失败都多等几轮超时，用户体感更差。
-const maxSources = 4
+// 列表长度**不设上限**。
+//
+// 早先这里有一个"最多 4 个"的硬限制，理由是"每多一个失败都要多等一轮超时"。
+// 但那条限制拦的不是危险操作，而是用户自己排的回退链：
+//   - manual 模式下多一项的代价是**零**（前面成功了就不往下走）；
+//   - auto 模式下多一项的代价是多测一次，那是用户看得到的几秒钟。
+// 更要紧的是它会在最不该出错的地方报错：刚加完第五个源、点测速时直接 400，
+// 用户不知道是"限制"还是"配置有错"。真正的代价要在界面上说清，不要设卡。
 
 // Source 一个候选下载源。
 type Source struct {
@@ -117,8 +122,8 @@ func (s Source) Same(o Source) bool {
 //
 // 空串返回 nil（调用方据此判断"没配"，退回默认值），**不当作错误**：
 // 设置项刚创建、迁移途中都可能短暂为空。
-// 出现无法识别的 token、或列表超长则报错 —— 静默丢掉一项会让
-// 「我配了三个只生效两个」变成没人能解释的现象。
+// 出现无法识别的 token 则报错 —— 静默丢掉一项会让「我配了三个只生效两个」
+// 变成没人能解释的现象。列表长度不设上限，见文件头。
 func ParseSources(raw string) ([]Source, error) {
 	var out []Source
 	for _, part := range strings.Split(raw, ",") {
@@ -141,9 +146,6 @@ func ParseSources(raw string) ([]Source, error) {
 			continue
 		}
 		out = append(out, src)
-	}
-	if len(out) > maxSources {
-		return nil, fmt.Errorf("最多 %d 个源（现在 %d 个）：每多一个失败都要多等一轮超时", maxSources, len(out))
 	}
 	return out, nil
 }

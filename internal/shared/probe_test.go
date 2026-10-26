@@ -126,3 +126,17 @@ func TestProbeSummaryIsReadable(t *testing.T) {
 		t.Fatalf("不可用的源要写原因: %s", s)
 	}
 }
+
+// 源列表不设数量上限。早先那条"最多 4 个"的硬限制拦的不是危险操作，
+// 而是用户自己排的回退链：manual 下多一项代价为零，auto 下多一次测速而已，
+// 却会在"刚加完第五个源、点测速"时直接报错，让人以为配置写错了。
+func TestParseSourcesHasNoCountLimit(t *testing.T) {
+	raw := "github,https://a.example,https://b.example,https://c.example,https://d.example,https://e.example"
+	list, err := ParseSources(raw)
+	if err != nil {
+		t.Fatalf("六个源不该报错: %v", err)
+	}
+	if len(list) != 6 {
+		t.Fatalf("应当全部保留，实际 %d 个", len(list))
+	}
+}
