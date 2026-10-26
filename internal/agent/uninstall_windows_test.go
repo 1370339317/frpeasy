@@ -86,7 +86,8 @@ func TestCleanupScriptLogsFailureWhenLocked(t *testing.T) {
 	if !strings.Contains(log, "目录还存在=") {
 		t.Fatalf("缺少自检行，用户无法判断到底删干净没有：\n%s", log)
 	}
-	if strings.Contains(log, "目录还存在=True") && !strings.Contains(log, "删目录失败") {
+	// 现在会重试 10 次，日志里每条是「删目录第 N 次失败: ...」
+	if strings.Contains(log, "目录还存在=True") && !strings.Contains(log, "删目录第") {
 		t.Fatalf("目录还在却没记录失败原因：\n%s", log)
 	}
 }

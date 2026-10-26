@@ -72,11 +72,25 @@ func cleanupScript(dataDir, logPath, exePath, taskName string) string {
 		"L 'stop-process 已发出'\n" +
 		"Start-Sleep 2\n" +
 		exeDel +
-		"try {\n" +
-		"  Remove-Item -LiteralPath " + dir + " -Recurse -Force -ErrorAction Stop\n" +
-		"  L '删目录 OK'\n" +
-		"} catch {\n" +
-		"  L ('删目录失败: ' + $_.Exception.Message)\n" +
+		// Stop-Process 是异步的：发出去的那一刻进程还在，句柄也没释放。
+		// 实测「Start-Sleep 2 后删目录」会得到"无法删除，因为它在使用中"，
+		// 于是目录里留下 bin/、frpc/、agent.state —— 任务和 exe 都删了，
+		// 只剩一个空壳目录，看起来像"卸了一半"。
+		// 先等进程真的消失，再删；删的时候还要重试（Defender/索引服务会短暂占用）。
+		"for ($i = 0; $i -lt 20; $i++) {\n" +
+		"  if (-not (Get-Process -Name " + task + " -ErrorAction SilentlyContinue)) { break }\n" +
+		"  Start-Sleep -Milliseconds 500\n" +
+		"}\n" +
+		"L 'agent 进程已退出'\n" +
+		"for ($i = 1; $i -le 10; $i++) {\n" +
+		"  try {\n" +
+		"    Remove-Item -LiteralPath " + dir + " -Recurse -Force -ErrorAction Stop\n" +
+		"    L ('删目录 OK（第 ' + $i + ' 次）')\n" +
+		"    break\n" +
+		"  } catch {\n" +
+		"    L ('删目录第 ' + $i + ' 次失败: ' + $_.Exception.Message)\n" +
+		"    Start-Sleep -Seconds 1\n" +
+		"  }\n" +
 		"}\n" +
 		"$leftDir = Test-Path -LiteralPath " + dir + "\n" +
 		"L ('自检 目录还存在=' + $leftDir)\n" +

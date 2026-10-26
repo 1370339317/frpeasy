@@ -56,7 +56,10 @@ func (db *DB) FindAgentToReuse(name, osName, arch string, ips []string) (*shared
 func (db *DB) ReattachAgent(a *shared.Agent) error {
 	ipsB, _ := json.Marshal(a.IPs)
 	_, err := db.Exec(
-		"UPDATE agents SET os=?, arch=?, install_token=?, agent_token=?, online=1, last_seen=CURRENT_TIMESTAMP, ips=?, frp_version=?, agent_version=?, uninstall_requested=0, uninstall_sent_at=NULL WHERE id=?",
+		// uninstall_by_local 必须一起清。它记录的是"上一次卸载是谁发起的"，
+		// 重装后不清会残留 true，界面就把这次装完之后的状态显示成
+		// 「那台机器在本机执行了卸载」—— 而事实是刚刚装好、正在正常跑。
+		"UPDATE agents SET os=?, arch=?, install_token=?, agent_token=?, online=1, last_seen=CURRENT_TIMESTAMP, ips=?, frp_version=?, agent_version=?, uninstall_requested=0, uninstall_sent_at=NULL, uninstall_by_local=0 WHERE id=?",
 		a.Os, a.Arch, a.InstallToken, a.AgentToken, string(ipsB), a.FRPVersion, a.AgentVersion, a.ID,
 	)
 	return err
