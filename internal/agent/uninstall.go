@@ -37,12 +37,13 @@ func (c *Client) selfUninstall() {
 	if c.frpc != nil {
 		c.frpc.Stop()
 	}
-	// 先报备再删：清理脚本会把 agent.state 一起删掉，之后就没凭据了。
-	// 面板收到后立刻把这条记录标成「已卸载」，而不是等 60 秒心跳超时后
-	// 显示「离线」—— 后者分不清「被卸载」和「关机了」。
-	if err := c.goodbye(); err != nil {
-		fmt.Println("[agent] 卸载前报备失败（不影响卸载）:", err)
-	}
+	// **这里不报备**。走到这条路径说明是面板下发的卸载 —— 面板本来就知道，
+	// 下发时已经写了 uninstall_sent_at。再调 goodbye 会把记录标成
+	// uninstall_by_local（"那台机器在本机执行的卸载"），界面上就变成了
+	// "用户自己在那台机器上跑了卸载命令"，与事实相反。
+	//
+	// 报备只用于**本机执行脚本卸载**那条路（install.sh / install.ps1 的
+	// --uninstall 会调 `agent --goodbye`），那里面板确实不知道。
 	if err := startSelfCleanup(c.dataDir); err != nil {
 		fmt.Println("[agent] 无法启动清理进程，请手动卸载:", err)
 		return
