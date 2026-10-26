@@ -152,6 +152,13 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		case "frp_version":
 			// 空值合法：跟随最新稳定版。
+			// 版本变了必须重启 frps，否则"改了版本"只改了一个字符串，
+			// 服务端还跑着旧二进制 —— 而界面上目标版本已经变了。
+			// 重启是安全的：Start 会先确保新二进制就绪，失败就直接返回，
+			// 旧进程不受影响（killStrayFrps 在 EnsureBinary 之后才执行）。
+			if v != p.db.GetSetting(k) {
+				needFrpsRestart = true
+			}
 			_ = p.db.SetSetting(k, v)
 			changedKeys = append(changedKeys, k)
 		case "port_range_start", "port_range_end":

@@ -232,12 +232,28 @@ func (m *FrpsManager) EnsureBinary() (string, error) {
 			if err != nil {
 				return "", fmt.Errorf("解析资源失败：%w", err)
 			}
-			path, err := shared.DownloadAndExtract(src.Apply(url), m.binDir, "frps")
-			if err != nil {
-				return "", fmt.Errorf("下载/解压失败（%s）：%w", url, err)
+			// **先解压到临时目录，再 rename 到最终位置**。
+			//
+			// 直接解压到 bin/ 会覆盖正在运行的 frps 可执行文件，Linux 上会得到
+			// "text file busy"（ETXTBSY）—— 换版本必然失败，而且是在
+			// 「下载 20MB 都成功了」之后才失败，报错看着像文件被占用，很难联想到
+			// 是"自己正在跑"。rename 是原子替换，允许目标正在运行。
+			tmpDir, terr := os.MkdirTemp(m.binDir, ".frpsext-*")
+			if terr != nil {
+				return "", fmt.Errorf("创建临时目录失败：%w", terr)
 			}
+			defer os.RemoveAll(tmpDir)
+			extracted, derr := shared.DownloadAndExtract(src.Apply(url), tmpDir, "frps")
+			if derr != nil {
+				return "", fmt.Errorf("下载/解压失败（%s）：%w", url, derr)
+			}
+			dst := m.binaryPath()
+			if rerr := os.Rename(extracted, dst); rerr != nil {
+				return "", fmt.Errorf("保存 frps 失败（%s）：%w", dst, rerr)
+			}
+			_ = os.Chmod(dst, 0o755)
 			_ = os.WriteFile(m.versionPath(), []byte(tag), 0o644)
-			return path, nil
+			return dst, nil
 		})
 }
 
@@ -569,11 +585,57 @@ func (m *FrpsManager) AutoStart() {
 		log.Printf("[frps] 未找到已安装的二进制（%s），跳过自动启动；到面板「服务端 frps」页启动一次即可", m.binaryPath())
 		return
 	}
+	// 面板重启后 frps 可能仍在跑：它是独立进程，面板退出不会带走它，
+	// 隧道也一直通着。这时候再走 Start() 没有收益 ——
+	// 它会在 EnsureBinary 之后 killStrayFrps 把正在服务的实例杀掉重启，
+	// 表现为「面板一升级，所有隧道闪断一次」，而且一旦重启过程出任何问题
+	// （比如换版本时二进制被占用），面板就会显示"未运行"而隧道其实一直是通的。
+	//
+	// 所以先探测 bind 端口：已在监听就接管它的状态。
+	if m.portListening() {
+		m.adoptRunning()
+		return
+	}
 	if err := m.Start(); err != nil {
 		log.Printf("[frps] 自动启动失败: %v", err)
 		return
 	}
 	log.Printf("[frps] 已随面板自动启动")
+}
+
+// portListening bind 端口是否已在监听（说明有 frps 实例在服务）。
+func (m *FrpsManager) portListening() bool {
+	bindPort, _ := strconv.Atoi(m.db.GetSetting("frps_bind_port"))
+	if bindPort <= 0 {
+		bindPort = shared.DefaultFRPSBindPort
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(bindPort)), time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// adoptRunning 接管一个已在运行的 frps：只恢复面板侧的状态，不动进程。
+//
+// dashPort 直接取设置里的值，**不能**走 generateConfig 里的 pickDashboardPort ——
+// 那个函数会跳过"已被占用"的端口，而 frps 正占着自己的 dashboard 端口，
+// 于是会挑到端口+1，之后所有 dashboard 查询都打到一个没人监听的端口上。
+func (m *FrpsManager) adoptRunning() {
+	dashPort, _ := strconv.Atoi(m.db.GetSetting("dashboard_port"))
+	if dashPort <= 0 {
+		dashPort = shared.DefaultDashboardPort
+	}
+	m.mu.Lock()
+	m.running = true
+	m.starting = false
+	m.dashPort = dashPort
+	m.lastErr, m.lastErrAt = "", time.Time{}
+	m.mu.Unlock()
+	// 立刻刷一次代理状态，避免刚接管的那几秒 UI 显示"离线"。
+	go m.RefreshProxies()
+	log.Printf("[frps] 检测到 bind 端口已在监听，接管运行中的实例（不重启，隧道不中断）")
 }
 
 // Status 返回运行状态与端口探活。
