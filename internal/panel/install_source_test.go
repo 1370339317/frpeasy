@@ -142,3 +142,42 @@ func TestGitAgentURLMatchesReleaseAssetName(t *testing.T) {
 		t.Fatalf("不支持的平台应返回空，实际 %q", got)
 	}
 }
+
+// Git 源可用但「等于直连 GitHub」时必须给出提醒。
+//
+// 实测过：同一台机器经面板 2.3s 拉完 6.6MB（2.87MB/s），直连 github.com 用了 161s
+// （41KB/s）。所以"没配镜像的 Git 源"比面板还慢 —— 用户点它只会更卡，
+// 而界面上不会有任何提示。这条提醒就是为了让这个矛盾在点之前就暴露。
+func TestGitWarnWhenMirrorMissing(t *testing.T) {
+	p := newTestPanel(t)
+	_ = p.db.SetSetting("update_base", "https://github.com/o/r/releases/latest/download")
+
+	_ = p.db.SetSetting("mirror_base", "")
+	f := p.installCommandFields(nil)
+	warn, _ := f["bin_git_warn"].(string)
+	if warn == "" {
+		t.Fatal("没配镜像前缀时，Git 源等于直连 github.com，必须提醒它可能更慢")
+	}
+	if !strings.Contains(warn, "镜像") {
+		t.Fatalf("提醒要指出解决办法（去配镜像前缀）: %s", warn)
+	}
+
+	// 配了镜像之后不该再报怨
+	_ = p.db.SetSetting("mirror_base", "https://ghfast.top/")
+	f = p.installCommandFields(nil)
+	if w, _ := f["bin_git_warn"].(string); w != "" {
+		t.Fatalf("配了镜像前缀后不该再提醒，实际 %q", w)
+	}
+	// 而且命令里的地址要变成经镜像的
+	gitCmd, _ := f["install_command_git"].(string)
+	if !strings.Contains(gitCmd, "https://ghfast.top/https://github.com/o/r/releases/latest/download") {
+		t.Fatalf("镜像前缀应折进 Git 命令: %s", gitCmd)
+	}
+
+	// 自建更新源本来就不用镜像，不该被提醒
+	_ = p.db.SetSetting("mirror_base", "")
+	_ = p.db.SetSetting("update_base", "https://files.example.com/dl")
+	if w, _ := p.installCommandFields(nil)["bin_git_warn"].(string); w != "" {
+		t.Fatalf("自建更新源不需要镜像前缀，不该提醒，实际 %q", w)
+	}
+}

@@ -195,6 +195,8 @@ export interface TunnelsResponse {
   /** 面板没配更新源时为 false —— 此时没有第二个地方可取二进制 */
   bin_git_available: boolean
   bin_git_note: string
+  /** Git 源可用但不推荐时的提醒（例如没配镜像，等于直连 GitHub） */
+  bin_git_warn: string
   /** 卸载命令：在那台机器上直接执行即可（与云端下发卸载互补） */
   uninstall_command: string
   uninstall_command_windows: string

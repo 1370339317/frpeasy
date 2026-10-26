@@ -60,6 +60,8 @@ interface AppData {
   gitBase: string
   gitAvailable: boolean
   gitNote: string
+  /** Git 可用但当前配置下不推荐时的提醒（空 = 没有提醒） */
+  gitWarn: string
   /** 卸载命令：同样按平台分 */
   uninstall: Record<CommandKind, string>
   accessHost: string
@@ -125,6 +127,7 @@ export function AppProvider({
     gitBase: '',
     gitAvailable: false,
     gitNote: '',
+    gitWarn: '',
     uninstall: EMPTY_INSTALL,
     accessHost: '',
     accessSource: 'fallback',
@@ -201,6 +204,7 @@ export function AppProvider({
       gitBase: r.bin_git_base || '',
       gitAvailable: !!r.bin_git_available,
       gitNote: r.bin_git_note || '',
+      gitWarn: r.bin_git_warn || '',
       uninstall: {
         linux: r.uninstall_command || '',
         win: r.uninstall_command_windows || '',

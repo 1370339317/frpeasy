@@ -285,9 +285,16 @@ func (p *Panel) gitAgentURL(osName, arch string) string {
 func (p *Panel) installCommandFields(r *http.Request) map[string]any {
 	base := p.gitBinBase()
 	note := ""
+	warn := ""
 	if base == "" {
 		note = "面板还没配置更新源，客户端没有第二个地方能取到二进制，因此只提供「面板」一个来源。" +
 			"到「设置 → 更新源」填上 GitHub Release 地址（或镜像前缀）后，这里会出现 Git 选项。"
+	} else if p.db.GetSetting("mirror_base") == "" && strings.Contains(base, "github.com") {
+		// 没配镜像前缀时 Git 源就是裸 github.com —— 国内这条链路实测只有 40KB/s 量级，
+		// 比经面板还慢。不提示的话，用户会以为"换条路应该更快"，结果更卡。
+		warn = "Git 源现在指向的是 github.com 本身，没有走镜像。国内网络下这条路通常比面板还慢" +
+			"（实测 40KB/s 量级）。要让它更快，去「设置 → 镜像前缀」填一个（例如 https://ghfast.top/），" +
+			"Git 命令里的地址会自动变成经镜像的地址。"
 	}
 	return map[string]any{
 		// 面板来源（默认，纯内网环境必须用这个）
@@ -298,9 +305,10 @@ func (p *Panel) installCommandFields(r *http.Request) map[string]any {
 		"install_command_git":         p.buildInstallCommand(r, BinSourceGit),
 		"install_command_windows_git": p.buildInstallCommandWindows(r, BinSourceGit),
 		"install_command_android_git": p.buildInstallCommandAndroid(r, BinSourceGit),
-		// UI 用来显示「Git 源实际会从哪里下」以及为什么不可用
+		// UI 用来显示「Git 源实际会从哪里下」、为什么不可用、以及什么时候不该用
 		"bin_git_base":      base,
 		"bin_git_available": base != "",
 		"bin_git_note":      note,
+		"bin_git_warn":      warn,
 	}
 }

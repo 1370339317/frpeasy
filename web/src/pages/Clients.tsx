@@ -54,17 +54,22 @@ function SourcePicker({
   value,
   onChange,
   gitAvailable,
+  gitWarn,
 }: {
   value: BinSource
   onChange: (v: BinSource) => void
   gitAvailable: boolean
+  /** 非空表示「能用但不推荐」，悬停时优先展示这句话 */
+  gitWarn: string
 }) {
   const items: { key: BinSource; label: string; hint: string; disabled: boolean }[] = [
     { key: 'panel', label: '面板', hint: '客户端只连面板，任何环境都能装', disabled: false },
     {
       key: 'git',
       label: 'Git',
-      hint: gitAvailable ? '直接从更新源取，不占面板带宽' : '还没配更新源，暂不可用',
+      hint: !gitAvailable
+        ? '还没配更新源，暂不可用'
+        : gitWarn || '直接从更新源取，不占面板带宽',
       disabled: !gitAvailable,
     },
   ]
@@ -260,6 +265,7 @@ export function Clients() {
     gitBase,
     gitAvailable,
     gitNote,
+    gitWarn,
     loadAll,
     loadAgents,
     toast,
@@ -361,7 +367,12 @@ export function Clients() {
       >
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <span className="text-xs text-dim">二进制来源</span>
-          <SourcePicker value={source} onChange={setSource} gitAvailable={gitAvailable} />
+          <SourcePicker
+            value={source}
+            onChange={setSource}
+            gitAvailable={gitAvailable}
+            gitWarn={gitWarn}
+          />
           <span className="text-xs text-dim">
             {usingGit ? (
               <>
@@ -374,7 +385,11 @@ export function Clients() {
           </span>
         </div>
         <Pre>{cmd}</Pre>
-        {usingGit ? (
+        {usingGit && gitWarn ? (
+          // 选了 Git 但这套配置下它并不快（最常见的是没配镜像前缀，等于直连 GitHub）。
+          // 必须在这里说，否则用户会以为"换了条路应该更快"，实际更卡却不知道为什么。
+          <div className="mt-2 text-xs leading-[1.6] text-warn-fg">{gitWarn}</div>
+        ) : usingGit ? (
           <div className="mt-2 text-xs leading-[1.6] text-dim">
             选了 Git 源：这台机器必须能出网访问上面的地址。agent 与 frpc 都从那里取，
             版本仍由面板决定。如果拉不动（内网机器常见），换回「面板」重新复制一条命令重装即可。
