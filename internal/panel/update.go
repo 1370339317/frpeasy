@@ -119,6 +119,13 @@ type versionAgent struct {
 	Hosted       string `json:"hosted"`
 	HostedSHA256 string `json:"hosted_sha256"`
 	HostedSize   int64  `json:"hosted_size"`
+	// ClientVersion 已接入的客户端**实际会收到**的那一版（取第一台作代表）。
+	//
+	// 与 Hosted 的区别：Hosted 是"面板自己那台机器上缓存的那份"（服务器通常
+	// 只跑面板，它那份可能是 linux/amd64、而且可能停在旧版本）。两者不同时
+	// 界面必须优先显示这个 —— 否则会出现「卡片写着 0.7.16，而在线客户端
+	// 明明是 0.7.24、落后 0 台」这种自相矛盾的画面（实测踩到）。
+	ClientVersion string `json:"client_version"`
 	// HostedNote 解释 hosted 这个版本号是怎么来的（本机内置 / 已接入客户端的
 	// 那份 / 清单登记、按需拉取）。服务器只装面板时本机平台产物必然不存在，
 	// UI 需要能说明"这不是故障"，否则用户会去追一个不存在的文件。
@@ -248,6 +255,7 @@ func (p *Panel) collectVersions(force bool) versionResponse {
 	// hosted 的语义是"面板现在能给客户端提供哪一版"，而不是"本机平台那份在哪"。
 	// 本机平台没有产物是常态（服务器只装面板、不跑客户端），依次退到：
 	// 已接入客户端拿到的那份 → 清单登记版本（该平台首次取用时按需拉取）。
+	resp.Agent.ClientVersion = clientVer
 	if resp.Agent.Hosted == "" {
 		switch {
 		case clientVer != "":

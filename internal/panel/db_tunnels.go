@@ -12,6 +12,37 @@ import (
 
 // --- Tunnels ---
 
+// validateLocalAddr 校验客户端侧的本地服务地址。
+//
+// 为什么要在这里拦：这个字符串会被原样写进客户端的 frpc.toml（localIP/localPort）。
+// 端口写成 99999、0 或者非数字时，frpc **解析失败直接退出** —— 而同一台客户端上
+// 所有隧道共用这一个 frpc 进程，于是一条写错的记录会把那台机器上全部隧道一起
+// 拖下线，面板上只看到"全都离线"，完全指不出是哪一条的错。
+// 实测（0.7.24，Windows 客户端）：PUT local_addr=127.0.0.1:99999 被接受，
+// 25 秒后 frpc 进程消失、该机所有隧道 offline。
+//
+// 只判"能不能用"，不判"能不能通"：本地服务没起来是另一回事（frpc 会报
+// connection refused，界面上看得到，也不会影响别的隧道）。
+func validateLocalAddr(addr string) error {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("本地服务地址应为 host:port（如 127.0.0.1:80、192.168.1.10:3389），收到 %q", addr)
+	}
+	if strings.TrimSpace(host) == "" {
+		return fmt.Errorf("本地服务地址缺少主机部分（如 127.0.0.1:80），收到 %q", addr)
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(portStr))
+	if err != nil {
+		return fmt.Errorf("本地服务端口必须是数字，收到 %q（这条会写进客户端的 frpc.toml，"+
+			"写错会让那台机器上的 frpc 起不来、所有隧道一起掉线）", portStr)
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("本地服务端口 %d 不合法，必须在 1-65535 之间（这条会写进客户端的 frpc.toml，"+
+			"写错会让那台机器上的 frpc 起不来、所有隧道一起掉线）", port)
+	}
+	return nil
+}
+
 // NextFreePort 从端口池中取一个「没被隧道占用、且系统当前真能绑定」的公网端口。
 //
 // 只查 tunnels 表是不够的：池里可能有别的服务常驻占用（memcached、另一个 frp、
@@ -80,6 +111,12 @@ func portBindable(protocol string, port int) bool {
 // CreateTunnel 新建隧道：自动分配端口与令牌。manualPort>0 时采用手动端口（校验占用）。
 // agentID 绑定承载该隧道的客户端（为空表示全局，所有 Agent 都可拉取）。
 func (db *DB) CreateTunnel(name, localAddr, protocol string, manualPort int, agentID string) (*shared.Tunnel, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		// 只填空格也算"没起名"：handler 里的 `req.Name == ""` 挡不住 "",
+		// 表里会出现一行看不见名字的隧道，用户没法在列表里认它。
+		return nil, fmt.Errorf("隧道名称不能为空（不能只有空格）")
+	}
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
 	if protocol == "" {
 		protocol = "tcp"
@@ -94,6 +131,9 @@ func (db *DB) CreateTunnel(name, localAddr, protocol string, manualPort int, age
 	}
 	if localAddr == "" {
 		return nil, fmt.Errorf("本地服务地址不能为空（可由调用方按 Agent 探测结果自动填充）")
+	}
+	if err := validateLocalAddr(localAddr); err != nil {
+		return nil, err
 	}
 	var port int
 	var err error
@@ -143,8 +183,8 @@ func (db *DB) UpdateTunnel(id int64, name, localAddr, protocol, agentID string, 
 	if err != nil {
 		return err
 	}
-	if name != "" {
-		t.Name = name
+	if strings.TrimSpace(name) != "" {
+		t.Name = strings.TrimSpace(name)
 	}
 	if protocol != "" {
 		protocol = strings.ToLower(strings.TrimSpace(protocol))
@@ -159,8 +199,8 @@ func (db *DB) UpdateTunnel(id int64, name, localAddr, protocol, agentID string, 
 		t.AgentID = agentID
 	}
 	if localAddr != "" {
-		if !strings.Contains(localAddr, ":") {
-			return fmt.Errorf("本地服务地址格式应为 host:port，如 192.168.1.10:80")
+		if err := validateLocalAddr(localAddr); err != nil {
+			return err
 		}
 		t.LocalAddr = localAddr
 	}

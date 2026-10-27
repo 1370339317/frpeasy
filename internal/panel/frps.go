@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -722,6 +723,17 @@ func (m *FrpsManager) TailLog(maxBytes int) string {
 	b, err := io.ReadAll(f)
 	if err != nil {
 		return ""
+	}
+	// 从行边界开始：按字节数截断必然切在某一行的中间，界面首行就成了
+	// 「026-10-27 08:17:48 …」这种少一个字的日志，第一眼看到会以为日志坏了。
+	if start > 0 {
+		head := b
+		if len(head) > 512 {
+			head = head[:512]
+		}
+		if i := bytes.IndexByte(head, '\n'); i >= 0 {
+			b = b[i+1:]
+		}
 	}
 	return string(b)
 }

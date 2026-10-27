@@ -148,6 +148,10 @@ export interface VersionAgent {
   hosted_sha256: string
   hosted_size: number
   hosted_note: string
+  // client_version 已接入的客户端**实际会收到**的那一版（取第一台作代表）。
+  // 与 hosted 的区别：hosted 是面板自己那台机器上缓存的那份（服务器上通常是
+  // linux/amd64 的旧缓存），两者不同时界面优先显示这个。
+  client_version: string
   latest: string
   // cache_behind 面板手上的可下发文件比清单旧。这时客户端升不上去，
   // 而 outdated 会是 0（客户端和缓存版本一致），界面看起来一切正常。

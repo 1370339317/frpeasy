@@ -43,10 +43,12 @@ func SetBuildStamp(s string) {
 type Panel struct {
 	db       *DB
 	sessions *SessionStore
-	frps     *FrpsManager
-	binDir   string
-	dataDir  string
-	uiSource string // embed | dir：UI 到底来自二进制内嵌还是磁盘目录
+	// loginGuard 登录失败限速（按来源 IP，内存表）。见 auth.go。
+	loginGuard *loginGuardState
+	frps       *FrpsManager
+	binDir     string
+	dataDir    string
+	uiSource   string // embed | dir：UI 到底来自二进制内嵌还是磁盘目录
 	// uiRoot 是当前正在对外服务的前端根目录，/api/ui/build 靠它读出
 	// index.html 引用的入口脚本名，用来让过期的标签页自己发现该刷新。
 	uiRoot fs.FS
@@ -106,6 +108,7 @@ func NewPanel(dataDir, listen, version string) (*Panel, error) {
 	pnl := &Panel{
 		db:         db,
 		sessions:   NewSessionStore(),
+		loginGuard: &loginGuardState{m: map[string]*loginAttempt{}},
 		frps:       NewFrpsManager(db, dataDir),
 		binDir:     binDir,
 		dataDir:    dataDir,

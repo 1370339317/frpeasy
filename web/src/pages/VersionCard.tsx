@@ -240,13 +240,22 @@ export function VersionCard() {
         {/* 客户端 */}
         <VersionBox
           name="客户端 agent"
-          current={a?.hosted || '—'}
+          // 显示「客户端实收版本」，而不是「面板本机平台缓存的那一版」。
+          // 后者在服务器上通常是 linux/amd64 的一份旧缓存，与在线客户端的
+          // 版本毫无关系 —— 拿它当主数字会出现「卡片写 0.7.16、而客户端
+          // 0.7.24、落后 0 台」的自相矛盾。
+          current={a?.client_version || a?.hosted || '—'}
           sub={
-            a && a.total > 0
+            (a && a.total > 0
               ? `${a.total} 台在线记录，${a.outdated} 台版本落后` +
                 (a.legacy > 0 ? `，${a.legacy} 台旧版（不支持自动升级）` : '') +
                 (a.missing > 0 ? `，${a.missing} 台缺对应平台产物` : '')
-              : '还没有客户端接入'
+              : '还没有客户端接入') +
+            // 本机平台缓存与实收版本不一致时，单独说一句，否则「缓存落后」
+            // 那条提示会和一个对不上的数字一起出现，看起来像 bug。
+            (a?.cache_behind && a?.hosted && a.hosted !== (a.client_version || '')
+              ? `；面板本机缓存 ${a.hosted}（会自动重取）`
+              : '')
           }
           badge={
             a && a.missing > 0 ? (

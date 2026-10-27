@@ -45,7 +45,10 @@ export function TunnelModal({
     if (!open) return
     setName(tunnel?.name ?? '')
     setLocal(tunnel?.local_addr ?? '')
-    setPort('')
+    // 编辑时把当前公网端口填出来。原来这里永远是空的，用户想改端口
+    // 得先去列表里看一眼现在是多少，否则不知道该填什么。
+    // 清空后再保存仍是"保留原端口"（后端只在 manual_port>0 时才改），不会误换。
+    setPort(tunnel ? String(tunnel.public_port || '') : '')
     setAgentID(tunnel?.agent_id ?? (agents.length === 1 ? agents[0].id : ''))
   }, [open, tunnel, agents])
 
@@ -185,7 +188,14 @@ export function TunnelModal({
           onChange={(e) => setName(e.target.value)}
           placeholder="如 家里群晖 / 办公室远程桌面"
         />
-        <Field className="mt-3 mb-0" label="公网端口（留空自动分配）">
+        <Field
+          className="mt-3 mb-0"
+          label={
+            tunnel
+              ? `公网端口（当前 ${tunnel.public_port}；改成别的数字，清空则保持不变）`
+              : '公网端口（留空自动分配）'
+          }
+        >
           <Input
             type="number"
             value={port}

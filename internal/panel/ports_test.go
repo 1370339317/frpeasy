@@ -19,6 +19,7 @@ func newTestPanel(t *testing.T) *Panel {
 		listenPort: "18080",
 		version:    "test",
 		ranks:      newRankCache(),
+		loginGuard: &loginGuardState{m: map[string]*loginAttempt{}},
 	}
 }
 

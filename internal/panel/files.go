@@ -159,6 +159,22 @@ func (p *Panel) filesFetchHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "请求格式错误", http.StatusBadRequest)
 		return
 	}
+	// 参数错误一律 400，不能落到下面统一按 502 报。
+	//
+	// 原来 kind 写错、平台写成 nosuchos 都会走"去更新源拉一次"，然后以 502
+	// 收场，错误信息是"从更新源拉取也失败…"—— 用户会以为是网络问题，
+	// 实际只是自己填错了平台。平台白名单必须在这里就用上。
+	switch req.Kind {
+	case "frps", "frpc", "agent":
+	default:
+		http.Error(w, "kind 必须是 frps / frpc / agent", http.StatusBadRequest)
+		return
+	}
+	if req.Kind != "frps" && !shared.IsSupportedPlatform(req.OS, req.Arch) {
+		http.Error(w, fmt.Sprintf("不支持的平台 %s/%s（支持：%s）",
+			req.OS, req.Arch, shared.SupportedPlatformList()), http.StatusBadRequest)
+		return
+	}
 	path, err := p.fetchOneFile(req.Kind, req.OS, req.Arch)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)

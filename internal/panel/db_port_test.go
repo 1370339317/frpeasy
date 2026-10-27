@@ -96,3 +96,47 @@ func TestNextFreePortFailsWhenAllOccupied(t *testing.T) {
 		t.Fatalf("全部端口被占时仍返回了 %d —— 会把死端口分给用户", got)
 	}
 }
+
+// 本地服务地址的端口必须校验：这个值会原样写进客户端的 frpc.toml，
+// 非法端口让 frpc 直接退出 —— 同机所有隧道一起掉线，而面板只显示"全都离线"。
+// 实测（0.7.24 线上 + Windows 客户端）：PUT local_addr=127.0.0.1:99999 被接受，
+// 25 秒后 frpc 进程消失。
+func TestCreateTunnelRejectsBadLocalAddr(t *testing.T) {
+	db := newTestDB(t)
+	bad := []string{
+		"127.0.0.1",       // 没有端口
+		"127.0.0.1:0",     // 端口 0
+		"127.0.0.1:99999", // 越界
+		"127.0.0.1:abc",   // 非数字
+		":80",             // 缺主机
+	}
+	for _, addr := range bad {
+		if _, err := db.CreateTunnel("x", addr, "tcp", 0, ""); err == nil {
+			t.Fatalf("本地服务地址 %q 应当被拒绝", addr)
+		}
+	}
+	if _, err := db.CreateTunnel("x", "127.0.0.1:8080", "tcp", 0, ""); err != nil {
+		t.Fatalf("合法地址不该被拒: %v", err)
+	}
+
+	// 编辑同样要拦：改成非法端口后，客户端下一次拉配置就起不来
+	tun, err := db.CreateTunnel("y", "127.0.0.1:8080", "tcp", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateTunnel(tun.ID, "", "127.0.0.1:99999", "", "", 0, false); err == nil {
+		t.Fatal("编辑成非法端口应当被拒绝")
+	}
+	if err := db.UpdateTunnel(tun.ID, "", "", "", "", 0, false); err != nil {
+		t.Fatalf("空字段表示保持不变，不该报错: %v", err)
+	}
+}
+
+// 名字只有空格要拒绝：handler 里的 req.Name == "" 挡不住它，
+// 列表里会出现一行看不见名字的隧道。
+func TestCreateTunnelRejectsBlankName(t *testing.T) {
+	db := newTestDB(t)
+	if _, err := db.CreateTunnel("   ", "127.0.0.1:8080", "tcp", 0, ""); err == nil {
+		t.Fatal("只有空格的名字应当被拒绝")
+	}
+}

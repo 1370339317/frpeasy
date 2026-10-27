@@ -27,6 +27,12 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 		if v, ok := m["install_token"]; ok {
 			m["install_token"] = shared.NewTokenMask(v)
 		}
+		// dashboard_pass 也要脱敏：它是 frps 状态页的口令，权限等同于"看所有代理"。
+		// 界面根本不展示它（只有 frps 自己用），明文返回等于把一个用不到的
+		// 秘密白白摊在任何一次 /api/settings 响应里（会被日志、代理、浏览器插件看到）。
+		if v, ok := m["dashboard_pass"]; ok {
+			m["dashboard_pass"] = shared.NewTokenMask(v)
+		}
 		json.NewEncoder(w).Encode(m)
 		return
 	}

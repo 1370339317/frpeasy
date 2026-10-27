@@ -81,6 +81,17 @@ func IsSupportedPlatform(osName, arch string) bool {
 	return false
 }
 
+// SupportedPlatformList 给错误信息用的平台清单（linux/amd64、windows/arm64…）。
+//
+// 报错时把可选值列出来，用户才知道自己能填什么；只说"不支持"等于让他去读源码。
+func SupportedPlatformList() string {
+	parts := make([]string, 0, len(SupportedPlatforms))
+	for _, p := range SupportedPlatforms {
+		parts = append(parts, p.OS+"/"+p.Arch)
+	}
+	return strings.Join(parts, "、")
+}
+
 // FrpcBinFileName 面板托管的 frpc 缓存文件名。
 //
 // 与 agent 产物同一套平台收敛规则：客户端请求 /api/frpc/bin/linux/amd64 时，

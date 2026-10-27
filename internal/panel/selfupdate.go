@@ -75,6 +75,11 @@ type HandoffOptions struct {
 	NewExe    string // 已下载并校验过的新版二进制（<data>/update/panel.new）
 	// WantVersion 期望启动后 /api/healthz 报告的新版本。
 	WantVersion string
+	// FromVersion 换掉的旧版本。交接器只负责"换文件"，它自己就是旧版副本，
+	// 但它的 --version 未必等于用户理解的"旧版本"（可能是临时副本名），
+	// 所以由调用方显式给：更新记录里「旧版本 → 新版本」缺了前半截，
+	// 界面就只能显示「? → 0.7.24」，事后根本看不出是从哪一版升上来的。
+	FromVersion string
 	// SelfExe 交接器自己的路径 —— 它是**旧版的副本**，不是新版。
 	// 这个区别是本模块最关键的修正，见 startHandoff 的注释。
 	SelfExe string
@@ -346,7 +351,7 @@ func RunHandoff(o HandoffOptions) error {
 
 	// ---- 1. 等旧进程退出 ----
 	WriteUpdateState(o.DataDir, UpdateState{
-		Stage: "swapping", From: "", To: o.WantVersion,
+		Stage: "swapping", From: o.FromVersion, To: o.WantVersion,
 		Detail: "等待旧面板退出（会先停 HTTP、再停 frps、再关数据库）",
 	})
 	if err := waitPIDExit(o.OldPID, 30*time.Second); err != nil {
@@ -361,7 +366,7 @@ func RunHandoff(o HandoffOptions) error {
 	if err != nil {
 		logf("替换失败: %v", err)
 		WriteUpdateState(o.DataDir, UpdateState{
-			Stage: "failed", To: o.WantVersion,
+			Stage: "failed", From: o.FromVersion, To: o.WantVersion,
 			Detail: "替换二进制失败", Error: err.Error(),
 		})
 		return err
@@ -370,7 +375,7 @@ func RunHandoff(o HandoffOptions) error {
 
 	// ---- 3. 启动新版本 ----
 	WriteUpdateState(o.DataDir, UpdateState{
-		Stage: "starting", To: o.WantVersion,
+		Stage: "starting", From: o.FromVersion, To: o.WantVersion,
 		Detail: "启动新版本 " + o.WantVersion,
 	})
 	cmd, err := startTarget(o, logf)
@@ -397,7 +402,7 @@ func RunHandoff(o HandoffOptions) error {
 	// ---- 4. 健康检查（比对版本）----
 	url := healthURL(o.Listen)
 	WriteUpdateState(o.DataDir, UpdateState{
-		Stage: "health-check", To: o.WantVersion,
+		Stage: "health-check", From: o.FromVersion, To: o.WantVersion,
 		Detail: "等待新版本通过健康检查（" + url + "）",
 	})
 	if err := waitHealthy(url, o.WantVersion, 25*time.Second); err != nil {
@@ -425,7 +430,7 @@ func RunHandoff(o HandoffOptions) error {
 
 	logf("新版本 %s 已就绪，交接完成", o.WantVersion)
 	WriteUpdateState(o.DataDir, UpdateState{
-		Stage: "succeeded", To: o.WantVersion,
+		Stage: "succeeded", From: o.FromVersion, To: o.WantVersion,
 		Detail: "更新完成，面板已在运行新版本 " + o.WantVersion,
 	})
 	// 清掉下载留下的临时文件（交接器自己删不掉自己，下次更新时清理）
@@ -455,6 +460,7 @@ func startHandoff(o HandoffOptions) error {
 		"--handoff-target=" + o.TargetExe,
 		"--handoff-new=" + o.NewExe,
 		"--handoff-version=" + o.WantVersion,
+		"--handoff-from=" + o.FromVersion,
 		"--listen", o.Listen,
 		"--data", o.DataDir,
 	}

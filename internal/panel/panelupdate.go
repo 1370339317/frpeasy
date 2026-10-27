@@ -175,6 +175,7 @@ func (p *Panel) doPanelUpdate(manifest *shared.Manifest, asset *shared.Asset, ex
 		TargetExe:   exe,
 		NewExe:      newPath,
 		WantVersion: to,
+		FromVersion: from,
 		SelfExe:     handoffExe,
 		// 由 systemd unit 的 Environment 注入。非空时交接器改用 systemctl 启停，
 		// 因为 unit 配的是 Restart=on-failure，面板 exit 0 退出后 systemd 不会
