@@ -123,3 +123,57 @@ func (w *lineLogger) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
+// maxUploadLogBytes 回传给面板的日志上限。
+//
+// 64KB ≈ 最近 400~600 行，够看清「为什么掉线」；再大就要考虑上传时间与
+// 面板库体积，而尾部之后的内容对排障没有价值。
+const maxUploadLogBytes = 64 << 10
+
+// TailLog 读日志文件尾部（最多 maxBytes），并保证从行边界开始。
+//
+// 必须按行边界截：半个时间戳开头的第一行会被当成"日志坏了"，
+// 也会让用户以为时间对不上（与面板 frps 日志同一个坑）。
+func TailLog(path string, maxBytes int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	size := st.Size()
+	start := int64(0)
+	if size > int64(maxBytes) {
+		start = size - int64(maxBytes)
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return ""
+	}
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return ""
+	}
+	// 起点落在行中间时，丢掉第一段半行。
+	if start > 0 {
+		head := b
+		if len(head) > 512 {
+			head = head[:512]
+		}
+		if i := indexByte(head, '\n'); i >= 0 {
+			b = b[i+1:]
+		}
+	}
+	return shared.StripANSI(string(b))
+}
+
+func indexByte(b []byte, c byte) int {
+	for i, x := range b {
+		if x == c {
+			return i
+		}
+	}
+	return -1
+}

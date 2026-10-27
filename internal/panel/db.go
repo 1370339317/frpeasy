@@ -80,6 +80,19 @@ func (db *DB) migrate() error {
 			key TEXT PRIMARY KEY,
 			value TEXT
 		)`,
+		// agent_logs 每台客户端一行：待答复的日志请求 + 最近一次回传的快照。
+		//
+		// 单独一张表而不是往 agents 上加列：日志内容最多 64KB，而 agents 每 5 秒
+		// 被列表接口整表读一次（还带 services 的 JSON），把大字段混进去会让
+		// 「刷新客户端列表」顺便把日志也搬一遍。
+		`CREATE TABLE IF NOT EXISTS agent_logs (
+			agent_id TEXT PRIMARY KEY,
+			request_id TEXT NOT NULL DEFAULT '',
+			requested_at DATETIME,
+			content TEXT NOT NULL DEFAULT '',
+			fetched_at DATETIME,
+			content_req TEXT NOT NULL DEFAULT ''
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {

@@ -111,6 +111,32 @@ IC2=$(curl -s -b cj.txt $B/api/tunnels | jget "d['uninstall_command']")
 chk "卸载命令已下发" 1 "$(case "$IC2" in *--uninstall*) echo 1;; *) echo 0;; esac)"
 chk "卸载命令确实没带 --token" 0 "$(case "$IC2" in *--token*) echo 1;; *) echo 0;; esac)"
 
+say "== 4c) 客户端日志回传（面板连不上 NAT 后的客户端，只能请它自己送）=="
+# 0.3.0 的老客户端：必须明确拒绝。老版本解码会静默忽略 log_request，
+# 「点了查看日志一直转圈」是最难解释的失败。
+chk "过旧客户端请求日志 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/agents/$AGID/logs)"
+REG3=$(curl -s -X POST $B/api/agent/register -H 'Content-Type: application/json' -d "{\"install_token\":\"$TOKEN\",\"os\":\"windows\",\"arch\":\"amd64\",\"name\":\"log-test\",\"agent_version\":\"0.7.29\"}")
+AG3=$(echo "$REG3" | jget "d['agent_id']")
+AG3TOK=$(echo "$REG3" | jget "d['agent_token']")
+LOGREQ=$(curl -s -b cj.txt -X POST $B/api/agents/$AG3/logs | jget "d['request_id']")
+chk "请求日志拿到 request_id" 1 "$([ -n "$LOGREQ" ] && echo 1 || echo 0)"
+# 请求要真的随配置下发到那台机器，否则客户端永远不知道有人在等
+chk "配置里带上 log_request" "$LOGREQ" "$(curl -s "$B/api/agent/config?agent_id=$AG3&token=$AG3TOK" | jget "d.get('log_request','')")"
+chk "回传日志需正确令牌 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST $B/api/agent/logs -H 'Content-Type: application/json' -d "{\"agent_id\":\"$AG3\",\"agent_token\":\"bad\",\"request_id\":\"$LOGREQ\",\"content\":\"x\"}")"
+chk "回传日志 ok" True "$(curl -s -X POST $B/api/agent/logs -H 'Content-Type: application/json' -d "{\"agent_id\":\"$AG3\",\"agent_token\":\"$AG3TOK\",\"request_id\":\"$LOGREQ\",\"content\":\"[agent] hello\n\"}" | jget "d['ok']")"
+chk "回传后 pending 清零" False "$(curl -s -b cj.txt $B/api/agents/$AG3/logs | jget "d['logs']['pending']")"
+chk "回传后内容可读" 1 "$(curl -s -b cj.txt $B/api/agents/$AG3/logs | jget "1 if 'hello' in d['logs']['content'] else 0")"
+chk "回传后对应本次请求" "$LOGREQ" "$(curl -s -b cj.txt $B/api/agents/$AG3/logs | jget "d['logs']['content_req']")"
+chk "不存在的客户端请求日志 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -b cj.txt -X POST $B/api/agents/nosuch/logs)"
+curl -s -b cj.txt -X DELETE $B/api/agents/$AG3 >/dev/null
+# 重装同名客户端会复用同一条记录：旧日志不能跟着"复活"（那会让新机器看到别人的现场）
+REG4=$(curl -s -X POST $B/api/agent/register -H 'Content-Type: application/json' -d "{\"install_token\":\"$TOKEN\",\"os\":\"windows\",\"arch\":\"amd64\",\"name\":\"log-test\",\"agent_version\":\"0.7.29\"}")
+AG4=$(echo "$REG4" | jget "d['agent_id']")
+# 记录被删过，重装必然是新的 agent_id；关键是新记录不该带着上一轮的内容
+# （行级删除本身由 db 测试 TestDeleteAgentRemovesLog 守着）
+chk "重装后看不到上一轮的日志" 0 "$(curl -s -b cj.txt $B/api/agents/$AG4/logs | jget "1 if d['logs']['content'] else 0")"
+curl -s -b cj.txt -X DELETE $B/api/agents/$AG4 >/dev/null
+
 say "== 5) 探测服务出现在列表 =="
 chk "agent.services 已存储" "127.0.0.1:8123" "$(curl -s -b cj.txt $B/api/tunnels | jget "[a for a in d['agents'] if a['id']=='$AGID'][0]['services'][0]['addr']")"
 chk "agent 自身版本已落库（升级判定的地基）" "0.3.0" "$(curl -s -b cj.txt $B/api/agents | jget "[a for a in d['agents'] if a['id']=='$AGID'][0]['agent_version']")"

@@ -163,6 +163,25 @@ type AgentConfig struct {
 	// Agent 靠这个字段感知「frps 从停到跑」的跳变，立刻重启 frpc 抢连，
 	// 不必等 frp 内部退避走完。
 	FRPSRunning bool `json:"frps_running"`
+
+	// LogRequest 面板请求该客户端回传日志时，这里带一个一次性请求 ID（空=没有请求）。
+	//
+	// 为什么走配置下发：客户端可能在 NAT/防火墙后面，面板**连不上它**，
+	// 只能等它自己来问。心跳与配置轮询是唯一"一定存在"的通道（与卸载指令同一条）。
+	// 客户端只在 ID 变化时回传一次，回传后面板立刻清掉，避免每 15 秒重复上传。
+	LogRequest string `json:"log_request,omitempty"`
+}
+
+// AgentLogUpload 客户端回传日志内容。
+//
+// 鉴权与心跳同一套（agent_id + agent_token）：日志可能包含内部地址、
+// 域名与报错原文，不能只凭一个请求 ID 就能写进面板。
+type AgentLogUpload struct {
+	AgentID    string `json:"agent_id"`
+	AgentToken string `json:"agent_token"`
+	RequestID  string `json:"request_id"`
+	// Content 是日志尾部原文（客户端已按行边界截断，最多 64KB）。
+	Content string `json:"content"`
 }
 
 // HeartbeatRequest Agent 心跳，上报各隧道在线与流量，以及本机探测到的服务。

@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react'
 import { useApp, type CommandKind } from '../store'
 import { api } from '../lib/api'
-import { copyText, fmtAgo } from '../lib/format'
-import type { Agent } from '../types'
+import { copyText, fmtAgo, fmtBytes } from '../lib/format'
+import type { Agent, AgentLogResponse } from '../types'
 import {
   Alert,
   Button,
   Card,
   Chip,
   Led,
+  Modal,
   Pre,
   Tabs,
   Badge,
@@ -223,6 +224,75 @@ export function Clients() {
   } = useApp()
   const [kind, setKind] = useState<CommandKind>('linux')
 
+  // 客户端日志弹窗。面板连不上 NAT 后面的机器，所以是「请求 → 等它下一次心跳回传」，
+  // 中间隔着最长约 15 秒：界面必须把"还在等"和"到了"分清楚，否则用户只会看到转圈。
+  const [logFor, setLogFor] = useState<Agent | null>(null)
+  const [logReq, setLogReq] = useState('')
+  const [log, setLog] = useState<{
+    content: string
+    fetchedAt: string | null
+    waiting: boolean
+    /** 这份内容是不是「我这次请求」的结果。false 且 content 非空 = 只剩上一次的旧快照 */
+    answered: boolean
+    error: string
+    elapsed: number
+  }>({ content: '', fetchedAt: null, waiting: false, answered: false, error: '', elapsed: 0 })
+
+  /** 发起一次日志请求（也用于「重新拉取」）。 */
+  async function openLog(a: Agent) {
+    setLogFor(a)
+    setLogReq('')
+    setLog({ content: '', fetchedAt: null, waiting: true, answered: false, error: '', elapsed: 0 })
+    try {
+      const r = await api<{ request_id: string; online: boolean; message: string }>(
+        'POST',
+        `/api/agents/${encodeURIComponent(a.id)}/logs`,
+      )
+      setLogReq(r.request_id)
+    } catch (e) {
+      // 版本过低 / 客户端不存在都会走到这里：直接把面板给的原因摊在弹窗里，
+      // 比只弹一句 toast 有用得多（它带着该去哪儿看日志文件）。
+      setLog((v) => ({ ...v, waiting: false, error: (e as Error).message }))
+    }
+  }
+
+  // 等回传：每 2 秒看一次快照，拿到"这次请求的回包"就停。
+  // 25 秒还没到就停下并说明原因 —— 客户端离线时会一直等不到，不能无限转圈。
+  useEffect(() => {
+    if (!logFor || !logReq) return
+    const id = logFor.id
+    const started = Date.now()
+    let stopped = false
+    const h = window.setInterval(() => {
+      void (async () => {
+        try {
+          const r = await api<AgentLogResponse>('GET', `/api/agents/${encodeURIComponent(id)}/logs`)
+          if (stopped) return
+          const done = r.logs.content_req === logReq
+          setLog((v) => ({
+            ...v,
+            content: r.logs.content || v.content,
+            fetchedAt: r.logs.fetched_at ?? v.fetchedAt,
+            waiting: !done,
+            answered: done,
+            elapsed: Math.round((Date.now() - started) / 1000),
+          }))
+          if (done) window.clearInterval(h)
+        } catch {
+          /* 面板暂时不可达：下一轮再试 */
+        }
+        if (!stopped && Date.now() - started > 25000) {
+          window.clearInterval(h)
+          setLog((v) => ({ ...v, waiting: false }))
+        }
+      })()
+    }, 2000)
+    return () => {
+      stopped = true
+      window.clearInterval(h)
+    }
+  }, [logFor, logReq])
+
   // 安装命令只有一个版本：源顺序由面板设置决定、每轮下发，
   // 装完改设置就生效 —— 所以命令里不再有"从哪儿取"这个选项。
   const cmd = install[kind] || '加载中…'
@@ -389,6 +459,11 @@ export function Clients() {
                         撤销卸载
                       </Button>
                     )}
+                    {/* 日志：诊断用。面板读不到客户端本地文件，只能请它回传 —— 
+                        客户端离线时请求会留着，等它上线第一次心跳就回传。 */}
+                    <Button variant="ghost" size="sm" onClick={() => void openLog(a)}>
+                      日志
+                    </Button>
                     <Button
                       variant={st.gone ? 'primary' : 'ghost'}
                       size="sm"
@@ -486,6 +561,87 @@ export function Clients() {
           })
         )}
       </div>
+
+      {/* 日志弹窗：面板侧只留最近一次快照，所以"重新拉取"＝再请它传一次。 */}
+      <Modal
+        open={!!logFor}
+        wide
+        title={`客户端日志${logFor ? ` · ${logFor.name}` : ''}`}
+        onClose={() => {
+          setLogFor(null)
+          setLogReq('')
+        }}
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!log.content}
+              onClick={async () => {
+                const ok = await copyText(log.content)
+                toast(ok ? '已复制日志' : '复制失败', ok ? 'ok' : 'bad')
+              }}
+            >
+              复制
+            </Button>
+            <div className="flex-1" />
+            <Button size="sm" variant="ghost" onClick={() => logFor && void openLog(logFor)}>
+              重新拉取
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                setLogFor(null)
+                setLogReq('')
+              }}
+            >
+              关闭
+            </Button>
+          </>
+        }
+      >
+        {log.error ? (
+          <Alert tone="bad">
+            <div className="whitespace-pre-wrap">{log.error}</div>
+          </Alert>
+        ) : (
+          <>
+            <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-dim">
+              {log.waiting ? (
+                <>
+                  <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-accent" />
+                  正在请客户端回传…（最长约 15 秒，已等 {log.elapsed}s）
+                  {logFor && !logFor.online && (
+                    <span className="text-warn-fg">
+                      · 该客户端当前离线，请求会在它上线后的第一次心跳执行
+                    </span>
+                  )}
+                </>
+              ) : log.answered ? (
+                <>
+                  已于 {fmtAgo(log.fetchedAt)} 回传 · {fmtBytes(new Blob([log.content]).size)}
+                  <span className="text-dim">
+                    · 面板只保留最近一次，内容来自那台机器上的 agent.log
+                  </span>
+                </>
+              ) : (
+                <span className="text-warn-fg">
+                  等了 {log.elapsed} 秒还没收到回传：客户端可能刚离线，或它的 agent
+                  版本低于支持回传日志的版本。可以直接到那台机器上看 agent.log。
+                  {log.content && (
+                    <>
+                      {' '}
+                      下面显示的是<b>上一次回传（{fmtAgo(log.fetchedAt)}）</b>的内容，
+                      <b>不是</b>本次请求的结果。
+                    </>
+                  )}
+                </span>
+              )}
+            </div>
+            <Pre className="max-h-[58vh] overflow-y-auto">{log.content || '（还没有内容）'}</Pre>
+          </>
+        )}
+      </Modal>
     </>
   )
 }

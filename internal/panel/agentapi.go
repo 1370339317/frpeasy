@@ -79,6 +79,9 @@ func (p *Panel) agentConfigHandler(w http.ResponseWriter, r *http.Request) {
 		MirrorBase:  p.db.GetSetting("mirror_base"),
 		FRPVersion:  p.concreteFRPVersion(agent.Os, agent.Arch),
 		FRPSRunning: p.frps.Status()["running"] == true,
+		// 用户点了「查看日志」就把请求 ID 带上；客户端看到新 ID 才回传一次，
+		// 回传后面板立刻清空 —— 所以这里每轮读的都是"当前是否真的在等"。
+		LogRequest: p.db.PendingAgentLogRequest(agent.ID),
 	}
 	json.NewEncoder(w).Encode(cfg)
 }
@@ -344,4 +347,111 @@ func (p *Panel) concreteFRPVersion(osName, arch string) string {
 		}
 	}
 	return v
+}
+
+// minLogAgentVersion 支持回传日志的最低 agent 版本。
+//
+// 与卸载同理：log_request 是新增字段，旧 agent 的 json 解码会**静默忽略**它，
+// 于是「点了查看日志、界面一直转圈」—— 用户无从判断是网络慢还是版本不支持。
+// 所以在面板侧直接拦住并说清楚该怎么做。
+const minLogAgentVersion = "0.7.29"
+
+// maxAgentLogBytes 面板侧留存的日志上限。
+// 客户端已按 64KB 截断，这里的 128KB 是防御：将来客户端放宽了，
+// 面板也不至于因为一次回传把库撑大。
+const maxAgentLogBytes = 128 << 10
+
+// agentLogsRequestHandler POST /api/agents/{id}/logs
+//
+// 请求某台客户端回传日志。不会立即返回内容 —— 客户端要等下一次心跳/配置轮询
+// （最长约 15 秒）才会看到这个请求，所以这里只回请求 ID，界面据此轮询。
+func (p *Panel) agentLogsRequestHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	agent, err := p.db.GetAgent(id)
+	if err != nil {
+		http.Error(w, "客户端不存在", http.StatusNotFound)
+		return
+	}
+	// 只有「确实是旧版」才拦：版本号认不出来（dev / 本地构建）时放行 ——
+	// 那种情况拦下来只会给出一句荒唐的提示，而功能是加法式的。
+	if ver := agent.AgentVersion; ver == "" ||
+		(shared.VersionKnown(ver) && shared.IsNewer(minLogAgentVersion, ver)) {
+		ver := agent.AgentVersion
+		if ver == "" {
+			ver = "未知（旧版未上报）"
+		}
+		http.Error(w, fmt.Sprintf(
+			"这台客户端的 agent 版本是 %s，低于支持回传日志的 %s —— 老版本不认识这个请求，"+
+				"点了只会一直等在转圈。先在面板把它升级到最新版（升级会自动跟随），或直接查看那台机器上的日志文件：\n"+
+				"  Windows: C:\\ProgramData\\frpeasy-agent\\agent.log\n  Linux:   安装目录/data/agent.log",
+			ver, minLogAgentVersion),
+			http.StatusConflict)
+		return
+	}
+	reqID, err := p.db.RequestAgentLog(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"ok":         true,
+		"request_id": reqID,
+		"online":     agent.Online,
+		"message":    "已请求，客户端会在下一次心跳（约 15 秒内）回传日志",
+	})
+}
+
+// agentLogViewHandler GET /api/agents/{id}/logs
+//
+// 读面板上留存的日志快照。Pending 为真表示还这次请求没被答复（客户端离线/刚上线）。
+func (p *Panel) agentLogViewHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	agent, err := p.db.GetAgent(id)
+	if err != nil {
+		http.Error(w, "客户端不存在", http.StatusNotFound)
+		return
+	}
+	view, err := p.db.GetAgentLog(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"logs":     view,
+		"online":   agent.Online,
+		"agent":    agent.Name,
+		"version":  agent.AgentVersion,
+		"last_see": agent.LastSeen,
+	})
+}
+
+// agentLogUploadHandler POST /api/agent/logs
+//
+// 客户端回传日志尾部。鉴权与心跳同一套（agent_id + agent_token）：
+// 日志里有内部地址与报错原文，不能只凭一个猜测得出的请求 ID 就写进来。
+func (p *Panel) agentLogUploadHandler(w http.ResponseWriter, r *http.Request) {
+	var req shared.AgentLogUpload
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	agent, err := p.db.GetAgent(req.AgentID)
+	if err != nil || agent.AgentToken != req.AgentToken {
+		http.Error(w, "凭据无效", http.StatusUnauthorized)
+		return
+	}
+	content := req.Content
+	if len(content) > maxAgentLogBytes {
+		// 截断也要按行边界：半行日志比没有更误导人。
+		content = content[len(content)-maxAgentLogBytes:]
+		if i := strings.IndexByte(content, '\n'); i >= 0 && i < 512 {
+			content = content[i+1:]
+		}
+	}
+	if err := p.db.SaveAgentLog(agent.ID, req.RequestID, content); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	log.Printf("[agent] %s 回传日志 %d 字节（请求 %s）", agent.Name, len(content), req.RequestID)
+	json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }

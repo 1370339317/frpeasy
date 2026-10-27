@@ -101,3 +101,43 @@ func TestLineLoggerSplitsLines(t *testing.T) {
 		}
 	}
 }
+
+// 回传给面板的是"日志尾部"，且必须从行边界开始、不带 ANSI。
+// 半个时间戳开头的第一行会被当成"日志坏了"，也会让人以为时间对不上。
+func TestTailLogBytesAndBoundary(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, agentLogName)
+	var b strings.Builder
+	b.WriteString("\x1b[0m\x1b[1;34m2026-10-27 10:00:00 [I] line-000\x1b[0m\n")
+	for i := 1; i < 400; i++ {
+		b.WriteString("2026-10-27 10:00:00 [I] line-" + strings.Repeat("x", 40) + "\n")
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := TailLog(path, 4096)
+	if len(got) == 0 || len(got) > 4500 {
+		t.Fatalf("尾部长度不对: %d", len(got))
+	}
+	if strings.Contains(got, "\x1b") {
+		t.Fatal("尾部不该带 ANSI")
+	}
+	// 第一行必须是完整行（以时间戳开头）
+	first := strings.SplitN(strings.TrimLeft(got, "\n"), "\n", 2)[0]
+	if !strings.HasPrefix(first, "2026-10-27") {
+		t.Fatalf("首行应当是完整行，实际 %q", first)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(got), "line-"+strings.Repeat("x", 40)) {
+		t.Fatalf("末行应当是最新一行，实际尾部 %q", got[len(got)-60:])
+	}
+	// 文件比上限小时原样返回
+	small := filepath.Join(dir, "small.log")
+	_ = os.WriteFile(small, []byte("a\nb\n"), 0o644)
+	if got := TailLog(small, 4096); got != "a\nb\n" {
+		t.Fatalf("小文件应当原样返回，实际 %q", got)
+	}
+	// 文件不存在不该 panic（客户端可能还没写过日志）
+	if got := TailLog(filepath.Join(dir, "nope.log"), 4096); got != "" {
+		t.Fatalf("不存在的文件应当返回空串，实际 %q", got)
+	}
+}

@@ -157,6 +157,9 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("POST /api/agent/source-event", p.agentSourceEventHandler)
 	// 本机执行卸载前的报备（agent --goodbye）。与心跳同源的凭据校验。
 	mux.HandleFunc("POST /api/agent/goodbye", p.agentGoodbyeHandler)
+	// 客户端回传日志尾部。面板连不上 NAT 后面的客户端，只能让它自己送上来；
+	// 请求本身塞在配置下发里（AgentConfig.LogRequest），与卸载指令同一条通道。
+	mux.HandleFunc("POST /api/agent/logs", p.agentLogUploadHandler)
 	mux.HandleFunc("GET /api/agent/services", func(w http.ResponseWriter, r *http.Request) {
 		p.agentServicesHandler(w, r)
 	})
@@ -191,6 +194,10 @@ func (p *Panel) Run(listen string) error {
 		p.updateTunnelHandler(w, r, id)
 	}))
 	mux.HandleFunc("GET /api/agents", p.requireAuth(p.agentsHandler))
+	// 客户端日志：请求一次回传 + 读面板留存的快照。
+	// 分两个动作是因为中间隔着「等它下一次心跳」，最长约 15 秒。
+	mux.HandleFunc("POST /api/agents/{id}/logs", p.requireAuth(p.agentLogsRequestHandler))
+	mux.HandleFunc("GET /api/agents/{id}/logs", p.requireAuth(p.agentLogViewHandler))
 	// 云端发起卸载：标记后随该客户端下一次心跳下发，由它自己清理并退出。
 	mux.HandleFunc("POST /api/agents/{id}/uninstall", p.requireAuth(p.agentUninstallHandler))
 	// 撤销还没被心跳领走的卸载指令（离线点错了的唯一反悔途径）

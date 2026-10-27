@@ -126,6 +126,15 @@ func CompareVersions(a, b string) int {
 	}
 }
 
+// VersionKnown 这个版本串能不能参与比较（"dev"、git hash 这类不能）。
+//
+// 用途：做「最低版本」门槛时必须区分「确实是旧版」和「版本号根本认不出来」。
+// 后者（本地构建的 dev）按旧版拦掉会给出荒唐的提示（"版本 dev 低于 0.7.29"），
+// 而这类新字段本身是加法式的 —— 老客户端最多忽略它，界面另有超时说明。
+func VersionKnown(s string) bool {
+	return parseVersion(s).ok
+}
+
 // IsNewer 判断 candidate 是否比 current 新（无法解析的 candidate 永远不算新）。
 //
 // 与 CompareVersions 的差别：这里用于「要不要更新到这个版本」，

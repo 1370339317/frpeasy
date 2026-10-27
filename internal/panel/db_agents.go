@@ -73,6 +73,10 @@ func (db *DB) DeleteAgent(id string) error {
 	if _, err := db.Exec("UPDATE tunnels SET agent_id='' WHERE agent_id=?", id); err != nil {
 		return err
 	}
+	// 日志快照一并删掉：agent_id 是它的主键，留着只会变成没人能访问的孤儿行。
+	if _, err := db.Exec("DELETE FROM agent_logs WHERE agent_id=?", id); err != nil {
+		return err
+	}
 	_, err := db.Exec("DELETE FROM agents WHERE id=?", id)
 	return err
 }

@@ -477,3 +477,27 @@ export interface FilesResponse {
   update_base: string
   mirror_base: string
 }
+
+/**
+ * 客户端回传的日志快照（面板只留最近一次）。
+ *
+ * 面板连不上 NAT 后面的客户端，所以是"面板请求 → 客户端下一次心跳时回传"。
+ * pending=true 表示这次请求还没被答复（客户端离线，或请求刚发出）。
+ */
+export interface AgentLogView {
+  request_id: string
+  requested_at: string | null
+  content: string
+  fetched_at: string | null
+  /** 该内容对应哪一次请求：界面据此判断"我要的这份到了没有" */
+  content_req: string
+  pending: boolean
+}
+
+export interface AgentLogResponse {
+  logs: AgentLogView
+  online: boolean
+  agent: string
+  version: string
+  last_see: string
+}

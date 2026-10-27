@@ -361,12 +361,15 @@ export function Modal({
   title,
   onClose,
   footer,
+  wide,
   children,
 }: {
   open: boolean
   title: ReactNode
   onClose: () => void
   footer?: ReactNode
+  /** 宽版：日志、表格这类"内容本身很宽"的弹窗用，默认 640px */
+  wide?: boolean
   children: ReactNode
 }) {
   useEffect(() => {
@@ -391,7 +394,10 @@ export function Modal({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-[640px] rounded-2xl border border-border2 bg-panel shadow-panel"
+        className={cx(
+          'w-full rounded-2xl border border-border2 bg-panel shadow-panel',
+          wide ? 'max-w-[980px]' : 'max-w-[640px]',
+        )}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center border-b border-border px-5 py-4">

@@ -40,6 +40,11 @@ type Client struct {
 	// lastFRPSRunning 上一次拉到的「面板侧 frps 是否在跑」。
 	// 只在 false→true 的跳变上强制重启 frpc（抢连），避免每轮都重启。
 	lastFRPSRunning bool
+
+	// lastLogReq 上一次已回传的日志请求 ID。
+	// 面板每轮配置都会带上"当前是否在等日志"，没有这个去重就会每 15 秒
+	// 上传一次同样的 64KB —— 用户点了查看日志之后，面板要持续收几百 KB 垃圾。
+	lastLogReq string
 }
 
 // state 持久化本地身份，避免每次重启都向面板新建 Agent。
@@ -214,6 +219,26 @@ func (c *Client) heartbeat(statuses []shared.TunnelStatus) (*shared.HeartbeatRes
 	return &resp, nil
 }
 
+// uploadLog 把本地日志尾部回传给面板（用户点了「查看日志」）。
+//
+// 只传尾部而不是整份文件：一个跑了几天的客户端日志有 4MB，传上来既慢又没用 ——
+// 排障要看的永远是"最近发生什么"。
+func (c *Client) uploadLog(reqID string) error {
+	content := TailLog(filepath.Join(c.dataDir, agentLogName), maxUploadLogBytes)
+	if strings.TrimSpace(content) == "" {
+		// 空日志也要回一句：否则面板那边永远是"等待中"，用户会以为是网络问题。
+		content = "（本地日志为空：agent 刚启动，或数据目录不可写 —— 检查 " +
+			filepath.Join(c.dataDir, agentLogName) + "）"
+	}
+	var out map[string]any
+	return c.postJSON("/api/agent/logs", shared.AgentLogUpload{
+		AgentID:    c.agentID,
+		AgentToken: c.agentTok,
+		RequestID:  reqID,
+		Content:    content,
+	}, &out)
+}
+
 func (c *Client) postJSON(path string, body any, out any) error {
 	b, _ := json.Marshal(body)
 	resp, err := c.httpClient.Post(c.server+path, "application/json", bytes.NewReader(b))
@@ -273,6 +298,17 @@ func (c *Client) Run() error {
 			log.Println("[agent] 拉取配置失败:", err)
 			time.Sleep(10 * time.Second)
 			continue
+		}
+
+		// 面板请求日志（用户在面板点了「查看日志」）：只在请求 ID 变化时回传一次。
+		// 失败不记 lastLogReq —— 下一轮会重试；成功后面板会清掉请求，
+		// 下一轮配置里就没有它了，所以这里也不会重复上传。
+		if cfg.LogRequest != "" && cfg.LogRequest != c.lastLogReq {
+			if err := c.uploadLog(cfg.LogRequest); err != nil {
+				log.Println("[agent] 回传日志失败:", err)
+			} else {
+				c.lastLogReq = cfg.LogRequest
+			}
 		}
 
 		// frps 从「停止」变成「运行」时强制重启 frpc 抢连：
