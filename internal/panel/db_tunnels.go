@@ -6,13 +6,45 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"frpeasy/internal/shared"
 )
 
 // --- Tunnels ---
 
-// validateLocalAddr 校验客户端侧的本地服务地址。
+// maxTunnelNameRunes 隧道名称上限。
+//
+// 名字直接渲染在列表第一列，且没有第二处地方能看到全文。实测（0.7.26）：
+// 200 个字符的名字把名称列撑到 1473px、整张表 2210px（视口 1440px），
+// 「公网访问 / 状态 / 编辑 / 删除」全被推出屏幕 —— 一条脏名字就毁掉整个列表。
+// 64 个字符足够写「办公室远程桌面（财务）」，再长一定是误粘贴。
+const maxTunnelNameRunes = 64
+
+// normalizeTunnelName 校验并规范化隧道名称：去首尾空白、拒绝控制字符、限长。
+//
+// 控制字符（换行、制表符）不只是"看起来怪"：它们会被原样存进库里，
+// 列表按行渲染时把一条记录拆成多行，用户数出来是「凭空多了几条隧道」。
+func normalizeTunnelName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		// 只填空格也算"没起名"：handler 里的 `req.Name == ""` 挡不住 "",
+		// 表里会出现一行看不见名字的隧道，用户没法在列表里认它。
+		return "", fmt.Errorf("隧道名称不能为空（不能只有空格）")
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("隧道名称不能包含换行、制表符等控制字符")
+		}
+	}
+	if n := utf8.RuneCountInString(name); n > maxTunnelNameRunes {
+		return "", fmt.Errorf("隧道名称最多 %d 个字符（现在 %d 个）：名字会占满整列，把状态和操作按钮挤出屏幕",
+			maxTunnelNameRunes, n)
+	}
+	return name, nil
+}
+
+// normalizeLocalAddr 校验客户端侧的本地服务地址，并返回规范形式（host:port）。
 //
 // 为什么要在这里拦：这个字符串会被原样写进客户端的 frpc.toml（localIP/localPort）。
 // 端口写成 99999、0 或者非数字时，frpc **解析失败直接退出** —— 而同一台客户端上
@@ -23,24 +55,71 @@ import (
 //
 // 只判"能不能用"，不判"能不能通"：本地服务没起来是另一回事（frpc 会报
 // connection refused，界面上看得到，也不会影响别的隧道）。
-func validateLocalAddr(addr string) error {
+//
+// 返回规范形式而不是只报错，是因为这三种输入都"能用但会留脏数据"（0.7.26 实测）：
+// `127.0.0.1: 80`、`127.0.0.1:081`、`127.0.0.1:+80` 全部通过校验并原样入库，
+// 客户端靠 Sscanf 宽容解析才没出事，而面板列表、日志里显示的是那串脏字符串，
+// 用户看到「本地服务 127.0.0.1:081」只会怀疑配置写坏了。
+func normalizeLocalAddr(addr string) (string, error) {
+	addr = strings.TrimSpace(addr)
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("本地服务地址应为 host:port（如 127.0.0.1:80、192.168.1.10:3389），收到 %q", addr)
+		return "", fmt.Errorf("本地服务地址应为 host:port（如 127.0.0.1:80、192.168.1.10:3389），收到 %q", addr)
 	}
-	if strings.TrimSpace(host) == "" {
-		return fmt.Errorf("本地服务地址缺少主机部分（如 127.0.0.1:80），收到 %q", addr)
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", fmt.Errorf("本地服务地址缺少主机部分（如 127.0.0.1:80），收到 %q", addr)
 	}
-	port, err := strconv.Atoi(strings.TrimSpace(portStr))
-	if err != nil {
-		return fmt.Errorf("本地服务端口必须是数字，收到 %q（这条会写进客户端的 frpc.toml，"+
+	if strings.ContainsAny(host, " \t\r\n") {
+		return "", fmt.Errorf("主机部分不能包含空白字符，收到 %q", host)
+	}
+	// 看着像 IPv4 就必须是合法 IPv4：256.256.256.256 会原样写进 frpc.toml 的
+	// localIP，frpc 每次拨号都解析失败，那条隧道永远连不上，而面板显示"在线"。
+	if isIPv4Lookalike(host) {
+		if ip := net.ParseIP(host); ip == nil || ip.To4() == nil {
+			return "", fmt.Errorf("主机 %q 不是合法的 IPv4 地址（四段 0-255）", host)
+		}
+	}
+	portStr = strings.TrimSpace(portStr)
+	if !isDigits(portStr) {
+		return "", fmt.Errorf("本地服务端口必须是数字，收到 %q（这条会写进客户端的 frpc.toml，"+
 			"写错会让那台机器上的 frpc 起不来、所有隧道一起掉线）", portStr)
 	}
-	if port < 1 || port > 65535 {
-		return fmt.Errorf("本地服务端口 %d 不合法，必须在 1-65535 之间（这条会写进客户端的 frpc.toml，"+
-			"写错会让那台机器上的 frpc 起不来、所有隧道一起掉线）", port)
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return "", fmt.Errorf("本地服务端口 %s 不合法，必须在 1-65535 之间（这条会写进客户端的 frpc.toml，"+
+			"写错会让那台机器上的 frpc 起不来、所有隧道一起掉线）", portStr)
 	}
-	return nil
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
+
+// isDigits 全是 ASCII 数字（不接受 +80 / -1 / 0x50 / 空格）。
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isIPv4Lookalike 只由数字和点组成 —— 这种主机一定是想写 IPv4，
+// 就该按 IPv4 校验；主机名里不会出现这种形状。
+func isIPv4Lookalike(host string) bool {
+	seenDot := false
+	for i := 0; i < len(host); i++ {
+		switch c := host[i]; {
+		case c >= '0' && c <= '9':
+		case c == '.':
+			seenDot = true
+		default:
+			return false
+		}
+	}
+	return seenDot
 }
 
 // NextFreePort 从端口池中取一个「没被隧道占用、且系统当前真能绑定」的公网端口。
@@ -111,11 +190,9 @@ func portBindable(protocol string, port int) bool {
 // CreateTunnel 新建隧道：自动分配端口与令牌。manualPort>0 时采用手动端口（校验占用）。
 // agentID 绑定承载该隧道的客户端（为空表示全局，所有 Agent 都可拉取）。
 func (db *DB) CreateTunnel(name, localAddr, protocol string, manualPort int, agentID string) (*shared.Tunnel, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		// 只填空格也算"没起名"：handler 里的 `req.Name == ""` 挡不住 "",
-		// 表里会出现一行看不见名字的隧道，用户没法在列表里认它。
-		return nil, fmt.Errorf("隧道名称不能为空（不能只有空格）")
+	name, err := normalizeTunnelName(name)
+	if err != nil {
+		return nil, err
 	}
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
 	if protocol == "" {
@@ -132,11 +209,17 @@ func (db *DB) CreateTunnel(name, localAddr, protocol string, manualPort int, age
 	if localAddr == "" {
 		return nil, fmt.Errorf("本地服务地址不能为空（可由调用方按 Agent 探测结果自动填充）")
 	}
-	if err := validateLocalAddr(localAddr); err != nil {
+	localAddr, err = normalizeLocalAddr(localAddr)
+	if err != nil {
 		return nil, err
 	}
+	// 负数不是"留空"的另一种写法。0 与空串表示自动分配，负数一定是前端把
+	// 某个错误值（-1 表示"没填"之类）直接透传下来了，静默改自动分配会让
+	// 用户以为手工端口生效了。
+	if manualPort < 0 {
+		return nil, fmt.Errorf("公网端口不能是负数（收到 %d）：留空或 0 表示由面板自动分配", manualPort)
+	}
 	var port int
-	var err error
 	if manualPort > 0 {
 		// 先校验范围。不校验的话，99999 这种值会走到 portBindable，
 		// 那里 listen 失败被当成"端口被占用"，于是报出一句
@@ -184,7 +267,11 @@ func (db *DB) UpdateTunnel(id int64, name, localAddr, protocol, agentID string, 
 		return err
 	}
 	if strings.TrimSpace(name) != "" {
-		t.Name = strings.TrimSpace(name)
+		n, err := normalizeTunnelName(name)
+		if err != nil {
+			return err
+		}
+		t.Name = n
 	}
 	if protocol != "" {
 		protocol = strings.ToLower(strings.TrimSpace(protocol))
@@ -199,10 +286,16 @@ func (db *DB) UpdateTunnel(id int64, name, localAddr, protocol, agentID string, 
 		t.AgentID = agentID
 	}
 	if localAddr != "" {
-		if err := validateLocalAddr(localAddr); err != nil {
+		// 规范化后再落库：编辑路径与新建路径必须给出同一个形式，
+		// 否则同一条隧道会因为"改过一次名字以外的东西"而显示成另一种写法。
+		addr, err := normalizeLocalAddr(localAddr)
+		if err != nil {
 			return err
 		}
-		t.LocalAddr = localAddr
+		t.LocalAddr = addr
+	}
+	if manualPort < 0 {
+		return fmt.Errorf("公网端口不能是负数（收到 %d）：留空或 0 表示保持原端口", manualPort)
 	}
 	if manualPort > 0 && manualPort != t.PublicPort {
 		if manualPort > 65535 {

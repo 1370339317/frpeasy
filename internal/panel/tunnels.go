@@ -35,10 +35,16 @@ func (p *Panel) createTunnelHandler(w http.ResponseWriter, r *http.Request) {
 			req.AgentID = ags[0].ID
 		}
 	}
+	// 自动探测填进来的服务名：要回给调用方。
+	// 实测（0.7.26）不带 local_addr 时，面板会取该机器上报的第一个服务，
+	// 而那可能是完全无关的程序（这台 Windows 上第一个是 GameViewer 的 1030）。
+	// 「自动选了哪个」必须说清楚，否则用户只看得到一个陌生的 127.0.0.1:1030。
+	autoPicked := ""
 	if req.LocalAddr == "" && req.AgentID != "" {
 		// 自动探测默认：取该 agent 上报的首个（置信度最高）服务
 		if svcs, err := p.db.GetAgentServices(req.AgentID); err == nil && len(svcs) > 0 {
 			req.LocalAddr = svcs[0].Addr
+			autoPicked = svcs[0].Name
 		}
 	}
 	if req.LocalAddr == "" {
@@ -56,6 +62,11 @@ func (p *Panel) createTunnelHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// 返回隧道 + 供客户端使用的一键安装命令（若尚未有 agent 注册）
 	resp := map[string]any{"tunnel": t}
+	if autoPicked != "" {
+		// 明确告知「本地地址不是你填的」：界面与 API 调用方都要能区分
+		// 「我指定的 127.0.0.1:1030」和「面板替我挑的 127.0.0.1:1030」。
+		resp["local_addr_auto"] = autoPicked
+	}
 	for k, v := range p.installCommandFields(r) {
 		resp[k] = v
 	}
@@ -156,11 +167,18 @@ func (p *Panel) deleteTunnelHandler(w http.ResponseWriter, r *http.Request, id i
 }
 
 // 解析路由中的隧道 ID（Go 1.22 模式已匹配 /api/tunnels/{id}）。
-func parseID(path string) int64 {
+//
+// 解析失败必须让调用方知道：原来直接返回 0，而 DeleteTunnel(0) 是"删 0 条"，
+// 于是 `DELETE /api/tunnels/not-an-id` 返回 200 {"ok":true} —— 调用方会以为
+// 那条隧道真的删掉了。改任何写接口前，先让"ID 不合法"与"删成功"可区分。
+func parseID(path string) (int64, bool) {
 	idx := strings.LastIndex(path, "/")
 	if idx < 0 {
-		return 0
+		return 0, false
 	}
-	id, _ := strconv.ParseInt(path[idx+1:], 10, 64)
-	return id
+	id, err := strconv.ParseInt(path[idx+1:], 10, 64)
+	if err != nil || id <= 0 {
+		return 0, false
+	}
+	return id, true
 }

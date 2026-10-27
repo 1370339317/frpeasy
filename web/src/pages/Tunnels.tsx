@@ -86,7 +86,13 @@ export function Tunnels() {
               return (
                 <tr key={t.id}>
                   <Td>
-                    <b>{t.name}</b>
+                    {/* 名字是这一页唯一「用户能随便写多长」的列：不截断会把它撑宽，
+                        把状态和操作按钮整个挤出屏幕（实测 200 字符的名字 → 名称列
+                        1473px、整表 2210px，而视口只有 1440px）。服务端已限 64 字符，
+                        这里再兜一层 —— 列宽由界面决定，不由数据决定。 */}
+                    <b className="block max-w-[15rem] truncate" title={t.name}>
+                      {t.name}
+                    </b>
                   </Td>
                   <Td>
                     {ag ? (

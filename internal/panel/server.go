@@ -175,10 +175,20 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("GET /api/tunnels", p.requireAuth(p.listTunnelsHandler))
 	mux.HandleFunc("POST /api/tunnels", p.requireAuth(p.createTunnelHandler))
 	mux.HandleFunc("DELETE /api/tunnels/{id}", p.requireAuth(func(w http.ResponseWriter, r *http.Request) {
-		p.deleteTunnelHandler(w, r, parseID(r.URL.Path))
+		id, ok := parseID(r.URL.Path)
+		if !ok {
+			http.Error(w, "隧道 ID 不合法", http.StatusBadRequest)
+			return
+		}
+		p.deleteTunnelHandler(w, r, id)
 	}))
 	mux.HandleFunc("PUT /api/tunnels/{id}", p.requireAuth(func(w http.ResponseWriter, r *http.Request) {
-		p.updateTunnelHandler(w, r, parseID(r.URL.Path))
+		id, ok := parseID(r.URL.Path)
+		if !ok {
+			http.Error(w, "隧道 ID 不合法", http.StatusBadRequest)
+			return
+		}
+		p.updateTunnelHandler(w, r, id)
 	}))
 	mux.HandleFunc("GET /api/agents", p.requireAuth(p.agentsHandler))
 	// 云端发起卸载：标记后随该客户端下一次心跳下发，由它自己清理并退出。

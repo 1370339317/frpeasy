@@ -140,3 +140,115 @@ func TestCreateTunnelRejectsBlankName(t *testing.T) {
 		t.Fatal("只有空格的名字应当被拒绝")
 	}
 }
+
+// 隧道名必须有上限且不能带控制字符。
+//
+// 实测（0.7.26）：200 个字符的名字被接受并入库，隧道页的名称列被撑到 1473px、
+// 整张表 2210px（1440px 视口），「公网访问 / 状态 / 编辑 / 删除」全部被推出屏幕。
+// 一条脏名字就能毁掉整个列表，而它显然不是用户想表达的东西（一定是误粘贴）。
+func TestCreateTunnelNameRules(t *testing.T) {
+	db := newTestDB(t)
+	// 64 个字符（含中文按字符算，不是字节）应当可以
+	ok64 := strings.Repeat("名", maxTunnelNameRunes)
+	tun, err := db.CreateTunnel(ok64, "127.0.0.1:8080", "tcp", 0, "")
+	if err != nil {
+		t.Fatalf("%d 个字符应当允许: %v", maxTunnelNameRunes, err)
+	}
+	if tun.Name != ok64 {
+		t.Fatalf("名字不应当被改写: %q", tun.Name)
+	}
+	// 首尾空白要去掉（列表里首行缩进会被当成排版错误）
+	tun, err = db.CreateTunnel("  家里群晖  ", "127.0.0.1:8080", "tcp", 0, "")
+	if err != nil || tun.Name != "家里群晖" {
+		t.Fatalf("应当去首尾空白，实际 %q / %v", tun.Name, err)
+	}
+
+	bad := map[string]string{
+		"超长":   strings.Repeat("a", maxTunnelNameRunes+1),
+		"换行":   "第一行\n第二行",
+		"制表符":  "a\tb",
+		"只有空格": "   ",
+		"空":    "",
+	}
+	for why, name := range bad {
+		if _, err := db.CreateTunnel(name, "127.0.0.1:8080", "tcp", 0, ""); err == nil {
+			t.Fatalf("%s 的名字应当被拒绝: %q", why, name)
+		}
+	}
+
+	// 编辑路径同样要拦：否则先建短的、再改成超长的就绕过了
+	if err := db.UpdateTunnel(tun.ID, strings.Repeat("长", 200), "", "", "", 0, false); err == nil {
+		t.Fatal("编辑成超长名字应当被拒绝")
+	}
+	if err := db.UpdateTunnel(tun.ID, "带\n换行", "", "", "", 0, false); err == nil {
+		t.Fatal("编辑成带换行的名字应当被拒绝")
+	}
+}
+
+// 本地服务地址要落成规范形式。
+//
+// 实测（0.7.26）：`127.0.0.1: 80`、`127.0.0.1:081`、`127.0.0.1:+80` 都能通过校验
+// 并原样入库。客户端靠 Sscanf 宽容解析才没出事，但面板列表里显示的是那串脏值，
+// 用户看到「本地服务 127.0.0.1:081」只会怀疑配置坏了。
+func TestLocalAddrNormalized(t *testing.T) {
+	db := newTestDB(t)
+	cases := []struct{ in, want string }{
+		{"127.0.0.1: 80", "127.0.0.1:80"},
+		{"127.0.0.1:081", "127.0.0.1:81"},
+		{" 192.168.1.10:3389 ", "192.168.1.10:3389"},
+		{"localhost:8080", "localhost:8080"},
+		{"0.0.0.0:80", "0.0.0.0:80"},
+		{"[::1]:80", "[::1]:80"},
+	}
+	for _, c := range cases {
+		tun, err := db.CreateTunnel("n", c.in, "tcp", 0, "")
+		if err != nil {
+			t.Fatalf("%q 应当被接受并规范化: %v", c.in, err)
+		}
+		if tun.LocalAddr != c.want {
+			t.Fatalf("%q 应当存成 %q，实际 %q", c.in, c.want, tun.LocalAddr)
+		}
+	}
+
+	reject := []string{
+		"127.0.0.1:+80",      // 加号不是端口写法
+		"127.0.0.1:-1",       // 负数
+		"256.256.256.256:80", // 像 IPv4 但不是
+		"127.0.0. 1:80",      // 主机里带空格
+		"127.0.0.1:0x50",     // 十六进制
+		"127.0.0.1:80extra",  // 端口后面跟字母
+	}
+	for _, a := range reject {
+		if _, err := db.CreateTunnel("n", a, "tcp", 0, ""); err == nil {
+			t.Fatalf("%q 应当被拒绝", a)
+		}
+	}
+}
+
+// 公网端口写成负数不是"留空"的另一种写法。
+func TestManualPortNegativeRejected(t *testing.T) {
+	db := newTestDB(t)
+	if _, err := db.CreateTunnel("n", "127.0.0.1:8080", "tcp", -5, ""); err == nil {
+		t.Fatal("manual_port=-5 应当报错，而不是静默自动分配")
+	}
+	tun, err := db.CreateTunnel("n", "127.0.0.1:8080", "tcp", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateTunnel(tun.ID, "", "", "", "", -1, false); err == nil {
+		t.Fatal("编辑时 manual_port=-1 应当报错")
+	}
+}
+
+// 非数字 ID 必须被识别出来：原来 parseID 返回 0，而 DeleteTunnel(0) 是"删 0 条"，
+// 于是 DELETE /api/tunnels/not-an-id 返回 200 {"ok":true} —— 调用方会以为删成功了。
+func TestParseIDRejectsGarbage(t *testing.T) {
+	for _, p := range []string{"/api/tunnels/not-an-id", "/api/tunnels/0", "/api/tunnels/-1", "/api/tunnels/"} {
+		if id, ok := parseID(p); ok {
+			t.Fatalf("%q 不该解析出 ID（得到 %d）", p, id)
+		}
+	}
+	if id, ok := parseID("/api/tunnels/42"); !ok || id != 42 {
+		t.Fatalf("正常 ID 应当解析成功，得到 %d/%v", id, ok)
+	}
+}

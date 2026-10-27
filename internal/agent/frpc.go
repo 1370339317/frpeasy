@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -453,8 +454,11 @@ func (m *FrpcManager) Reconcile(cfg shared.AgentConfig, force bool) error {
 		time.Sleep(300 * time.Millisecond)
 	}
 	cmd := exec.Command(bin, "--config", cfgPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// frpc 的报错必须进 agent 日志：它退出时 agent 只看得到"进程没了"，
+	// 而"为什么"全在这一行里（端口被占、token 不匹配、localPort 非法…）。
+	out := newLineLogger("frpc")
+	cmd.Stdout = out
+	cmd.Stderr = out
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动 frpc 失败: %w", err)
 	}
@@ -465,15 +469,23 @@ func (m *FrpcManager) Reconcile(cfg shared.AgentConfig, force bool) error {
 	// 旧进程的 Wait 稍后才返回。如果不判断 m.cmd 是否还是自己，旧回调会把
 	// 新进程的 running 误置为 false —— 于是下一轮 Reconcile 又重启一次 frpc，
 	// 变成每 15s 无谓重启一次隧道。
-	go func(c *exec.Cmd) {
-		_ = c.Wait()
+	go func(c *exec.Cmd, w *lineLogger) {
+		err := c.Wait()
+		// 先把缓冲里那半行（通常就是报错本身）落盘，再判状态。
+		w.Flush()
 		m.mu.Lock()
-		if m.cmd == c {
+		self := m.cmd == c
+		if self {
 			m.running = false
 			m.cmd = nil
 		}
 		m.mu.Unlock()
-	}(cmd)
+		// 只记"意外退出"：配置变更时是我们自己 Kill 的，那种退出没有意义。
+		// 意外退出必须留一行，否则现场只剩「隧道全掉了」这一个结论。
+		if self && err != nil {
+			log.Printf("[agent] frpc 已退出（不由配置变更触发）：%v；原因见上方 [frpc] 行", err)
+		}
+	}(cmd, out)
 	return nil
 }
 

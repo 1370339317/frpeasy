@@ -185,9 +185,11 @@ export function TunnelModal({
       <Section no={3} title="取个名字">
         <Input
           value={name}
+          maxLength={64}
           onChange={(e) => setName(e.target.value)}
           placeholder="如 家里群晖 / 办公室远程桌面"
         />
+        <Hint>最多 64 个字符（名字会被截断显示在列表里，悬停可看全名）。</Hint>
         <Field
           className="mt-3 mb-0"
           label={

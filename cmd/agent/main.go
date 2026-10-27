@@ -4,6 +4,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 	"time"
@@ -80,8 +81,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 日志落盘要在 NewClient 之前：连不上面板、拉不到 frpc 这些启动期故障，
+	// 恰恰是最需要证据的地方，而它们全发生在 NewClient 与 Run 之间。
+	// 计划任务/服务下 stdout 无人接收，不落盘就等于什么都没有。
+	closeLog, err := agent.SetupFileLog(*dataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "[agent] 日志文件不可写（继续运行）:", err)
+	}
+	defer closeLog()
+	log.Printf("[agent] 启动 %s %s/%s，面板 %s，数据目录 %s",
+		version, runtime.GOOS, runtime.GOARCH, *server, *dataDir)
+
 	c, err := agent.NewClient(*server, *token, *name, *dataDir)
 	if err != nil {
+		log.Println("初始化失败:", err)
 		fmt.Println("初始化失败:", err)
 		os.Exit(1)
 	}
@@ -91,6 +104,9 @@ func main() {
 		fmt.Println("[agent] 提示: --source 已废弃并被忽略；源顺序由面板设置决定（设置 → 二进制下载）")
 	}
 	if err := c.Run(); err != nil {
+		// 两处都写：log 进 agent.log（计划任务下唯一能看到的地方），
+		// fmt 保留前台运行时的即时可见性。
+		log.Println("运行失败:", err)
 		fmt.Println("运行失败:", err)
 		os.Exit(1)
 	}

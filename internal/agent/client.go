@@ -251,7 +251,7 @@ func (c *Client) Run() error {
 		if err := c.register(); err != nil {
 			return fmt.Errorf("注册失败: %w", err)
 		}
-		fmt.Println("[agent] 已注册 agent_id=", c.agentID)
+		log.Println("[agent] 已注册 agent_id=", c.agentID)
 	} else {
 		// 复用已有身份，但面板地址可能在两次启动之间变过（设置里改了公网地址）。
 		// 顺手写回 state，保证「卸载前报备」打到的是当前地址。
@@ -262,15 +262,15 @@ func (c *Client) Run() error {
 		cfg, err := c.fetchConfig()
 		if err != nil {
 			if err.Error() == "unauthorized" {
-				fmt.Println("[agent] 凭据失效，重新注册…")
+				log.Println("[agent] 凭据失效，重新注册…")
 				if rerr := c.register(); rerr != nil {
-					fmt.Println("[agent] 重新注册失败:", rerr)
+					log.Println("[agent] 重新注册失败:", rerr)
 					time.Sleep(10 * time.Second)
 					continue
 				}
 				continue
 			}
-			fmt.Println("[agent] 拉取配置失败:", err)
+			log.Println("[agent] 拉取配置失败:", err)
 			time.Sleep(10 * time.Second)
 			continue
 		}
@@ -281,7 +281,7 @@ func (c *Client) Run() error {
 		forceRestart := cfg.FRPSRunning && !c.lastFRPSRunning
 		c.lastFRPSRunning = cfg.FRPSRunning
 		if err := c.frpc.Reconcile(*cfg, forceRestart); err != nil {
-			fmt.Println("[agent] frpc 保活失败:", err)
+			log.Println("[agent] frpc 保活失败:", err)
 		}
 
 		// 构造状态上报
@@ -294,7 +294,7 @@ func (c *Client) Run() error {
 		}
 		resp, herr := c.heartbeat(statuses)
 		if herr != nil {
-			fmt.Println("[agent] 心跳失败:", herr)
+			log.Println("[agent] 心跳失败:", herr)
 		} else if resp != nil && resp.Uninstall {
 			// 卸载优先于升级：两者同时下发时，没有任何理由先升完再卸
 			c.selfUninstall()
@@ -303,7 +303,7 @@ func (c *Client) Run() error {
 			// 升级指令随心跳下发。执行成功后本进程必须退出（新进程已接管），
 			// 否则会出现两个 agent 同时连面板、各起一个 frpc。
 			if c.maybeSelfUpdate(resp.AgentUpdate) {
-				fmt.Println("[agent] 已交接给新版本，退出")
+				log.Println("[agent] 已交接给新版本，退出")
 				return nil
 			}
 		}
