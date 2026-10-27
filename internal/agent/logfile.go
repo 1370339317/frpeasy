@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"frpeasy/internal/shared"
 )
 
 // 客户端日志落盘。
@@ -68,7 +70,7 @@ func rotateLog(path string) {
 func (w *lineLogger) Flush() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if s := strings.TrimRight(string(w.buf), "\r\n"); strings.TrimSpace(s) != "" {
+	if s := strings.TrimSpace(shared.StripANSI(strings.TrimRight(string(w.buf), "\r\n"))); s != "" {
 		log.Printf("[%s] %s", w.prefix, s)
 	}
 	w.buf = w.buf[:0]
@@ -102,7 +104,11 @@ func (w *lineLogger) Write(p []byte) (int, error) {
 			break
 		}
 		line := strings.TrimRight(string(w.buf[:i]), "\r")
-		if strings.TrimSpace(line) != "" {
+		// frpc 的每行都带 SGR（`ESC[0m ESC[1;34m`）：不去掉的话日志文件里
+		// 每行前面挂一串 `[0m[1;34m`，而且「只有转义、没有正文」的空行会
+		// 变成一行光秃秃的 `[frpc] `（0.7.27 首次上线实测到的）。
+		line = strings.TrimSpace(shared.StripANSI(line))
+		if line != "" {
 			log.Printf("[%s] %s", w.prefix, line)
 		}
 		w.buf = w.buf[i+1:]
@@ -110,7 +116,9 @@ func (w *lineLogger) Write(p []byte) (int, error) {
 	// frpc 偶尔会输出不换行的进度/报错巨块：超过 8KB 直接倒出来，
 	// 否则这段内容会一直压着不落盘，出事时正好缺这一段。
 	if len(w.buf) > 8192 {
-		log.Printf("[%s] %s", w.prefix, string(w.buf))
+		if s := strings.TrimSpace(shared.StripANSI(string(w.buf))); s != "" {
+			log.Printf("[%s] %s", w.prefix, s)
+		}
 		w.buf = w.buf[:0]
 	}
 	return len(p), nil

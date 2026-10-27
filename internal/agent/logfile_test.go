@@ -74,6 +74,10 @@ func TestLineLoggerSplitsLines(t *testing.T) {
 	closeLog, _ := SetupFileLog(dir)
 	w := newLineLogger("frpc")
 	_, _ = w.Write([]byte("login to server success\nstart proxy success\n"))
+	// frpc 每行都带 SGR：不剥掉就会在日志里留下 "[frpc] [0m[1;34m..."
+	// 以及只剩转义码的空白行（0.7.27 首次上线实测到）
+	_, _ = w.Write([]byte("\x1b[0m\x1b[1;34m2026-10-27 14:14:16.000 [I] colored line\x1b[0m\n"))
+	_, _ = w.Write([]byte("\x1b[0m\x1b[1;31m\x1b[0m\n"))
 	_, _ = w.Write([]byte("partial-without-newline"))
 	// 进程退出时必须把最后半行冲出去 —— frpc 的报错行往往没有结尾换行
 	w.Flush()
@@ -82,9 +86,18 @@ func TestLineLoggerSplitsLines(t *testing.T) {
 
 	b, _ := os.ReadFile(filepath.Join(dir, agentLogName))
 	s := string(b)
-	for _, want := range []string{"[frpc] login to server success", "[frpc] start proxy success", "[frpc] partial-without-newline"} {
+	for _, want := range []string{"[frpc] login to server success", "[frpc] start proxy success", "[frpc] partial-without-newline", "[frpc] 2026-10-27 14:14:16.000 [I] colored line"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("缺少 %q，实际日志:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "\x1b") {
+		t.Fatalf("日志里不该残留 ANSI 转义: %q", s)
+	}
+	// 只有转义码的行不该变成光秃秃的 "[frpc] "
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasSuffix(line, "[frpc]") || strings.HasSuffix(line, "[frpc] ") {
+			t.Fatalf("出现了只有前缀的空日志行: %q", line)
 		}
 	}
 }
