@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -735,8 +736,15 @@ func (m *FrpsManager) TailLog(maxBytes int) string {
 			b = b[i+1:]
 		}
 	}
-	return string(b)
+	// 去掉 ANSI 颜色码。frps 写文件时也带 `ESC[0mESC[1;34m` 这种转义，
+	// 浏览器不解析它们 —— 结果界面每行日志前面都挂着 `[0m[1;34m`，
+	// 看起来像日志坏了（实测：80/80 行都带）。这里统一剥掉，只有一处漏斗。
+	return ansiEscape.ReplaceAllString(string(b), "")
 }
+
+// ansiEscape 匹配 CSI 序列（颜色、光标等）。frps 用的是 SGR（ESC[...m），
+// 这里放宽到所有 CSI，免得它哪天换成别的控制序列又漏回来。
+var ansiEscape = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]")
 
 // IsRunning 当前是否在跑（含“正在拉起”）。
 func (m *FrpsManager) IsRunning() bool {
