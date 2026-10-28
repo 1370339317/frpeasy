@@ -56,6 +56,46 @@ func readFileString(t *testing.T, path string) string {
 	return string(b)
 }
 
+// 每条 proxy 都要开压缩。
+//
+// 背景（2026-10-28 实测）：服务器在境外，面板直连下载 17MB 只有 ~58KB/s，
+// 而隧道吞吐 30~37KB/s —— 瓶颈是链路带宽，不是 frp、也不是代码。
+// 这种链路上 frp 的协议开销占比很高，对 HTTP 响应体（HTML/JS/CSS/JSON）
+// 压缩通常能换回数倍有效吞吐，是软件侧唯一能显著改善的一项。
+//
+// 这条断言是防止以后有人"清理冗余配置"时把它顺手删掉：删了不会报任何错，
+// 只会让所有隧道悄悄慢回去，而且没有任何迹象。
+func TestGenerateConfigEnablesCompression(t *testing.T) {
+	m := NewFrpcManager(t.TempDir())
+	cfg := shared.AgentConfig{
+		FRPSAddr:  "1.2.3.4:7000",
+		FRPSToken: "tok",
+		Tunnels: []shared.Tunnel{
+			{ID: 7, Protocol: "tcp", LocalAddr: "127.0.0.1:8788", PublicPort: 21000},
+			{ID: 8, Protocol: "tcp", LocalAddr: "127.0.0.1:3389", PublicPort: 21001},
+		},
+	}
+	path, hash, err := m.GenerateConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hash == "" {
+		t.Fatal("配置哈希不能为空：轮询靠它判断要不要重启 frpc")
+	}
+	content := readFileString(t, path)
+
+	if n := strings.Count(content, "transport.useCompression = true"); n != 2 {
+		t.Fatalf("每条 proxy 都要开压缩，期望 2 处，实际 %d 处:\n%s", n, content)
+	}
+	// 这两项是历次事故留下的，改动压缩时不能顺手删掉
+	if !strings.Contains(content, "loginFailExit = false") {
+		t.Fatalf("loginFailExit 必须保留（否则 frps 一停 frpc 就自杀）:\n%s", content)
+	}
+	if strings.Contains(content, "[common]") {
+		t.Fatalf("不能出现 INI 段语法（frp>=0.52 的 toml 会解析失败）:\n%s", content)
+	}
+}
+
 // 目标已存在时必须能覆盖（下载新版本后落到同一个 frpc.exe）。
 func TestReplaceBinaryReplacesExisting(t *testing.T) {
 	dir := t.TempDir()

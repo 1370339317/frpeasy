@@ -455,7 +455,17 @@ func (m *FrpcManager) GenerateConfig(cfg shared.AgentConfig) (string, string, er
 			continue
 		}
 		host, port := splitHostPort(t.LocalAddr)
-		fmt.Fprintf(&b, "\n[[proxies]]\nname = %q\ntype = %q\nlocalIP = %q\nlocalPort = %d\nremotePort = %d\n",
+		// transport.useCompression：跨境 / 小带宽链路上唯一的软件侧增益。
+		//
+		// 实测背景（2026-10-28）：服务器在新加坡，面板直连下载 17MB 只有 58KB/s，
+		// 而隧道吞吐 30~37KB/s —— 瓶颈是链路带宽，不是 frp 也不是代码。
+		// 这种链路上 frp 的协议开销占比很高，对 HTTP 响应体（HTML/JS/CSS/JSON）
+		// 做一次压缩通常能换回 3~5 倍的有效吞吐。
+		//
+		// 对已压缩的内容（jpeg/zip/tls 流）没有收益，但 frp 的压缩只增加 CPU，
+		// 不影响正确性，也不会让裸 TCP 场景变慢到可感知 —— 现代 CPU 的 deflate
+		// 在几百 MB/s 量级，而这条链路的上限只有几十 KB/s。
+		fmt.Fprintf(&b, "\n[[proxies]]\nname = %q\ntype = %q\nlocalIP = %q\nlocalPort = %d\nremotePort = %d\ntransport.useCompression = true\n",
 			fmt.Sprintf("t%d", t.ID), "tcp", host, port, t.PublicPort)
 	}
 	out := filepath.Join(m.cfgDir, "frpc.toml")
