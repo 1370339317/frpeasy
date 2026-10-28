@@ -3,7 +3,7 @@ import { useApp, type TunnelDraft } from '../store'
 import { api } from '../lib/api'
 import { copyWithHint, fmtBytes } from '../lib/format'
 import { Badge, Button, Card, Empty, Table, Td, Led } from '../components/ui'
-import type { Tunnel } from '../types'
+import type { Tunnel, TunnelProbeResult } from '../types'
 import { TunnelModal } from './TunnelModal'
 
 function StateBadge({ t }: { t: Tunnel }) {
@@ -36,6 +36,37 @@ export function Tunnels() {
   // 从「客户端」页带过来的建隧道草稿（哪台机器 + 哪个服务）。
   // 只在交接那一刻消费一次，消费后清空 —— 否则轮询重渲染会把弹窗反复打开。
   const [prefill, setPrefill] = useState<TunnelDraft | null>(null)
+  // 每条隧道的实测结果（按 id 记，互不影响）。'loading' 表示正在测。
+  //
+  // 结果只留在本页内存里、不进库：它是一个"此刻这条链路能跑多快"的快照，
+  // 存下来反而会让人分不清"这是刚测的还是上周的"。
+  const [probes, setProbes] = useState<Record<number, TunnelProbeResult | 'loading'>>({})
+
+  /**
+   * 测一条隧道的实际吞吐。
+   *
+   * 请求从**服务器**发出，走 127.0.0.1:公网端口 → frps → frpc → 客户端本地服务，
+   * 所以数据真的过了一遍隧道，不是本机回环。
+   *
+   * 这是判断「关闭 TCP 多路复用」有没有用的唯一实测手段：关 mux 的理论收益是
+   * 突破 yamux 的 256KB 单流窗口，但实际能提到多少只能这么量。
+   */
+  async function runProbe(t: Tunnel) {
+    setProbes((p) => ({ ...p, [t.id]: 'loading' }))
+    try {
+      const r = await api<TunnelProbeResult>('POST', `/api/tunnels/${t.id}/speedtest`, {})
+      setProbes((p) => ({ ...p, [t.id]: r }))
+      if (!r.ok) toast(r.err || '测速没有结果', 'bad')
+      else if (r.note) toast(r.note)
+    } catch (e) {
+      setProbes((p) => {
+        const next = { ...p }
+        delete next[t.id]
+        return next
+      })
+      toast((e as Error).message, 'bad')
+    }
+  }
 
   useEffect(() => {
     if (!tunnelDraft) return
@@ -96,7 +127,7 @@ export function Tunnels() {
           <Empty>还没有隧道。点右上角「+ 新建隧道」，选机器 → 选服务 → 起名，三步搞定。</Empty>
         ) : (
           <Table
-            head={['名称', '客户端', '本地服务', '公网访问', '状态', '流量 入/出（带当前速率）', '']}
+            head={['名称', '客户端', '本地服务', '公网访问', '状态', '流量 ↑上传 / ↓下载', '']}
           >
             {tunnels.map((t) => {
               const ag = t.agent_id ? agentMap[t.agent_id] : undefined
@@ -177,14 +208,61 @@ export function Tunnels() {
                     {/* 只有累计值看不出"是不是刚变慢"。速率由面板对相邻两次采样
                         做差分得到，空闲时为 0 就不显示，避免一片 0 B/s 干扰视线。 */}
                     {(t.rate_in > 0 || t.rate_out > 0) && (
-                      <span className="block whitespace-nowrap text-[11px] text-accent-fg">
+                      <span
+                        className="block whitespace-nowrap text-[11px] text-accent-fg"
+                        title="frps 统计的实时速率：↑ 是用户上传（进隧道），↓ 是用户下载（出隧道）"
+                      >
                         ↑{fmtBytes(t.rate_in)}/s ↓{fmtBytes(t.rate_out)}/s
                       </span>
                     )}
+                    {/* 实测吞吐。与上面两行的区别：上面是"用户此刻在用多少"
+                        （没人用就是 0），这里是"主动压一下，这条链路最多能跑多少"。
+                        两者都不为 0 但不相等很正常 —— 前者受用户操作影响。 */}
+                    {(() => {
+                      const pr = probes[t.id]
+                      if (pr === 'loading') {
+                        return (
+                          <span className="block whitespace-nowrap text-[11px] text-dim">
+                            测速中…
+                          </span>
+                        )
+                      }
+                      if (!pr) return null
+                      if (!pr.ok) {
+                        return (
+                          <span
+                            className="block max-w-[13rem] truncate text-[11px] text-bad-fg"
+                            title={pr.err}
+                          >
+                            测速失败
+                          </span>
+                        )
+                      }
+                      return (
+                        <span className="block whitespace-nowrap text-[11px] text-ok-fg">
+                          实测 {pr.speed > 0 ? `${fmtBytes(pr.speed)}/s` : '—'}
+                          <span className="ml-1 text-dim">RTT {pr.rtt_ms}ms</span>
+                        </span>
+                      )
+                    })()}
                   </Td>
                   <Td align="right" className="whitespace-nowrap">
                     <Button variant="ghost" size="sm" onClick={() => openEdit(t)}>
                       编辑
+                    </Button>{' '}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={probes[t.id] === 'loading' || !t.agent_id}
+                      // 测不了的情况要说原因，不然用户只看到按钮灰着
+                      title={
+                        !t.agent_id
+                          ? '未绑定机器，没有可测的目标'
+                          : '从服务器经隧道压一次，测这条链路的实际吞吐'
+                      }
+                      onClick={() => void runProbe(t)}
+                    >
+                      测速
                     </Button>{' '}
                     <Button variant="danger" size="sm" onClick={() => void del(t)}>
                       删除
@@ -198,8 +276,13 @@ export function Tunnels() {
 
         <div className="mt-1.5 text-xs leading-[1.5] text-dim">
           {readOnly
-            ? `状态来自 frps 自身（dashboard 直读），「在线」= frps 上这条代理确实建立了。流量为 frps 统计的今日累计值，小字是最近 5 秒的平均速率。公网入口 ${accessHost} —— ${srcText}。`
+            ? `状态来自 frps 自身（dashboard 直读），「在线」= frps 上这条代理确实建立了。公网入口 ${accessHost} —— ${srcText}。`
             : `提示：状态以 frps 侧为准，frps 没运行时一律显示「等待服务端」，不会再误报在线。公网入口 ${accessHost} —— ${srcText}。`}
+          {/* 流量列的说明必须两个分支都有：这一列始终存在，用户对三点数字的困惑
+              与 frps 是否运行无关。之前只写在 readOnly 分支里，正常运行时反而看不到。 */}
+          {' '}流量三行：「累计」是 frps 统计的今日总量；「↑↓ 每秒」是最近 5 秒用户实际在
+          用多少（没人访问就是 0）；「实测」是点「测速」后主动压出来的链路吞吐上限。
+          上传 = 用户 → 服务，下载 = 服务 → 用户。
         </div>
       </Card>
 

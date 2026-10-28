@@ -496,6 +496,22 @@ export interface TuningResponse {
   speedtest: SpeedTestConfig
 }
 
+/** 隧道级测速结果（从服务器经 frps → frpc → 客户端服务）。 */
+export interface TunnelProbeResult {
+  tunnel_id: number
+  /** TCP 握手往返（毫秒），经隧道，含客户端↔服务器那段 */
+  rtt_ms: number
+  /** 稳态吞吐（字节/秒）；非 HTTP 服务为 0 */
+  speed: number
+  bytes: number
+  ms: number
+  /** 目标是否是 HTTP 服务；false 表示只测了连通性与延迟 */
+  http: boolean
+  ok: boolean
+  note: string
+  err: string
+}
+
 /** 链路自检的单个目标结果。 */
 export interface DiagnoseItem {
   key: string
@@ -504,6 +520,8 @@ export interface DiagnoseItem {
   speed: number
   bytes: number
   ms: number
+  /** 首字节耗时（毫秒），含 DNS/TCP/TLS 握手 —— 它解释了"第一次为什么慢" */
+  ttfb_ms: number
   ok: boolean
   error: string
 }

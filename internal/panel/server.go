@@ -185,6 +185,9 @@ func (p *Panel) Run(listen string) error {
 
 	// 受保护接口
 	mux.HandleFunc("GET /api/tunnels", p.requireAuth(p.listTunnelsHandler))
+	// 隧道级测速：从服务器本地经 frps → frpc → 客户端服务，测这条隧道的真实吞吐。
+	// 这是验证「关闭 TCP 多路复用」有没有效果的唯一实测手段。
+	mux.HandleFunc("POST /api/tunnels/{id}/speedtest", p.requireAuth(p.tunnelSpeedTestHandler))
 	mux.HandleFunc("POST /api/tunnels", p.requireAuth(p.createTunnelHandler))
 	mux.HandleFunc("DELETE /api/tunnels/{id}", p.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		id, ok := parseID(r.URL.Path)

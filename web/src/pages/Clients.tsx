@@ -232,6 +232,47 @@ export function Clients() {
   const [panelVer, setPanelVer] = useState<VersionResponse | null>(null)
   // 哪台机器的服务列表处于"展开全部"状态（按 agent id 记，互不影响）
   const [expandedSvc, setExpandedSvc] = useState<string | null>(null)
+  // 正在等测速结果的那台机器（按 id）。测速要等客户端心跳领走请求、
+  // 拉 1MB、再把结果随下一次心跳送回来，实测 15~30 秒，所以要有个进行中状态。
+  const [probing, setProbing] = useState<string | null>(null)
+
+  /**
+   * 让单台客户端立刻测一次「本机 → 面板」速度。
+   *
+   * 为什么放在客户端卡片而不是只放设置页：
+   * 「设置 → 客户端测速」管的是**策略**（间隔、开关、全局触发），属于全局配置；
+   * 而"这台机器到底多快"是看这张卡片时才会产生的问题，就地给按钮最直接。
+   * 两处都需要，不重复：设置页配节奏，这里配对象。
+   */
+  async function measureOne(a: Agent) {
+    if (probing) return
+    setProbing(a.id)
+    const base = a.speed_at
+    try {
+      await api('POST', `/api/agents/${encodeURIComponent(a.id)}/speedtest`, {})
+      // 等结果：面板只是排队，客户端下次心跳（约 15 秒）才领走请求，
+      // 测完再下次心跳送回。所以这里轮询到 speed_at 变化为止，最多 90 秒。
+      const deadline = Date.now() + 90000
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 3000))
+        const r = await api<{ agents: Agent[] }>('GET', '/api/agents')
+        const cur = (r.agents ?? []).find((x) => x.id === a.id)
+        if (cur && cur.speed_at && cur.speed_at !== base) {
+          await loadAgents()
+          toast(
+            `${a.name} 到面板：${(cur.down_kbps / 8).toFixed(0)} KB/s`,
+            cur.down_kbps / 8 < 200 ? 'bad' : undefined,
+          )
+          return
+        }
+      }
+      toast('已下发测速请求，但 90 秒内没等到结果。客户端可能刚离线，或版本还不支持主动测速。', 'bad')
+    } catch (e) {
+      toast((e as Error).message, 'bad')
+    } finally {
+      setProbing(null)
+    }
+  }
   const installRef = useRef<HTMLPreElement | null>(null)
   const uninstallRef = useRef<HTMLPreElement | null>(null)
   const logPreRef = useRef<HTMLPreElement | null>(null)
@@ -690,20 +731,37 @@ export function Clients() {
                   <b className="font-medium text-dim">最后心跳</b>
                   <span>{fmtAgo(a.last_seen)}</span>
                   <b className="font-medium text-dim">到面板速度</b>
-                  <span className="font-mono">
-                    {a.down_kbps > 0 ? (
-                      <>
-                        {(a.down_kbps / 8).toFixed(0)} KB/s
-                        <span className="ml-1 font-sans text-[11px] text-dim">
-                          （{fmtAgo(a.speed_at)}测）
-                          {a.down_kbps / 8 < 200 && (
-                            <span className="text-warn-fg"> · 偏慢，隧道吞吐会受它限制</span>
-                          )}
-                        </span>
-                      </>
-                    ) : (
-                      <span className="text-dim">等待客户端自测（客户端升到支持自测的版本后自动开始）</span>
-                    )}
+                  <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+                    <span className="font-mono">
+                      {a.down_kbps > 0 ? (
+                        <>
+                          {(a.down_kbps / 8).toFixed(0)} KB/s
+                          <span className="ml-1 font-sans text-[11px] text-dim">
+                            （{fmtAgo(a.speed_at)}测）
+                            {a.down_kbps / 8 < 200 && (
+                              <span className="text-warn-fg"> · 偏慢，隧道吞吐会受它限制</span>
+                            )}
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-dim">还没测过</span>
+                      )}
+                    </span>
+                    {/* 单台测速。设置页管「多久测一次」，这里管「现在就测这台」。 */}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="whitespace-nowrap px-1.5 py-0.5 text-[11.5px]"
+                      disabled={probing !== null}
+                      title={
+                        a.online
+                          ? '让这台客户端立刻测一次它到面板的速度（约 15~30 秒出结果）'
+                          : '客户端离线，请求会排队等它上线后才执行'
+                      }
+                      onClick={() => void measureOne(a)}
+                    >
+                      {probing === a.id ? '测速中…' : '立即测'}
+                    </Button>
                   </span>
                 </div>
 

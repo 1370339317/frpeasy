@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useApp } from '../store'
 import { api } from '../lib/api'
-import { copyWithHint } from '../lib/format'
+import { compareVersions, copyWithHint } from '../lib/format'
 import {
   Alert,
   Button,
@@ -248,6 +248,7 @@ export function SettingsPage() {
     net,
     theme,
     setTheme,
+    agents,
     loadSettings,
     loadMe,
     loadTunnels,
@@ -297,6 +298,12 @@ export function SettingsPage() {
   const [token, setToken] = useState('')
   const [pass, setPass] = useState('')
   const [saving, setSaving] = useState(false)
+  // 上一次保存失败的原因。
+  //
+  // 只用 toast 是不够的：toast 几秒后消失，用户切个页面回来就看不到发生了什么，
+  // 只剩下"我明明点了保存，怎么刷新后还是旧值"。这类反馈必须留在页面上，
+  // 直到用户看见或下次保存成功为止 —— 它对应的正是"保存了但没生效"的困惑。
+  const [saveError, setSaveError] = useState('')
   const [testing, setTesting] = useState(false)
   const [testingClient, setTestingClient] = useState(false)
 
@@ -392,6 +399,34 @@ export function SettingsPage() {
   useEffect(() => {
     void loadTuning()
   }, [loadTuning])
+
+  // ---- 隧道传输层的「生效状态」与「护栏状态」 ----
+  //
+  // 这两个值解决同一类困惑："我保存了，到底生效没有？为什么保存不了？"
+  // 之前只有表单值和一句 toast，用户没法自己判断，只能反复刷新猜。
+  const muxMinVer = tuning?.min_agent_version ?? ''
+
+  /** 版本不足以安全关闭 mux 的客户端（与后端 staleAgentsForTransport 同一判据）。 */
+  const staleForMux = (() => {
+    if (!muxMinVer) return []
+    return (agents ?? []).filter((a) => {
+      const v = (a.agent_version || '').trim().replace(/^v/i, '')
+      // 版本号认不出来（dev / 本地构建）同样算不合格 —— 后端也是这么判的：
+      // 不赌一个未知版本的解码行为。
+      if (!/^\d+\.\d+/.test(v)) return true
+      return compareVersions(v, muxMinVer) < 0
+    })
+  })()
+
+  /** 当前**已经生效**的传输层参数（frps 正在用的那一份）。 */
+  const applied = tuning?.transport
+
+  /** 表单与生效值是否有差异 —— 有就说明"改了但还没保存"。 */
+  const transportDirty =
+    !!applied &&
+    ((applied.tcp_mux ? '1' : '0') !== tcpMux ||
+      (applied.compression ? '1' : '0') !== compress ||
+      (tcpMux === '0' && applied.pool_count !== (Number.parseInt(poolCount, 10) || 0)))
 
   // 切换拥塞控制。
   //
@@ -515,6 +550,7 @@ export function SettingsPage() {
       }
 
       const r = await api<SettingsSaveResult>('POST', '/api/settings', body)
+      setSaveError('')
       setToken('')
       setPass('')
       // 保存后重新回填：服务端会规范化取值（例如去掉公网地址末尾的斜杠），
@@ -534,7 +570,9 @@ export function SettingsPage() {
         toast('设置已保存')
       }
     } catch (e) {
-      toast((e as Error).message, 'bad')
+      const msg = (e as Error).message
+      setSaveError(msg)
+      toast(msg, 'bad')
     } finally {
       setSaving(false)
     }
@@ -695,6 +733,21 @@ export function SettingsPage() {
 
   return (
     <>
+      {/* 保存失败的持久提示。放在最上面：无论失败原因属于哪一块设置，
+          用户一进这个页面就能看到，不用翻卡片找。 */}
+      {saveError && (
+        <Alert tone="bad">
+          <div className="flex flex-wrap items-start gap-2">
+            <span className="min-w-0 flex-1">
+              <b>上次保存没有成功</b>，所以这些设置仍是原来的值：{saveError}
+            </span>
+            <Button size="sm" variant="ghost" className="shrink-0" onClick={() => setSaveError('')}>
+              知道了
+            </Button>
+          </div>
+        </Alert>
+      )}
+
       <Card title="公网地址" desc="客户端连接 frps 用的地址，也是生成安装命令的依据">
         <Field
           label="公网地址（域名或 IP，可带面板端口）"
@@ -959,6 +1012,38 @@ export function SettingsPage() {
         title="隧道传输"
         desc="由面板统一决定并下发给所有客户端，两端必须一致"
       >
+        {/* 生效状态条。
+            用户最容易卡住的一步不是"怎么改"，而是"改完到底生效没有" ——
+            表单值只是"我填的"，这里显示的是 frps 与心跳**正在用的那一份**。
+            两者不同还给出明确解释：不是保存失败，而是还没点保存。 */}
+        {applied && (
+          <div
+            className={cx(
+              'mb-3 rounded-lg border px-2.5 py-1.5 text-[12px] leading-[1.6]',
+              transportDirty
+                ? 'border-warn-fg/40 bg-warn-dim text-warn-fg'
+                : 'border-ok-fg/30 bg-ok-dim text-ok-fg',
+            )}
+          >
+            {transportDirty ? (
+              <>
+                表单已改但<b>还没保存</b>：下面显示的是你填的值，当前实际生效的仍是 ——
+                多路复用 {applied.tcp_mux ? '开' : '关'} · 压缩{' '}
+                {applied.compression ? '开' : '关'} · 连接池 {applied.pool_count}。点「保存」后才会下发。
+              </>
+            ) : (
+              <>
+                当前生效：多路复用 <b>{applied.tcp_mux ? '开' : '关'}</b> · 压缩{' '}
+                <b>{applied.compression ? '开' : '关'}</b> · 连接池{' '}
+                <b>{applied.pool_count}</b>
+                <span className="ml-1 opacity-80">
+                  （与下面的表单一致；客户端会在下次心跳约 15 秒内按此重连）
+                </span>
+              </>
+            )}
+          </div>
+        )}
+
         <div className="grid gap-3.5">
           <label className="flex cursor-pointer items-start gap-2.5">
             <input
@@ -993,8 +1078,29 @@ export function SettingsPage() {
                 吞吐上限 ≈ 256KB ÷ RTT（跨境 200ms 时只有 ~1.3MB/s）。关掉之后每个隧道
                 独占连接，才能跑满链路。
                 <b className="text-warn-fg">
-                  {' '}要求所有客户端 ≥ {tuning?.min_agent_version ?? '0.7.34'}；切换时隧道会中断十几秒。
+                  {' '}要求所有客户端 ≥ {muxMinVer || '0.7.34'}；切换时隧道会中断十几秒。
                 </b>
+              </span>
+
+              {/* 护栏前置到界面上。
+                  之前这条判断只在保存时由后端返回 409，用户点了保存、看到一句
+                  toast、刷新后又发现没变 —— 完全不知道是被什么挡住了。
+                  现在提前点名是哪几台机器，用户不用试就知道该先做什么。 */}
+              {staleForMux.length > 0 && (
+                <span className="mt-1.5 block rounded-md border border-bad-fg/40 bg-bad-dim px-2 py-1.5 text-[11.5px] leading-[1.6] text-bad-fg">
+                  现在<b>关不掉</b>：{staleForMux.length} 台客户端的版本低于 {muxMinVer}
+                  —— {staleForMux.slice(0, 3).map((a) => a.name).join('、')}
+                  {staleForMux.length > 3 && ` 等 ${staleForMux.length} 台`}。
+                  它们仍会用 mux=开，而 frps 改成关之后这些隧道会全部连不上，
+                  且两边日志都不留错误。请先在「客户端」页把它们升级上去。
+                </span>
+              )}
+
+              {/* 改完怎么验证 —— 之前完全没写，用户只能凭感觉。
+                  实测手段就是隧道页的「测速」：它从服务器经隧道压一次数据回来。 */}
+              <span className="mt-1.5 block text-[11.5px] leading-[1.6] text-dim">
+                改完怎么验证：去「隧道」页点某条隧道的<b>测速</b>，记下数字 → 再切换这个开关 →
+                等隧道恢复（约 15 秒）→ 再测一次。两次的差别就是这个开关在你这条链路上的实际收益。
               </span>
             </span>
           </label>
@@ -1091,7 +1197,8 @@ export function SettingsPage() {
           <div className="min-w-0 flex-1 text-xs leading-[1.6] text-dim">
             排除「服务器本身出不去」这一层。若这里都正常，隧道慢的原因就在
             <b className="text-fg"> 客户端到服务器这一段</b>，或者 frp 的传输参数。
-            单个目标最多测 6 秒、12MB。
+            每个目标最多测 8 秒；前 2 秒用于把连接与拥塞窗口拉起来，不计入速率 ——
+            所以这里给的是<b>稳态</b>速度，不会因为"第一次要握手"而虚低。
           </div>
           <Button className="shrink-0" disabled={diagBusy} onClick={() => void runDiagnose()}>
             {diagBusy ? '检测中…（约 12 秒）' : '开始自检'}
@@ -1119,8 +1226,16 @@ export function SettingsPage() {
                   ) : (
                     <span className="shrink-0 text-[12px] text-bad-fg">{it.error || '失败'}</span>
                   )}
-                  <span className="shrink-0 font-mono text-[11px] text-dim">
-                    {(it.bytes / 1024 / 1024).toFixed(1)}MB / {it.ms}ms
+                  {/* 首包时间是解释"为什么第一次慢"的关键数字：
+                      它含 DNS + TCP + TLS 三次握手，跨境每个 RTT 100~200ms，
+                      连续几个 RTT 就过去了。而右边的速度是**丢弃预热段之后**的
+                      稳态值 —— 两者一起看才不会被"第一次 3MB/s、第二次 22MB/s"
+                      这种差异误导。 */}
+                  <span
+                    className="shrink-0 font-mono text-[11px] text-dim"
+                    title="首包 = 发请求到收到第一个字节（含 DNS/TCP/TLS 握手）；右侧是丢掉前 2 秒预热后的稳态速率"
+                  >
+                    首包 {it.ttfb_ms}ms · {(it.bytes / 1024 / 1024).toFixed(1)}MB
                   </span>
                 </div>
               ))}

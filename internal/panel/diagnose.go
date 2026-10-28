@@ -26,10 +26,18 @@ import (
 type diagnoseItem struct {
 	Key   string `json:"key"`
 	Name  string `json:"name"`
-	Speed int64  `json:"speed"` // 字节/秒
+	Speed int64  `json:"speed"` // 字节/秒，**稳态**速率（已丢弃预热段）
 	Bytes int64  `json:"bytes"`
 	Ms    int64  `json:"ms"`
-	OK    bool   `json:"ok"`
+	// TTFB 从发出请求到收到第一个字节的耗时（毫秒），含 DNS/TCP/TLS 握手。
+	//
+	// 单独报出来是因为它解释了一个很容易被误解的现象：同一个目标连测两次，
+	// 第一次可能只有第二次的几十分之一。那不是"带宽变了"，而是第一次要付
+	// DNS + TCP + TLS 三次握手（跨境各 1~2 个 RTT，实测 200ms/个），
+	// 之后还要等 TCP 慢启动与 BBR 把窗口涨起来 —— 头一两秒几乎没吞吐。
+	// 把这些算进平均速率，算出来的是"含启动开销的平均值"，不是链路能力。
+	TTFB int64 `json:"ttfb_ms"`
+	OK   bool  `json:"ok"`
 	Error string `json:"error"`
 }
 
@@ -51,12 +59,30 @@ var diagnoseTargets = []struct{ Key, Name, URL string }{
 }
 
 const (
-	diagnoseBudget = 6 * time.Second  // 单个目标最多测这么久
-	diagnoseLimit  = 12 << 20         // 或这么多字节，先到先停
+	// diagnoseBudget 单个目标的**总**预算，含预热段。
+	diagnoseBudget = 8 * time.Second
+	// diagnoseWarmup 预热段：这段读到的字节只用于"把链路拉起来"，不计入速率。
+	//
+	// 为什么必须是 2 秒：跨境链路 RTT 200ms 量级，TCP 慢启动每 RTT 翻倍窗口，
+	// 加上 BBR 要先测出带宽才有发送节奏，实测头 1.5~2 秒吞吐只有稳态的零头。
+	// 之前没有这一段，于是同一个目标"第一次自检慢、第二次快数十倍"—— 数值差得
+	// 离谱，而两次的链路条件其实完全一样：第二次复用了 TLS 连接，省掉了握手，
+	// 而且窗口已经在上一轮涨起来了。把这些算进平均，测出来的是"含启动开销的
+	// 平均值"，不是链路能力。
+	diagnoseWarmup = 2 * time.Second
+	// diagnoseSteadyMin 预热后至少测这么久，才有资格报稳态速率。
+	diagnoseSteadyMin = 2 * time.Second
+	// diagnoseSteadyLimit 预热后读到这么多字节就够定速率了。
+	//
+	// 10MB 在 1MB/s 上要 10 秒（超过预算，那就在预算内测多少算多少），
+	// 在 40MB/s 上只要 0.25 秒 —— 实测三次 39.4/39.9/39.3 MB/s，精度足够。
+	// 定太大（比如 20MB）只会让每次自检多下几十 MB 无谓数据：预热段的字节
+	// 本来就不计入，真正被"用掉"的是它前面那段。
+	diagnoseSteadyLimit = 10 << 20
 )
 
 // diagnoseClient 只设连接级超时，不设总时长：
-// 我们要的是"这 6 秒里跑多快"，总时长由 context 控制。
+// 我们要的是"这几秒里跑多快"，总时长由 context 控制。
 var diagnoseClient = &http.Client{
 	Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
@@ -70,10 +96,14 @@ var diagnoseClient = &http.Client{
 // 两个用户同时点会让两次结果都失真，也会把正常业务挤掉。
 var diagnoseMu sync.Mutex
 
-// probeSpeed 下载一段就停，按实际字节/耗时算速度。
+// probeSpeed 测一个目标的**稳态**吞吐。
 //
-// 不用 http.Client.Timeout 一刀切：慢链路上下载 12MB 本来就要几分钟，
-// 我们要的是"这段时间里跑多快"，所以用 context 控制总时长，读到上限或超时即返回。
+// 分两段：预热段（前 2 秒，字节数丢弃）+ 稳态段（之后的数据用来算速率）。
+// 不这么做的话，DNS/TCP/TLS 三次握手与 TCP 慢启动会一起被算进平均 ——
+// 同一个目标连测两次，第一次 3.7MB/s、第二次 22MB/s，用户看到的是"自检不准"。
+//
+// 不用 http.Client.Timeout 一刀切：慢链路上下载 20MB 本来要几分钟，
+// 我们要的是"这段时间里跑多快"，所以用 context 控制总时长。
 func probeSpeed(key, name, url string) diagnoseItem {
 	item := diagnoseItem{Key: key, Name: name}
 	ctx, cancel := context.WithTimeout(context.Background(), diagnoseBudget)
@@ -84,8 +114,6 @@ func probeSpeed(key, name, url string) diagnoseItem {
 		item.Error = err.Error()
 		return item
 	}
-	// 只要前面这一段，不必让服务端把整个文件都发完
-	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", diagnoseLimit-1))
 
 	start := time.Now()
 	resp, err := diagnoseClient.Do(req)
@@ -101,19 +129,70 @@ func probeSpeed(key, name, url string) diagnoseItem {
 		return item
 	}
 
-	n, copyErr := io.CopyN(io.Discard, resp.Body, diagnoseLimit)
-	elapsed := time.Since(start)
-	item.Bytes = n
-	item.Ms = elapsed.Milliseconds()
-	if elapsed > 0 {
-		item.Speed = int64(float64(n) / elapsed.Seconds())
+	buf := make([]byte, 64<<10)
+	var total, steady int64
+	var firstAt, steadyAt time.Time
+	for {
+		m, readErr := resp.Body.Read(buf)
+		now := time.Now()
+		if m > 0 {
+			if firstAt.IsZero() {
+				firstAt = now
+				item.TTFB = now.Sub(start).Milliseconds()
+			}
+			total += int64(m)
+			if steadyAt.IsZero() {
+				// 还在预热段：这一块字节只用来把窗口拉起来，不计数。
+				if now.Sub(start) >= diagnoseWarmup {
+					steadyAt = now
+				}
+			} else {
+				steady += int64(m)
+				if steady >= diagnoseSteadyLimit {
+					break
+				}
+			}
+		}
+		if readErr != nil {
+			// io.EOF 说明服务端把整个文件发完了（文件比上限小），仍然可用
+			if readErr != io.EOF {
+				item.Error = tidyNetErr(readErr)
+			}
+			break
+		}
+		// 稳态段够长了就停，别把预算耗完
+		if !steadyAt.IsZero() && now.Sub(steadyAt) >= diagnoseSteadyMin {
+			break
+		}
+		// 一直没进稳态（链路极慢）：预算用完就收工，下面会退回整体平均
+		if now.Sub(start) >= diagnoseBudget {
+			break
+		}
 	}
-	// 读满上限算成功（不是错误）；只有"一个字节都没读到"才算失败
-	if n > 0 {
+
+	elapsed := time.Since(start)
+	item.Bytes = total
+	item.Ms = elapsed.Milliseconds()
+
+	// 优先用稳态段。
+	//
+	// 判定条件必须是"时长够长**或**字节够多"，不能只看时长：快链路上 20MB
+	// 在 10ms 内就读完了，那时按"必须满 0.5 秒"会退回整体平均，而整体平均
+	// 含预热段 —— 结果就是"明明很快却报出一个很慢的数"，正是这次要修的现象。
+	if !steadyAt.IsZero() && steady > 0 {
+		if d := time.Since(steadyAt).Seconds(); d > 0.001 && (d > 0.3 || steady >= 1<<20) {
+			item.Speed = int64(float64(steady) / d)
+		}
+	}
+	if item.Speed == 0 && total > 0 && elapsed > 0 {
+		item.Speed = int64(float64(total) / elapsed.Seconds())
+	}
+
+	// 读到数据就算成功（读满是正常结束，不是错误）
+	if total > 0 {
 		item.OK = true
-	} else if copyErr != nil {
-		item.Error = tidyNetErr(copyErr)
-	} else {
+		item.Error = ""
+	} else if item.Error == "" {
 		item.Error = "没有收到数据"
 	}
 	return item
@@ -125,9 +204,14 @@ func tidyNetErr(err error) string {
 	s := err.Error()
 	switch {
 	case strings.Contains(s, "context deadline exceeded"):
-		return "超时（6 秒内没有进展）"
+		return "超时（没有在预期时间内完成）"
 	case strings.Contains(s, "connection refused"):
-		return "连接被拒绝"
+		return "连接被拒绝（目标端口没有在监听）"
+	// Windows 的措辞与 Unix 不同：「No connection could be made because the
+	// target machine actively refused it」。只匹配 "connection refused" 的话，
+	// 用户在 Windows 上永远看到一长串英文 —— 而这一栏存在的意义就是"说人话"。
+	case strings.Contains(s, "actively refused"), strings.Contains(s, "No connection could be made"):
+		return "连接被拒绝（目标端口没有在监听）"
 	case strings.Contains(s, "no such host"):
 		return "域名解析失败（服务器 DNS 不通）"
 	case strings.Contains(s, "certificate"):
