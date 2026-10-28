@@ -59,7 +59,10 @@ func TestProbeTunnelDetectsNonHTTP(t *testing.T) {
 // 而同一隧道传 50MB 能跑 31MB/s —— 差 31 倍。只请求一次测到的是 TCP 慢启动期，
 // 不是链路能力。所以必须验证实现真的在重复采样。
 func TestProbeTunnelRepeatsForSmallResponses(t *testing.T) {
-	body := make([]byte, 1<<20) // 1MB：远小于单次上限，应当被反复请求
+	// 用 64KB 而不是 1MB：这只是要验证"会不会重复采样"，不是测性能。
+	// 响应越小，4 秒窗口内必然请求很多次，断言就不会因为 CI 机器慢而 flaky
+	// （1MB 时窗口内可能只发 1~2 次，曾经在 release 构建里失败过一次）。
+	body := make([]byte, 64<<10)
 	var hits int
 	var mu sync.Mutex
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -92,8 +95,14 @@ func TestProbeTunnelRepeatsForSmallResponses(t *testing.T) {
 	if res.Requests < 2 {
 		t.Fatalf("小响应应被重复请求以跑满窗口，实际只发了 %d 次", res.Requests)
 	}
-	if res.FirstMs <= 0 {
-		t.Fatal("必须报第一次请求耗时（体感数字），否则解释不了卡顿")
+	if res.Speed <= 0 || res.Bytes <= 0 {
+		t.Fatalf("必须累计到字节数与速率，实际 bytes=%d speed=%d", res.Bytes, res.Speed)
+	}
+	// 不断言 FirstMs > 0：本地回环上 64KB 请求可能不到 1ms，取整就是 0。
+	// 真实隧道上它是 1000ms 量级（实测 1114ms），不会为 0。
+	// 这里验证"确实记录到了第一次的字节数"即可。
+	if res.FirstBytes <= 0 {
+		t.Fatalf("必须记录第一次请求的字节数，实际 %d", res.FirstBytes)
 	}
 	mu.Lock()
 	got := hits

@@ -104,6 +104,11 @@ func TestAutoModeCachesRank(t *testing.T) {
 // 策略值写错必须拒绝。静默降级成手动会让用户以为自动生效了。
 func TestSourceModeValidation(t *testing.T) {
 	db := newTestDB(t)
+	// 固定一个具体版本：默认值是 "latest"，而 frpProbeURL 解析 "latest" 要联网
+	// 查 GitHub release。测试一旦依赖外网，网络波动就会让 URL 变成空串、
+	// 两个源拿到同样的空 URL、排序退化成原序 —— 表现为随机失败，
+	// 而失败信息只会说"顺序不对"，完全看不出是网络问题。
+	_ = db.SetSetting("frp_version", "0.61.1")
 	p := &Panel{db: db, listenPort: "8080", frps: NewFrpsManager(db, t.TempDir()), ranks: newRankCache()}
 
 	if code, _ := postSettings(t, p, `{"source_mode":"nonsense"}`); code != http.StatusBadRequest {
@@ -122,6 +127,11 @@ func TestSourceModeValidation(t *testing.T) {
 // 查不了的部分（速度是否代表客户端）要在返回里说清楚，而不是整条拒绝。
 func TestProbeHandlerClientSideTestsPrefixesWithoutReordering(t *testing.T) {
 	db := newTestDB(t)
+	// 固定一个具体版本：默认值是 "latest"，而 frpProbeURL 解析 "latest" 要联网
+	// 查 GitHub release。测试一旦依赖外网，网络波动就会让 URL 变成空串、
+	// 两个源拿到同样的空 URL、排序退化成原序 —— 表现为随机失败，
+	// 而失败信息只会说"顺序不对"，完全看不出是网络问题。
+	_ = db.SetSetting("frp_version", "0.61.1")
 	p := &Panel{db: db, listenPort: "8080", frps: NewFrpsManager(db, t.TempDir()), ranks: newRankCache()}
 	_ = db.SetSetting(settingClientSources, "panel,https://slow.example,https://fast.example")
 
@@ -191,6 +201,11 @@ func TestProbeHandlerClientSideTestsPrefixesWithoutReordering(t *testing.T) {
 // 空事件列表必须是 []，不能是 null —— 前端 `?? 旧值` 会把 null 当"没返回"，
 // 清空后界面残留（客户端列表踩过一次）。
 func TestSourceEventsNeverNil(t *testing.T) {	db := newTestDB(t)
+	// 固定一个具体版本：默认值是 "latest"，而 frpProbeURL 解析 "latest" 要联网
+	// 查 GitHub release。测试一旦依赖外网，网络波动就会让 URL 变成空串、
+	// 两个源拿到同样的空 URL、排序退化成原序 —— 表现为随机失败，
+	// 而失败信息只会说"顺序不对"，完全看不出是网络问题。
+	_ = db.SetSetting("frp_version", "0.61.1")
 	evs, err := db.ListSourceEvents("", 10)
 	if err != nil {
 		t.Fatal(err)
@@ -217,6 +232,11 @@ func TestSourceEventsNeverNil(t *testing.T) {	db := newTestDB(t)
 // 用户看到「只测了一个源」，刚加的那项直接消失。
 func TestProbeHandlerUsesListFromRequest(t *testing.T) {
 	db := newTestDB(t)
+	// 固定一个具体版本：默认值是 "latest"，而 frpProbeURL 解析 "latest" 要联网
+	// 查 GitHub release。测试一旦依赖外网，网络波动就会让 URL 变成空串、
+	// 两个源拿到同样的空 URL、排序退化成原序 —— 表现为随机失败，
+	// 而失败信息只会说"顺序不对"，完全看不出是网络问题。
+	_ = db.SetSetting("frp_version", "0.61.1")
 	p := &Panel{db: db, listenPort: "8080", frps: NewFrpsManager(db, t.TempDir()), ranks: newRankCache()}
 	// 库里只有一项（还没保存用户新加的那项）
 	_ = db.SetSetting(settingServerSources, "https://slow.example")
@@ -253,7 +273,7 @@ func TestProbeHandlerUsesListFromRequest(t *testing.T) {
 
 	// 应用到库里的必须是"请求带来的那两项"，顺序按实测（fast 在前）
 	if got := db.GetSetting(settingServerSources); got != "https://fast.example,https://slow.example" {
-		t.Fatalf("应当把测过的那份列表按实测顺序存下，实际 %q", got)
+		t.Fatalf("应当把测过的那份列表按实测顺序存下，实际 %q；probed=%v；body=%s", got, probed, w.Body.String())
 	}
 	// 应用之后也要能查到这次结果（原来清空缓存，界面显示"没有测速记录"）
 	if rk := p.LastRank(sideServer); rk == nil {
@@ -265,6 +285,11 @@ func TestProbeHandlerUsesListFromRequest(t *testing.T) {
 // 那会让「我加了三个只测了两个」重新变成没人能解释的现象。
 func TestProbeHandlerRejectsBadList(t *testing.T) {
 	db := newTestDB(t)
+	// 固定一个具体版本：默认值是 "latest"，而 frpProbeURL 解析 "latest" 要联网
+	// 查 GitHub release。测试一旦依赖外网，网络波动就会让 URL 变成空串、
+	// 两个源拿到同样的空 URL、排序退化成原序 —— 表现为随机失败，
+	// 而失败信息只会说"顺序不对"，完全看不出是网络问题。
+	_ = db.SetSetting("frp_version", "0.61.1")
 	p := &Panel{db: db, listenPort: "8080", frps: NewFrpsManager(db, t.TempDir()), ranks: newRankCache()}
 	stubProbe(t, func(targets []shared.ProbeTarget) []shared.ProbeResult { return nil })
 
