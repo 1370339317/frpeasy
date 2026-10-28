@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useApp } from '../store'
 import { api } from '../lib/api'
 import { fmtAgo } from '../lib/format'
@@ -40,17 +40,38 @@ export function TunnelModal({
   const [agentID, setAgentID] = useState('')
   const [busy, setBusy] = useState(false)
 
-  // 每次打开重置：只有一台机器时默认选中它（最常见的新手路径）
+  // 回填只在「这一次打开」发生，绝不跟着轮询重跑。
+  //
+  // 原来的依赖是 [open, tunnel, agents]，而 agents 来自 store：全局 5 秒轮询
+  // 每次都会放进一个**新数组**（`r.agents ?? []`），于是 effect 每 5 秒重跑一次，
+  // 把用户正在填的名字、地址、端口全部重置成空 —— 体感就是"输入框自己清空了"。
+  //
+  // 正确模型：表单的初值只由"打开弹窗的那一瞬间"决定。
+  // args 放进 ref 只是为了在打开时读到最新值，不参与依赖比较。
+  const seedRef = useRef({ tunnel, agents })
+  seedRef.current = { tunnel, agents }
+  const seededRef = useRef(false)
+
   useEffect(() => {
-    if (!open) return
-    setName(tunnel?.name ?? '')
-    setLocal(tunnel?.local_addr ?? '')
+    if (!open) {
+      // 关掉后允许下一次打开重新回填
+      seededRef.current = false
+      return
+    }
+    if (seededRef.current) return
+    seededRef.current = true
+    const { tunnel: t, agents: ags } = seedRef.current
+    setName(t?.name ?? '')
+    setLocal(t?.local_addr ?? '')
     // 编辑时把当前公网端口填出来。原来这里永远是空的，用户想改端口
     // 得先去列表里看一眼现在是多少，否则不知道该填什么。
     // 清空后再保存仍是"保留原端口"（后端只在 manual_port>0 时才改），不会误换。
-    setPort(tunnel ? String(tunnel.public_port || '') : '')
-    setAgentID(tunnel?.agent_id ?? (agents.length === 1 ? agents[0].id : ''))
-  }, [open, tunnel, agents])
+    setPort(t ? String(t.public_port || '') : '')
+    // 「只有一台机器就默认选中它」同样只在打开时判断一次：
+    // 跟着轮询走的话，用户主动点了「先不部署」也会被改回去。
+    setAgentID(t?.agent_id ?? (ags.length === 1 ? ags[0].id : ''))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
   const services = useMemo(() => (agentID ? (agentMap[agentID]?.services ?? []) : []), [agentID, agentMap])
 

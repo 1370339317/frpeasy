@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useApp } from '../store'
 import { api } from '../lib/api'
 import { Badge, Button, Card, Field, Hint, Input, Led, Select, Stats, Stat, Alert } from '../components/ui'
@@ -24,8 +24,19 @@ export function Frps() {
     return list
   }, [versions])
 
+  // 下拉框只在「用户还没动过它」时跟随服务端事实。
+  //
+  // 原来是无条件 setSelVer(versions.target_version)：versions 要联网查 GitHub，
+  // 往往比页面慢一两秒回来 —— 用户已经点开下拉选好版本了，结果被这一下改回去，
+  // 表现为"选了又跳回原值"。同一个毛病在设置页、隧道弹窗都出现过，
+  // 统一原则：**服务端数据可以决定表单初值，但不能覆盖用户正在编辑的值**。
+  //
+  // 用户一旦手动选过（verTouched），就不再自动跟随；
+  // 「应用版本」成功后把标记清掉，让它重新跟随新的锁定值。
+  const verTouched = useRef(false)
   useEffect(() => {
-    if (versions?.target_version) setSelVer(versions.target_version)
+    if (!versions?.target_version || verTouched.current) return
+    setSelVer(versions.target_version)
   }, [versions?.target_version])
 
   const loadLog = useCallback(async () => {
@@ -114,6 +125,10 @@ export function Frps() {
       await api('POST', '/api/settings', { frp_version: v })
       await api('POST', '/api/frps?action=restart')
       await Promise.all([loadFrps(), loadVersions(), loadLog(), loadTunnels()])
+      // 版本已经按用户的选择落地了：清掉"用户已手动改过"的标记，
+      // 让下拉框重新跟随服务端返回的锁定值（否则它永远停在手动选择上，
+      // 面板若做了兜底降级，界面就与事实不符了）。
+      verTouched.current = false
       setManualVer('')
       toast(`已切换到 ${v}，二进制下载/启动中`)
     } catch (e) {
@@ -218,7 +233,7 @@ export function Frps() {
       <Card title="版本管理" desc="同时决定服务端 frps 与客户端 frpc 的版本">
         <div className="flex flex-wrap items-end gap-3.5">
           <Field label="目标版本" className="mb-0 min-w-[220px] flex-1">
-            <Select value={selVer} onChange={(e) => setSelVer(e.target.value)}>
+            <Select value={selVer} onChange={(e) => { verTouched.current = true; setSelVer(e.target.value) }}>
               {versionOptions.length === 0 && <option value="latest">latest</option>}
               {versionOptions.map((x) => (
                 <option key={x} value={x}>

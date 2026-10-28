@@ -392,10 +392,25 @@ export function Modal({
   const returnFocusRef = useRef<HTMLElement | null>(null)
   const titleID = useId()
 
+  // onClose 必须走 ref，不能进依赖数组。
+  //
+  // 调用方几乎都是内联箭头函数（onClose={() => setOpen(false)}），
+  // 于是每次父组件重渲染它都是**新引用**。把 onClose 放进依赖里，
+  // effect 就会跟着重跑：先 cleanup（把焦点还给触发按钮、恢复 body 滚动），
+  // 再重新执行（把焦点移到弹窗第一个可聚焦元素 —— 也就是右上角那个 ×）。
+  //
+  // 而父组件在哪重渲染？全局 5 秒轮询、以及任何一次 store 更新都会。
+  // 表现就是：用户在弹窗里正打字，每隔几秒焦点被抢走、光标跳走，
+  // 输入直接丢字 —— 看起来就像"页面自己刷新了"。
+  //
+  // 依赖数组只留 [open]：这套逻辑只在"打开/关闭"这一个状态跳变上成立。
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') onCloseRef.current()
       if (e.key !== 'Tab') return
       // 焦点陷阱：只在弹窗内循环，不跑到背景上。
       const box = boxRef.current
@@ -437,7 +452,8 @@ export function Modal({
       returnFocusRef.current = null
       if (back && document.contains(back) && typeof back.focus === 'function') back.focus()
     }
-  }, [open, onClose])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
   if (!open) return null
   return (
