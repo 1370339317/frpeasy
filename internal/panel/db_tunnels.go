@@ -2,6 +2,7 @@ package panel
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -455,9 +456,21 @@ func (db *DB) ApplyHeartbeat(statuses []shared.TunnelStatus) error {
 }
 
 func (db *DB) DeleteTunnel(id int64) error {
-	_, err := db.Exec("DELETE FROM tunnels WHERE id=?", id)
-	if err == nil {
-		_, _ = db.Exec("DELETE FROM tunnel_status WHERE tunnel_id=?", id)
+	res, err := db.Exec("DELETE FROM tunnels WHERE id=?", id)
+	if err != nil {
+		return err
 	}
-	return err
+	// 删除必须能区分「删掉了」与「本来就没有」。
+	//
+	// 以前这里不看影响行数，于是 DELETE /api/tunnels/999999 也返回 200 {"ok":true}：
+	// 脚本化调用（以及界面上并发删两次）会以为那条隧道真的被删了，
+	// 而它其实一直还在 —— 排查时完全指不到方向。
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrTunnelNotFound
+	}
+	_, _ = db.Exec("DELETE FROM tunnel_status WHERE tunnel_id=?", id)
+	return nil
 }
+
+// ErrTunnelNotFound 隧道不存在（用于把 404 与「删成功」区分开）。
+var ErrTunnelNotFound = errors.New("隧道不存在")

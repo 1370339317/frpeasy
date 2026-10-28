@@ -1,5 +1,5 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from 'react'
-import { useEffect } from 'react'
+import { useEffect, useId, useRef } from 'react'
 
 /** 极简 className 合并（避免为一行逻辑引入 clsx 依赖）。 */
 export const cx = (...parts: (string | false | null | undefined)[]) => parts.filter(Boolean).join(' ')
@@ -66,13 +66,24 @@ export function Card({
   bodyClassName?: string
 }) {
   return (
-    <section className={cx('mb-4 rounded-xl border border-border bg-card px-5 py-[18px]', className)}>
+    <section
+      className={cx(
+        'mb-4 rounded-xl border border-border bg-card px-5 py-[18px] max-[820px]:px-4',
+        className,
+      )}
+    >
       {(title || actions) && (
-        <div className="mb-3.5 flex items-center gap-2.5">
-          {title && <h2 className="text-sm font-[650]">{title}</h2>}
-          {desc && <span className="text-xs text-dim">{desc}</span>}
-          <div className="flex-1" />
-          {actions}
+        // 窄屏改成"标题一行、描述另起一行"的堆叠：原来标题和描述共用一行，
+        // 393px 宽时描述把标题挤成一列，四个字被拆成三行竖排。
+        <div className="mb-3.5 flex items-center gap-2.5 max-[820px]:flex-wrap">
+          {title && <h2 className="text-sm font-[650] whitespace-nowrap">{title}</h2>}
+          {desc && (
+            <span className="text-xs text-dim max-[820px]:order-last max-[820px]:w-full">
+              {desc}
+            </span>
+          )}
+          <div className="flex-1 max-[820px]:hidden" />
+          {actions && <div className="max-[820px]:ml-auto">{actions}</div>}
         </div>
       )}
       <div className={bodyClassName}>{children}</div>
@@ -372,18 +383,59 @@ export function Modal({
   wide?: boolean
   children: ReactNode
 }) {
+  // 焦点管理：打开时把焦点移进弹窗，关闭时还回原处。
+  //
+  // 不做这件事时键盘用户按 Tab 会跑到背后的页面上去（弹窗视觉上盖住了内容，
+  // 但 DOM 顺序里它是兄弟节点），而 Esc 关闭之后焦点落回 body，
+  // 用户得从头 Tab 一遍才能回到刚才那个按钮。
+  const boxRef = useRef<HTMLDivElement | null>(null)
+  const returnFocusRef = useRef<HTMLElement | null>(null)
+  const titleID = useId()
+
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
+      if (e.key !== 'Tab') return
+      // 焦点陷阱：只在弹窗内循环，不跑到背景上。
+      const box = boxRef.current
+      if (!box) return
+      const focusable = box.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )
+      if (focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      const active = document.activeElement
+      if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first.focus()
+      } else if (e.shiftKey && (active === first || !box.contains(active))) {
+        e.preventDefault()
+        last.focus()
+      }
     }
     window.addEventListener('keydown', onKey)
     // 弹窗打开时锁滚动，避免背景跟着滑
     const prev = document.body.style.overflow
     document.body.style.overflow = 'hidden'
+    returnFocusRef.current = document.activeElement as HTMLElement | null
+    // 等一帧再移焦点：此时弹窗子树已经挂载。
+    const raf = window.requestAnimationFrame(() => {
+      const box = boxRef.current
+      if (!box) return
+      const first = box.querySelector<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href]',
+      )
+      ;(first ?? box).focus()
+    })
     return () => {
+      window.cancelAnimationFrame(raf)
       window.removeEventListener('keydown', onKey)
       document.body.style.overflow = prev
+      const back = returnFocusRef.current
+      returnFocusRef.current = null
+      if (back && document.contains(back) && typeof back.focus === 'function') back.focus()
     }
   }, [open, onClose])
 
@@ -394,14 +446,21 @@ export function Modal({
       onClick={onClose}
     >
       <div
+        ref={boxRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleID}
+        tabIndex={-1}
         className={cx(
-          'w-full rounded-2xl border border-border2 bg-panel shadow-panel',
+          'w-full rounded-2xl border border-border2 bg-panel shadow-panel outline-none',
           wide ? 'max-w-[980px]' : 'max-w-[640px]',
         )}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center border-b border-border px-5 py-4">
-          <h3 className="text-[15px] font-[650]">{title}</h3>
+          <h3 id={titleID} className="text-[15px] font-[650]">
+            {title}
+          </h3>
           <div className="flex-1" />
           <button
             onClick={onClose}
@@ -450,11 +509,31 @@ export function Section({
 
 /* ---------------- 代码块 ---------------- */
 
-export function Pre({ children, className }: { children: ReactNode; className?: string }) {
+/**
+ * 等宽文本块（命令、日志）。
+ *
+ * `selectAll` 用于"要整段拿走"的内容（安装命令、卸载命令）：点一下即全选。
+ * 手机上复制按钮可能被浏览器内核禁掉，用户只能长按 —— 而长按选中的范围
+ * 取决于落点，很容易只选中半行。`select-all` 让整个块成为一个选择单元，
+ * 长按就是全选，这是移动端最省事的兜底。
+ */
+export function Pre({
+  children,
+  className,
+  selectAll,
+  ref,
+}: {
+  children: ReactNode
+  className?: string
+  selectAll?: boolean
+  ref?: React.Ref<HTMLPreElement>
+}) {
   return (
     <pre
+      ref={ref}
       className={cx(
         'm-0 overflow-x-auto rounded-[10px] border border-border bg-pre px-3.5 py-3 font-mono text-[12.5px] whitespace-pre-wrap break-all text-fg',
+        selectAll && 'select-all',
         className,
       )}
     >

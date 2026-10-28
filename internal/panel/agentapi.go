@@ -223,6 +223,52 @@ const minUninstallAgentVersion = "0.5.9"
 // 面板不知道客户端的权限模型、安装位置、自启方式（systemd / OpenRC /
 // 计划任务 / 什么都没有），远程拼命令本质上是在猜；而 agent 就在那台机器上，
 // 它自己最清楚该怎么删干净。
+// handleDeleteAgent DELETE /api/agents/{id} —— 移除面板上的客户端记录。
+//
+// 真正危险的不是"删除记录"这个动作本身，而是它连带的
+// `UPDATE tunnels SET agent_id=''`：那台机器的 agent 还在跑，下一次心跳会
+// 「重新注册」成一条**新 id** 的记录，而它名下的隧道已被解绑成草稿、
+// 再也绑不回新身份 —— 一次点击废掉这台机器的全部公网入口，且不可撤销。
+//
+// 所以拦截条件必须精确到"会造成损失"的那一种：
+//   - 在线 + 有绑定隧道 → 拒绝（409），并说明该改用「卸载」
+//   - 在线但没有隧道   → 允许（删了它也只是重新注册，什么都不会丢）
+//   - 离线             → 允许（残留记录必须清得掉；确认框已说明隧道会变草稿）
+//
+// 一开始写成"在线就一律拒绝"是过度限制：集成测试里那些只注册、没建隧道的
+// 临时客户端全都删不掉，反而污染了后续用例。
+func (p *Panel) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		id = strings.TrimPrefix(r.URL.Path, "/api/agents/")
+	}
+	if id == "" || strings.Contains(id, "/") {
+		http.Error(w, "客户端 id 无效", http.StatusBadRequest)
+		return
+	}
+	if a, err := p.db.GetAgent(id); err == nil {
+		applyAgentTTL(a)
+		if a.Online {
+			// 数一下它名下还有多少条隧道：有就说明这次删除会造成不可逆的解绑。
+			bound, _ := p.db.ListTunnelsForAgent(id)
+			if n := len(bound); n > 0 {
+				http.Error(w, fmt.Sprintf(
+					"这台客户端还在线，名下还有 %d 条隧道。删记录会把它们解绑成草稿，"+
+						"而它下次心跳会以新身份重新注册 —— 那些隧道再也绑不回去。\n"+
+						"要清理这台机器请用「卸载」（会连进程一起清掉）；"+
+						"只想让它从列表消失的话，先停掉它、等它下线再移除。", n),
+					http.StatusConflict)
+				return
+			}
+		}
+	}
+	if err := p.db.DeleteAgent(id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
 func (p *Panel) agentUninstallHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {

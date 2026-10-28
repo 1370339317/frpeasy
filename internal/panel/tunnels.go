@@ -2,6 +2,7 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"strconv"
@@ -27,6 +28,14 @@ func (p *Panel) createTunnelHandler(w http.ResponseWriter, r *http.Request) {
 	if req.Name == "" {
 		http.Error(w, "名称不能为空", http.StatusBadRequest)
 		return
+	}
+	// 绑定的机器必须真实存在：写进一个不存在的 agent_id，这条隧道永远不会有
+	// 任何客户端来拉配置，却照样占着端口池 —— 界面上它只是"离线"，看不出是死的。
+	if req.AgentID != "" {
+		if _, err := p.db.GetAgent(req.AgentID); err != nil {
+			http.Error(w, "指定的客户端不存在（可能刚被移除）：请刷新页面后重新选择", http.StatusBadRequest)
+			return
+		}
 	}
 	// 未指定机器时：若仅有一台已注册 Agent，自动绑定它。
 	// 未绑定的隧道不会下发给任何 Agent（否则多机会撞 proxy 名/端口），属“草稿”状态。
@@ -75,21 +84,62 @@ func (p *Panel) createTunnelHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // updateTunnelHandler PUT /api/tunnels/{id} —— 后期修改隧道。
+//
+// 字段用指针接收，为的是把「没传这个字段」和「传了空串」分开：
+//   - 没传（nil）      = 不动它（部分更新）
+//   - 传了 ""          = 用户想清空 → 名称/地址这种必填项直接拒绝并说明
+//
+// 原来 `req.Name == ""` 一律当成"保持原值"，于是界面里把名称清空再保存会
+// 静默成功、列表里名字还在 —— 用户以为改掉了，实际什么都没发生。
 func (p *Panel) updateTunnelHandler(w http.ResponseWriter, r *http.Request, id int64) {
 	var req struct {
-		Name       string `json:"name"`
-		LocalAddr  string `json:"local_addr"`
-		Protocol   string `json:"protocol"`
-		AgentID    string `json:"agent_id"`
-		ClearAgent bool   `json:"clear_agent"`
-		ManualPort int    `json:"manual_port"`
+		Name       *string `json:"name"`
+		LocalAddr  *string `json:"local_addr"`
+		Protocol   *string `json:"protocol"`
+		AgentID    *string `json:"agent_id"`
+		ClearAgent bool    `json:"clear_agent"`
+		ManualPort int     `json:"manual_port"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if err := p.db.UpdateTunnel(id, strings.TrimSpace(req.Name), strings.TrimSpace(req.LocalAddr),
-		strings.TrimSpace(req.Protocol), strings.TrimSpace(req.AgentID), req.ManualPort, req.ClearAgent); err != nil {
+	// 必填项显式传空：这是用户想清空，而它不允许为空，必须说清楚，
+	// 不能悄悄保留旧值。
+	if req.Name != nil && strings.TrimSpace(*req.Name) == "" {
+		http.Error(w, "隧道名称不能为空；不想改名称就不要传 name 字段", http.StatusBadRequest)
+		return
+	}
+	if req.LocalAddr != nil && strings.TrimSpace(*req.LocalAddr) == "" {
+		http.Error(w, "本地服务地址不能为空；不想改地址就不要传 local_addr 字段", http.StatusBadRequest)
+		return
+	}
+	name, localAddr, protocol, agentID := "", "", "", ""
+	if req.Name != nil {
+		name = strings.TrimSpace(*req.Name)
+	}
+	if req.LocalAddr != nil {
+		localAddr = strings.TrimSpace(*req.LocalAddr)
+	}
+	if req.Protocol != nil {
+		protocol = strings.TrimSpace(*req.Protocol)
+	}
+	if req.AgentID != nil {
+		agentID = strings.TrimSpace(*req.AgentID)
+	}
+	// 绑定到哪台机器必须真实存在：写进一个不存在的 agent_id，那条隧道就永远
+	// 不可能被任何客户端拉到配置，却照样占着端口池 —— 一条看不见的死记录。
+	if agentID != "" {
+		if _, err := p.db.GetAgent(agentID); err != nil {
+			http.Error(w, "指定的客户端不存在（可能刚被移除）：请刷新页面后重新选择", http.StatusBadRequest)
+			return
+		}
+	}
+	if err := p.db.UpdateTunnel(id, name, localAddr, protocol, agentID, req.ManualPort, req.ClearAgent); err != nil {
+		if errors.Is(err, ErrTunnelNotFound) {
+			http.Error(w, "隧道不存在（可能已被删除）", http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -159,6 +209,10 @@ func accessURL(host, agentID string, publicPort int) string {
 // deleteTunnelHandler DELETE /api/tunnels/{id}
 func (p *Panel) deleteTunnelHandler(w http.ResponseWriter, r *http.Request, id int64) {
 	if err := p.db.DeleteTunnel(id); err != nil {
+		if errors.Is(err, ErrTunnelNotFound) {
+			http.Error(w, "隧道不存在（可能已被删除）", http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

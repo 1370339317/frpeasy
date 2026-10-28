@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useApp } from '../store'
 import { api } from '../lib/api'
-import { copyText } from '../lib/format'
+import { copyWithHint } from '../lib/format'
 import {
   Button,
   Card,
@@ -871,9 +871,10 @@ export function SettingsPage() {
         <Button
           variant="ghost"
           size="sm"
-          onClick={async () =>
-            toast((await copyText(settings?.install_token ?? '')) ? '已复制安装令牌' : '复制失败', 'ok')
-          }
+          onClick={async () => {
+            const r = await copyWithHint(settings?.install_token ?? '', null, '已复制安装令牌')
+            toast(r.msg, r.kind)
+          }}
         >
           复制安装令牌
         </Button>

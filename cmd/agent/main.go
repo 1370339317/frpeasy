@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"runtime"
+	"syscall"
 	"time"
 
 	"frpeasy/internal/agent"
@@ -98,6 +100,21 @@ func main() {
 		fmt.Println("初始化失败:", err)
 		os.Exit(1)
 	}
+	// 退出时收尾：agent 不走这一步，拉起的 frpc 会变成孤儿继续连 frps ——
+	// 面板上隧道显示 online、客户端显示 offline，只能手工杀进程才能恢复。
+	//
+	// 强杀（SIGKILL / TerminateProcess）收不到信号，那条路径由 Job Object
+	// （Windows）与下次启动时的 killStray（Linux）兜底。
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		s := <-sigCh
+		log.Printf("[agent] 收到信号 %v，停止 frpc 后退出", s)
+		c.Shutdown()
+		// 留一点时间让日志落盘，再正常退出。
+		closeLog()
+		os.Exit(0)
+	}()
 	// 明确打出二进制来源。它决定了 frpc 是从面板中继取还是自己上上游取，
 	// 出问题时第一个要看的就是这一行 —— 以前这个选择是隐式的，日志里看不出来。
 	if *legacySource != "" && *legacySource != "auto" {

@@ -64,7 +64,15 @@ func (p *Panel) loginHandler(w http.ResponseWriter, r *http.Request) {
 	key := loginAttemptKey(r)
 	if wait, blocked := p.loginGuard.check(key); blocked {
 		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
-		http.Error(w, "口令错误次数过多，请 "+humanDuration(wait)+"后再试", http.StatusTooManyRequests)
+		// 必须说清楚"口令是对的也进不来"。
+		//
+		// 封禁判定在密码校验之前（这是对的：否则每次尝试都还能试出口令对不对），
+		// 但用户不知道这件事时，输对了却还是被拒会让他以为口令记错了，
+		// 于是反复重试 —— 每次重试都在给封禁时间翻倍，最长要等一小时。
+		http.Error(w,
+			"口令错误次数过多，这个来源已被临时限制登录，请 "+humanDuration(wait)+"后再试。"+
+				"（限制期内即使口令正确也会被拒绝，不是口令记错了）",
+			http.StatusTooManyRequests)
 		return
 	}
 	ok, err := p.db.VerifyPassword(req.User, req.Pass)

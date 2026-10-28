@@ -1,5 +1,5 @@
 import { useApp } from '../store'
-import { copyText } from '../lib/format'
+import { copyWithHint } from '../lib/format'
 import { Card, CopyRow, Led, Stats, Stat } from '../components/ui'
 
 export function Overview() {
@@ -52,7 +52,8 @@ export function Overview() {
         <CopyRow
           value={host}
           onCopy={async () => {
-            toast((await copyText(host)) ? '已复制' : '复制失败，请手动选中', host ? 'ok' : 'bad')
+            const r = await copyWithHint(host, null, '已复制')
+            toast(r.msg, host ? r.kind : 'bad')
           }}
         />
         <div className="mt-1.5 text-xs leading-[1.5] text-dim">

@@ -2,7 +2,6 @@ package panel
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
@@ -202,18 +201,7 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("POST /api/agents/{id}/uninstall", p.requireAuth(p.agentUninstallHandler))
 	// 撤销还没被心跳领走的卸载指令（离线点错了的唯一反悔途径）
 	mux.HandleFunc("DELETE /api/agents/{id}/uninstall", p.requireAuth(p.agentUninstallCancelHandler))
-	mux.HandleFunc("DELETE /api/agents/{id}", p.requireAuth(func(w http.ResponseWriter, r *http.Request) {
-		id := strings.TrimPrefix(r.URL.Path, "/api/agents/")
-		if id == "" || strings.Contains(id, "/") {
-			http.Error(w, "客户端 id 无效", http.StatusBadRequest)
-			return
-		}
-		if err := p.db.DeleteAgent(id); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]any{"ok": true})
-	}))
+	mux.HandleFunc("DELETE /api/agents/{id}", p.requireAuth(p.handleDeleteAgent))
 	mux.HandleFunc("GET /api/settings", p.requireAuth(p.settingsHandler))
 	mux.HandleFunc("POST /api/settings", p.requireAuth(p.settingsHandler))
 	mux.HandleFunc("GET /api/frps", p.requireAuth(p.frpsControlHandler))

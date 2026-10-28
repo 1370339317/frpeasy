@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useApp, type CommandKind } from '../store'
 import { api } from '../lib/api'
-import { copyText, fmtAgo, fmtBytes } from '../lib/format'
+import { copyWithHint, fmtAgo, fmtBytes } from '../lib/format'
 import type { Agent, AgentLogResponse } from '../types'
 import {
   Alert,
@@ -223,41 +223,95 @@ export function Clients() {
     toast,
   } = useApp()
   const [kind, setKind] = useState<CommandKind>('linux')
+  // 命令块的引用：复制失败时用它把命令原文选中，让用户长按复制。
+  // 手机浏览器（尤其国产内核 / 非 HTTPS）经常禁掉 execCommand，
+  // 这条"人工路径"是最后也最可靠的一条。
+  const installRef = useRef<HTMLPreElement | null>(null)
+  const uninstallRef = useRef<HTMLPreElement | null>(null)
+  const logPreRef = useRef<HTMLPreElement | null>(null)
 
   // 客户端日志弹窗。面板连不上 NAT 后面的机器，所以是「请求 → 等它下一次心跳回传」，
-  // 中间隔着最长约 15 秒：界面必须把"还在等"和"到了"分清楚，否则用户只会看到转圈。
+  // 中间隔着最长一个心跳周期：界面必须把"还在等"和"到了"分清楚，否则用户只会看到转圈。
+  //
+  // 超时只有一个来源：LOG_WAIT_MS。文案里的秒数由它算出来，不再手写数字 ——
+  // 之前文案写"约 15 秒"、判定是 25 秒、实际显示 27~30 秒，三个数字互相打架。
+  const LOG_WAIT_MS = 20000
+  const LOG_WAIT_SEC = Math.round(LOG_WAIT_MS / 1000)
   const [logFor, setLogFor] = useState<Agent | null>(null)
   const [logReq, setLogReq] = useState('')
   const [log, setLog] = useState<{
     content: string
     fetchedAt: string | null
+    /** 本次请求还没被答复，正在等 */
     waiting: boolean
     /** 这份内容是不是「我这次请求」的结果。false 且 content 非空 = 只剩上一次的旧快照 */
     answered: boolean
+    /** 客户端当前离线：请求已排队，等它上线后的第一次心跳才执行（此时不该转圈） */
+    offline: boolean
     error: string
     elapsed: number
-  }>({ content: '', fetchedAt: null, waiting: false, answered: false, error: '', elapsed: 0 })
+  }>({
+    content: '',
+    fetchedAt: null,
+    waiting: false,
+    answered: false,
+    offline: false,
+    error: '',
+    elapsed: 0,
+  })
+
+  /** 读一次面板上留存的那份快照（不触发新请求）。 */
+  async function loadLogSnapshot(id: string) {
+    try {
+      const r = await api<AgentLogResponse>('GET', `/api/agents/${encodeURIComponent(id)}/logs`)
+      setLog((v) => ({
+        ...v,
+        content: r.logs.content || v.content,
+        fetchedAt: r.logs.fetched_at ?? v.fetchedAt,
+      }))
+    } catch {
+      /* 快照读不到不影响主流程（用户还能看到"没有内容"） */
+    }
+  }
 
   /** 发起一次日志请求（也用于「重新拉取」）。 */
   async function openLog(a: Agent) {
     setLogFor(a)
     setLogReq('')
-    setLog({ content: '', fetchedAt: null, waiting: true, answered: false, error: '', elapsed: 0 })
+    // 先按列表里的在线状态给一个初值，随后以面板返回的 online 为准
+    // （列表数据可能是几秒前的，点了之后它刚好上下线都有可能）。
+    setLog({
+      content: '',
+      fetchedAt: null,
+      waiting: a.online,
+      answered: false,
+      offline: !a.online,
+      error: '',
+      elapsed: 0,
+    })
     try {
       const r = await api<{ request_id: string; online: boolean; message: string }>(
         'POST',
         `/api/agents/${encodeURIComponent(a.id)}/logs`,
       )
+      if (!r.online) {
+        // 它不在线：请求会排在面板里、等它上线后执行。此时**不能转圈等** ——
+        // 等多久都不会有结果，用户只会以为坏了。
+        setLog((v) => ({ ...v, waiting: false, offline: true }))
+        setLogReq('')
+        void loadLogSnapshot(a.id)
+        return
+      }
       setLogReq(r.request_id)
     } catch (e) {
       // 版本过低 / 客户端不存在都会走到这里：直接把面板给的原因摊在弹窗里，
       // 比只弹一句 toast 有用得多（它带着该去哪儿看日志文件）。
-      setLog((v) => ({ ...v, waiting: false, error: (e as Error).message }))
+      setLog((v) => ({ ...v, waiting: false, offline: false, error: (e as Error).message }))
     }
   }
 
   // 等回传：每 2 秒看一次快照，拿到"这次请求的回包"就停。
-  // 25 秒还没到就停下并说明原因 —— 客户端离线时会一直等不到，不能无限转圈。
+  // 超过 LOG_WAIT_MS 就停下并说明原因 —— 不能无限转圈。
   useEffect(() => {
     if (!logFor || !logReq) return
     const id = logFor.id
@@ -281,9 +335,13 @@ export function Clients() {
         } catch {
           /* 面板暂时不可达：下一轮再试 */
         }
-        if (!stopped && Date.now() - started > 25000) {
+        if (!stopped && Date.now() - started > LOG_WAIT_MS) {
           window.clearInterval(h)
-          setLog((v) => ({ ...v, waiting: false }))
+          setLog((v) => ({
+            ...v,
+            waiting: false,
+            elapsed: Math.round((Date.now() - started) / 1000),
+          }))
         }
       })()
     }, 2000)
@@ -308,11 +366,13 @@ export function Clients() {
 
   /** 云端下发卸载：标记随该客户端下一次心跳下发，由它自己清理并退出。 */
   async function uninstallAgent(id: string, name: string, online: boolean) {
+    // 第一行必须是结论：这是唯一会动到"别人那台机器"的操作，
+    // 手机上原生确认框只显示几行字，用户往下滚之前看到的就是第一行。
     const msg = online
-      ? `让「${name}」自己卸载 frpeasy agent？\n\n` +
+      ? `⚠ 彻底卸载「${name}」上的 frpeasy agent？\n\n` +
         `它会在下一次心跳（约 15 秒内）停掉 frpc、摘掉开机自启、删除程序和配置目录，然后从面板上离线。\n\n` +
         `这台机器以后要重新执行安装命令才能再接入。若它当前不是以 root / 管理员运行，会卸载失败并继续在线。`
-      : `「${name}」当前离线。\n\n卸载指令会先存下来，等它下次上线心跳时立即执行。确定下发吗？`
+      : `⚠「${name}」当前离线。\n\n卸载指令会先存下来，等它下次上线心跳时立即执行。确定下发吗？`
     if (!confirm(msg)) return
     try {
       const r = await api<{ message: string }>('POST', `/api/agents/${encodeURIComponent(id)}/uninstall`)
@@ -342,6 +402,7 @@ export function Clients() {
         `如果还有隧道绑着它，那些隧道会变成「未部署」草稿（配置不删）。`
       : `仅移除面板里的记录「${name}」？\n\n这只删面板这一条记录，并把它的隧道解绑为草稿；` +
         `那台机器上的 agent 仍在运行、仍会继续连面板（下次心跳会重新注册回来）。\n\n` +
+        `⚠ 解绑后的隧道不会再自动绑回这台机器 —— 它的新身份是一个新的 id。\n\n` +
         `要真正卸载那台机器，请用上面的「卸载命令」或卡片上的「卸载」。`
     if (!confirm(msg)) return
     try {
@@ -349,7 +410,10 @@ export function Clients() {
       toast('已移除客户端记录')
       await loadAll()
     } catch (e) {
+      // 在线时后端会拒绝并给出"该怎么办"的完整说明，
+      // 这里原样摊出来 —— 换成一句"移除失败"等于把最有用的信息丢掉。
       toast(`移除失败：${(e as Error).message}`, 'bad')
+      await loadAgents()
     }
   }
 
@@ -360,7 +424,11 @@ export function Clients() {
         desc="在需要被穿透的那台机器上执行一次；重跑即升级 / 修复"
         actions={<Tabs value={kind} onChange={setKind} items={TABS} />}
       >
-        <Pre>{cmd}</Pre>
+        {/* 命令块要能被"点一下全选"：手机上复制按钮可能被内核禁掉，
+            这是用户自己长按复制的入口，所以命令必须可选中、且一次选全。 */}
+        <Pre ref={installRef} selectAll>
+          {cmd}
+        </Pre>
         <div className="mt-2 text-xs leading-[1.6] text-dim">
           安装这一步<b>固定经面板</b>取 agent（装的时候 agent 还没跑起来，源顺序也还没下发；
           而且装不上比走慢一点的通道严重得多）。装好之后，frpc 与自动更新按
@@ -372,9 +440,11 @@ export function Clients() {
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <Button
             size="sm"
-            onClick={async () =>
-              toast((await copyText(cmd)) ? '已复制安装命令' : '复制失败，请手动选中', 'ok')
-            }
+            className="touch-copy"
+            onClick={async () => {
+              const r = await copyWithHint(cmd, installRef.current, '已复制安装命令')
+              toast(r.msg, r.kind)
+            }}
           >
             复制命令
           </Button>
@@ -389,7 +459,9 @@ export function Clients() {
         desc="客户端在线时更省事：点下面卡片上的「卸载」，面板会通知它自己清理；离线或用不了面板时，复制这条命令到那台机器执行"
         actions={<Tabs value={kind} onChange={setKind} items={TABS} />}
       >
-        <Pre>{unCmd}</Pre>
+        <Pre ref={uninstallRef} selectAll>
+          {unCmd}
+        </Pre>
         <div className="mt-2 text-xs leading-[1.6] text-dim">
           卸载命令<b>不需要令牌</b>：它只做三件事 —— 停掉进程、摘掉开机自启（systemd / OpenRC /
           计划任务）、删掉二进制和数据目录。跑完那台机器上不留 frpeasy 的任何东西。
@@ -404,9 +476,11 @@ export function Clients() {
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <Button
             size="sm"
-            onClick={async () =>
-              toast((await copyText(unCmd)) ? '已复制卸载命令' : '复制失败，请手动选中', 'ok')
-            }
+            className="touch-copy"
+            onClick={async () => {
+              const r = await copyWithHint(unCmd, uninstallRef.current, '已复制卸载命令')
+              toast(r.msg, r.kind)
+            }}
           >
             复制卸载命令
           </Button>
@@ -432,13 +506,15 @@ export function Clients() {
             const st = agentState(a)
             return (
               <div key={a.id} className="rounded-xl border border-border bg-card px-4.5 py-4">
-                <div className="flex items-center gap-[9px] text-[14.5px] font-[650]">
+                {/* 窄屏把操作按钮换到单独一行：原来名称、状态徽章和「卸载」挤在同一行，
+                    393px 手机上一排小按钮彼此只隔 6px，误触「卸载」的代价是整个客户端被删掉。 */}
+                <div className="flex items-center gap-[9px] text-[14.5px] font-[650] max-[820px]:flex-wrap">
                   <Led tone={st.led} />
                   {a.name}
                   <span className="ml-auto">
                     <Badge tone={st.tone}>{st.label}</Badge>
                   </span>
-                  <div className="ml-2 flex items-center gap-1.5">
+                  <div className="ml-2 flex items-center gap-1.5 max-[820px]:ml-0 max-[820px]:w-full max-[820px]:justify-end max-[820px]:gap-2 max-[820px]:pt-1">
                     {/* 云端卸载：真正删那台机器上的东西，务必与「移除记录」区分开。
                         已经确认卸载掉的（机器上没 agent 了）不再给这个按钮：
                         点了只会把指令存起来等一台不会再上线的机器。
@@ -448,6 +524,7 @@ export function Clients() {
                       <Button
                         variant="danger"
                         size="sm"
+                        className="touch-copy"
                         onClick={() => void uninstallAgent(a.id, a.name, a.online)}
                       >
                         {st.label === '卸载未生效' ? '重新卸载' : '卸载'}
@@ -455,18 +532,28 @@ export function Clients() {
                     )}
                     {/* 排队中的指令可以撤销：离线点错了否则只能等它开机把自己删掉 */}
                     {a.uninstall_requested && (
-                      <Button size="sm" onClick={() => void cancelUninstall(a.id, a.name)}>
+                      <Button
+                        size="sm"
+                        className="touch-copy"
+                        onClick={() => void cancelUninstall(a.id, a.name)}
+                      >
                         撤销卸载
                       </Button>
                     )}
                     {/* 日志：诊断用。面板读不到客户端本地文件，只能请它回传 —— 
                         客户端离线时请求会留着，等它上线第一次心跳就回传。 */}
-                    <Button variant="ghost" size="sm" onClick={() => void openLog(a)}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="touch-copy"
+                      onClick={() => void openLog(a)}
+                    >
                       日志
                     </Button>
                     <Button
                       variant={st.gone ? 'primary' : 'ghost'}
                       size="sm"
+                      className="touch-copy"
                       onClick={() => void remove(a.id, a.name, st.gone)}
                     >
                       {st.gone ? '清掉记录' : '移除'}
@@ -578,8 +665,8 @@ export function Clients() {
               size="sm"
               disabled={!log.content}
               onClick={async () => {
-                const ok = await copyText(log.content)
-                toast(ok ? '已复制日志' : '复制失败', ok ? 'ok' : 'bad')
+                const r = await copyWithHint(log.content, logPreRef.current, '已复制日志')
+                toast(r.msg, r.kind)
               }}
             >
               复制
@@ -610,13 +697,23 @@ export function Clients() {
               {log.waiting ? (
                 <>
                   <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-accent" />
-                  正在请客户端回传…（最长约 15 秒，已等 {log.elapsed}s）
-                  {logFor && !logFor.online && (
-                    <span className="text-warn-fg">
-                      · 该客户端当前离线，请求会在它上线后的第一次心跳执行
-                    </span>
-                  )}
+                  正在请客户端回传…（最长约 {LOG_WAIT_SEC} 秒，已等 {log.elapsed}s）
                 </>
+              ) : log.offline ? (
+                // 离线是与"等待"互斥的独立状态：请求已经排在面板里，
+                // 等它上线才会执行。这里不能转圈，否则用户会以为面板卡住了。
+                <span className="text-warn-fg">
+                  这台客户端<b>当前离线</b>，请求已存进面板 —— 它下次上线的心跳会立刻执行。
+                  {log.content ? (
+                    <>
+                      {' '}
+                      下面显示的是<b>上一次回传（{fmtAgo(log.fetchedAt)}）</b>的内容，
+                      <b>不是</b>本次请求的结果。
+                    </>
+                  ) : (
+                    <> 现在没有可显示的历史内容。</>
+                  )}
+                </span>
               ) : log.answered ? (
                 <>
                   已于 {fmtAgo(log.fetchedAt)} 回传 · {fmtBytes(new Blob([log.content]).size)}
@@ -638,7 +735,9 @@ export function Clients() {
                 </span>
               )}
             </div>
-            <Pre className="max-h-[58vh] overflow-y-auto">{log.content || '（还没有内容）'}</Pre>
+            <Pre ref={logPreRef} selectAll className="max-h-[58vh] overflow-y-auto">
+              {log.content || '（还没有内容）'}
+            </Pre>
           </>
         )}
       </Modal>

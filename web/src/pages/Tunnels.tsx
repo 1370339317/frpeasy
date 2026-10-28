@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useApp } from '../store'
 import { api } from '../lib/api'
-import { copyText, fmtBytes } from '../lib/format'
+import { copyWithHint, fmtBytes } from '../lib/format'
 import { Badge, Button, Card, Empty, Table, Td, Led } from '../components/ui'
 import type { Tunnel } from '../types'
 import { TunnelModal } from './TunnelModal'
@@ -118,13 +118,13 @@ export function Tunnels() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="px-2 py-0.5"
-                          onClick={async () =>
-                            toast(
-                              (await copyText(url)) ? '已复制访问地址' : '复制失败',
-                              'ok',
-                            )
-                          }
+                          // whitespace-nowrap：这一列宽度随「公网访问」内容浮动，
+                          // 挤到极限时「复制」会被压成上下两行（"复/制"）。
+                          className="touch-copy whitespace-nowrap px-2 py-0.5"
+                          onClick={async () => {
+                            const r = await copyWithHint(url, null, '已复制访问地址')
+                            toast(r.msg, r.kind)
+                          }}
                         >
                           复制
                         </Button>

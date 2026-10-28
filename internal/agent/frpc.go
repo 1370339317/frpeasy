@@ -135,6 +135,66 @@ func (m *FrpcManager) versionPath() string {
 	return filepath.Join(m.binDir, "frpc.version")
 }
 
+// pidPath 记录当前运行的 frpc PID。
+//
+// 用途是启动时自愈：agent 被 SIGKILL（Linux 上没有 Pdeathsig 兜底）之后，
+// frpc 会作为孤儿继续连 frps —— 面板显示隧道 online、客户端显示 offline。
+// 下次 agent 起来时按这个 PID 把上一代残留收掉，不需要人工干预。
+//
+// 只在 PID 还活着、且它的可执行文件确实是我们这个 frpc 时才动它：
+// 裸 PID 会复用，直接 kill 有可能杀掉无关进程。
+func (m *FrpcManager) pidPath() string {
+	return filepath.Join(m.frpcRunDir(), "frpc.pid")
+}
+
+func (m *FrpcManager) frpcRunDir() string {
+	return filepath.Join(m.binDir)
+}
+
+// killStray 收掉上一代遗留的 frpc 进程。agent 启动时调用一次。
+func (m *FrpcManager) killStray() {
+	raw, err := os.ReadFile(m.pidPath())
+	if err != nil {
+		return
+	}
+	pid := 0
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(raw)), "%d", &pid); err != nil || pid <= 0 {
+		_ = os.Remove(m.pidPath())
+		return
+	}
+	// 自己还活着就不能杀（理论上不会发生：启动时还没起 frpc）
+	if pid == os.Getpid() {
+		_ = os.Remove(m.pidPath())
+		return
+	}
+	if !pidAlive(pid) {
+		_ = os.Remove(m.pidPath())
+		return
+	}
+	if !pidLooksLikeFrpc(pid, m.binaryPath()) {
+		// PID 被别的进程复用了：不能杀，只清掉过期的记录。
+		log.Printf("[agent] frpc.pid 指向的进程 %d 不是本目录的 frpc，跳过清理（PID 可能已被复用）", pid)
+		_ = os.Remove(m.pidPath())
+		return
+	}
+	if err := killPID(pid); err != nil {
+		log.Printf("[agent] 清理上一代残留 frpc（pid %d）失败: %v", pid, err)
+		return
+	}
+	log.Printf("[agent] 已清理上一代残留的 frpc 进程（pid %d）", pid)
+	_ = os.Remove(m.pidPath())
+}
+
+// writePID 记录刚启动的 frpc PID（尽力而为，失败不影响运行）。
+func (m *FrpcManager) writePID(pid int) {
+	_ = os.WriteFile(m.pidPath(), []byte(fmt.Sprintf("%d\n", pid)), 0o644)
+}
+
+// clearPID 在 frpc 正常停止后清掉记录。
+func (m *FrpcManager) clearPID() {
+	_ = os.Remove(m.pidPath())
+}
+
 // CurrentVersion 返回当前本地 frpc 的真实版本号。
 func (m *FrpcManager) CurrentVersion() string {
 	if b, err := os.ReadFile(m.versionPath()); err == nil {
@@ -462,6 +522,13 @@ func (m *FrpcManager) Reconcile(cfg shared.AgentConfig, force bool) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动 frpc 失败: %w", err)
 	}
+	// 把 frpc 交给作业对象托管：agent 被强杀时它不会变成孤儿。
+	// 失败只记一行 —— 退回到老行为，不能因此让隧道起不来。
+	if err := adoptProcess(cmd.Process); err != nil {
+		log.Printf("[agent] frpc 未能纳入作业对象托管（agent 异常退出时可能留下孤儿进程）: %v", err)
+	}
+	// PID 落盘：Linux 上没有 Job Object，靠这条记录在下次启动时收掉孤儿。
+	m.writePID(cmd.Process.Pid)
 	m.cmd = cmd
 	m.hash = hash
 	m.running = true
@@ -501,6 +568,7 @@ func (m *FrpcManager) Stop() {
 	// 于是隧道明明该起却一直不起。
 	m.running = false
 	m.hash = ""
+	m.clearPID()
 }
 
 func hostOf(addr string) string {

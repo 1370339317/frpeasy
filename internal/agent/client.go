@@ -270,7 +270,24 @@ func localReachable(localAddr string) bool {
 }
 
 // Run 主循环。
+// Shutdown 停掉本进程拉起的子进程（frpc），供信号处理路径调用。
+//
+// 为什么必须有：agent 退出时不收 frpc，孤儿 frpc 会继续连着 frps ——
+// 面板上隧道显示 online，客户端却显示 offline，两边状态互相矛盾，
+// 而本机端口一直被占着，只能手工杀进程。
+func (c *Client) Shutdown() {
+	if c.frpc != nil {
+		c.frpc.Stop()
+	}
+}
+
 func (c *Client) Run() error {
+	// 先收掉上一代可能残留的 frpc（上次被强杀时留下的孤儿）。
+	// 必须在起新 frpc 之前：否则两个 frpc 会抢同一个 proxy 名，
+	// 端口占用导致新的那个起不来，表现为"隧道一直连不上"。
+	if c.frpc != nil {
+		c.frpc.killStray()
+	}
 	// 尝试用本地身份，失败则注册
 	if err := c.loadState(); err != nil || c.agentID == "" {
 		if err := c.register(); err != nil {

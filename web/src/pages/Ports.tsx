@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useApp } from '../store'
 import { api } from '../lib/api'
-import { copyText } from '../lib/format'
+import { copyWithHint } from '../lib/format'
 import {
   Alert,
   Badge,
@@ -20,6 +20,17 @@ import type { PortCheck, PortCheckResponse, PortsResponse } from '../types'
 /** 可达性徽标。没检测过不能标「可达」——那会让人以为公网已经通了。 */
 function ReachBadge({ c }: { c?: PortCheck }) {
   if (!c) return <span className="text-xs text-dim">未检测</span>
+  const kind = c.evidence === 'external' ? '外部节点已连上' : c.evidence === 'self' ? '本机回访通过' : ''
+  // 「本机回访通过」不等于「公网可达」：本机连自己的公网 IP 会走本机路由，
+  // 云安全组把整个端口段封死时它照样能通。所以这两种证据必须用不同的词，
+  // 否则用户看到绿色「可达」，实际从外网连不上。
+  if (c.state === 'open' && c.evidence === 'self') {
+    return (
+      <Badge tone="warn" title={`${kind}（不代表已从外网验证）`}>
+        仅本机可达
+      </Badge>
+    )
+  }
   const map: Record<string, [Tone, string]> = {
     open: ['ok', '可达'],
     blocked: ['bad', '被拦截'],
@@ -28,10 +39,8 @@ function ReachBadge({ c }: { c?: PortCheck }) {
     rate_limited: ['warn', '探测限流'],
   }
   const [tone, label] = map[c.state] ?? ['gray', c.state]
-  const title =
-    c.evidence === 'external' ? '外部节点已连上' : c.evidence === 'self' ? '本机回访通过' : ''
   return (
-    <Badge tone={tone} title={title}>
+    <Badge tone={tone} title={kind}>
       {label}
     </Badge>
   )
@@ -100,10 +109,26 @@ export function Ports() {
       const bad = res.filter((x) => x.state === 'blocked')
       const nos = res.filter((x) => x.state === 'no_service')
       const lim = res.filter((x) => x.external?.state === 'rate_limited')
-      if (bad.length) toast(`${bad.length} 个端口被防火墙挡住：${bad.map((x) => x.port).join(', ')}`, 'bad')
-      else if (nos.length) toast(`${nos.length} 个端口本机没在监听，先启动服务再测`, 'bad')
-      else if (lim.length) toast('部分端口被第三方探测服务限流，稍后重试', 'bad')
-      else toast(external ? '检测完成：端口已可从外部访问' : '检测完成：本机回访全部通过')
+      // 限流的提示必须能同时出现：它说的是"这次外部回访没做成"，
+      // 与"有几个端口被拦"是两件事。以前用 if/else 串起来，
+      // 只要有端口被拦，限流这条就永远显示不出来 —— 用户会以为
+      // 表里的结论真的是从外网验证过的。
+      if (external && lim.length) {
+        toast(
+          `外部回访没做成（第三方探测服务限流），下面只有本机回访的结论：${lim
+            .map((x) => x.port)
+            .join(', ')}。稍后再测一次。`,
+          'bad',
+        )
+      } else if (bad.length) {
+        toast(`${bad.length} 个端口被防火墙挡住：${bad.map((x) => x.port).join(', ')}`, 'bad')
+      } else if (nos.length) {
+        toast(`${nos.length} 个端口本机没在监听，先启动服务再测`, 'bad')
+      } else {
+        toast(
+          external ? '检测完成：端口已可从外部访问' : '检测完成：本机回访全部通过（不代表公网可达）',
+        )
+      }
     } catch (e) {
       toast(`检测失败：${(e as Error).message}`, 'bad')
     } finally {
@@ -120,7 +145,8 @@ export function Ports() {
     }
     const lines = [`# ${ports.access_host || ''} 需要放行的端口`]
     for (const x of list) lines.push(`${x.port}/tcp  ${x.label}${x.note ? `   # ${x.note}` : ''}`)
-    toast((await copyText(lines.join('\n'))) ? '端口清单已复制' : '复制失败', 'ok')
+    const r = await copyWithHint(lines.join('\n'), null, '端口清单已复制')
+    toast(r.msg, r.kind)
   }
 
   const fw = ports?.firewall
@@ -286,9 +312,11 @@ export function Ports() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={async () =>
-                    toast((await copyText(c.cmd)) ? '已复制命令' : '复制失败', 'ok')
-                  }
+                  className="touch-copy"
+                  onClick={async () => {
+                    const r = await copyWithHint(c.cmd, null, '已复制命令')
+                    toast(r.msg, r.kind)
+                  }}
                 >
                   复制
                 </Button>
