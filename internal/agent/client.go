@@ -68,6 +68,15 @@ type Client struct {
 	// downKbps 最近一次自测的「本机 → 面板」下行速率（kbps）。0 = 还没测过。
 	// 用 atomic 是因为它被测速 goroutine 写、被心跳读。
 	downKbps atomic.Int64
+	// speedReqDone 已完成的一次性测速请求 ID，随心跳回执给面板。
+	speedReqDone atomic.Value // string
+
+	// 测速调度：由面板每轮下发，改间隔/开关下一轮就生效。
+	speedMu       sync.Mutex
+	speedEnabled  bool
+	speedInterval time.Duration
+	speedReqID    string
+	speedWake     chan struct{}
 }
 
 // state 持久化本地身份，避免每次重启都向面板新建 Agent。
@@ -98,7 +107,13 @@ func NewClient(server, installTok, name, dataDir string) (*Client, error) {
 		frpc:       NewFrpcManager(dataDir),
 		httpClient: &http.Client{Timeout: 20 * time.Second},
 		frpcWake:   make(chan struct{}, 1),
+		speedWake:  make(chan struct{}, 1),
+		// 面板还没下发过配置时的初始值：保持 0.7.35 的行为（开、10 分钟），
+		// 这样"只升级客户端、面板还是老版本"不会让测速突然停掉。
+		speedEnabled:  true,
+		speedInterval: defaultSpeedInterval,
 	}
+	c.speedReqDone.Store("")
 	// 面板地址始终注入：即使某个客户端一路走镜像，面板仍是配置与版本的唯一来源。
 	c.frpc.SetPanelBase(server)
 	// 排优/下载事件上报。用闭包而不是字段：agentID 是注册之后才有的，
@@ -236,6 +251,7 @@ func (c *Client) heartbeat(statuses []shared.TunnelStatus) (*shared.HeartbeatRes
 		BinSource:    binSource,
 		BinNote:      binNote,
 		DownKbps:     c.downKbps.Load(),
+		SpeedReq:     c.speedReqDoneValue(),
 	}
 	var resp shared.HeartbeatResponse
 	if err := c.postJSON("/api/agent/heartbeat", req, &resp); err != nil {
@@ -426,6 +442,8 @@ func (c *Client) Run() error {
 		c.lastFRPSRunning = cfg.FRPSRunning
 		// 投递给后台 worker，立即返回：心跳不能被下载/解压阻塞（见字段说明）。
 		c.requestReconcile(*cfg, forceRestart)
+		// 测速调度同理：只更新参数并唤醒，不在这里执行（一次 1MB 会拖住心跳）。
+		c.updateSpeedCfg(cfg)
 
 		// 构造状态上报（并发探测，最坏 2 秒而不是 2 秒 × 隧道数）
 		statuses := probeTunnels(cfg.Tunnels)
@@ -464,16 +482,82 @@ func (c *Client) Run() error {
 // （跨境 40KB/s 时要 25 秒）。首次延迟 30 秒，避开启动时注册 / 拉配置 / 起 frpc
 // 的窗口 —— 那时候插一次下载会拖慢首屏，数字也不代表稳态。
 const (
-	speedTestInterval = 10 * time.Minute
-	speedTestDelay    = 30 * time.Second
-	speedTestBytes    = 1 << 20
+	// defaultSpeedInterval 面板没下发调度时的历史默认（0.7.35 的行为）。
+	// 保留它只是为了"面板还是老版本"时不要突然改变行为。
+	defaultSpeedInterval = 10 * time.Minute
+	speedTestDelay       = 30 * time.Second
+	speedTestBytes       = 1 << 20
+	// speedMinInterval 防止面板下发一个荒谬的值（比如 1 秒）把链路打满。
+	speedMinInterval = time.Minute
 )
 
+// updateSpeedCfg 应用面板下发的测速调度。
+//
+// 只改参数并唤醒 worker，绝不在这里执行测速 —— 一次 1MB 在慢链路上要几十秒，
+// 放在心跳循环里就是又一次"心跳停摆→面板判离线"（8b-1 那条事故）。
+func (c *Client) updateSpeedCfg(cfg *shared.AgentConfig) {
+	c.speedMu.Lock()
+	enabled := true
+	interval := defaultSpeedInterval
+	if cfg.SpeedTestEnabled != nil {
+		enabled = *cfg.SpeedTestEnabled
+	}
+	if cfg.SpeedTestIntervalSec > 0 {
+		interval = time.Duration(cfg.SpeedTestIntervalSec) * time.Second
+	}
+	if interval < speedMinInterval {
+		interval = speedMinInterval
+	}
+	changed := c.speedEnabled != enabled ||
+		c.speedInterval != interval ||
+		c.speedReqID != cfg.SpeedTestRequest
+	c.speedEnabled = enabled
+	c.speedInterval = interval
+	c.speedReqID = cfg.SpeedTestRequest
+	c.speedMu.Unlock()
+	if changed {
+		// 唤醒也要非阻塞：channel 满说明 worker 已经在处理，那一份就是最新的
+		select {
+		case c.speedWake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (c *Client) speedReqDoneValue() string {
+	if v, ok := c.speedReqDone.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// speedTestLoop 按面板的节奏测速，并响应一次性请求。
+//
+// 两种触发：到了自动间隔、或面板排了一次性请求（用户点了"立即测速"）。
+// 后者即使自动测速被关掉也要执行 —— 那是用户明确的意图，且只发生一次。
 func (c *Client) speedTestLoop() {
 	time.Sleep(speedTestDelay)
 	for {
-		c.measureDownlink()
-		time.Sleep(speedTestInterval)
+		c.speedMu.Lock()
+		enabled := c.speedEnabled
+		interval := c.speedInterval
+		reqID := c.speedReqID
+		c.speedMu.Unlock()
+		if interval <= 0 {
+			interval = defaultSpeedInterval
+		}
+
+		if reqID != "" && reqID != c.speedReqDoneValue() {
+			c.measureDownlink()
+			c.speedReqDone.Store(reqID)
+		} else if enabled {
+			c.measureDownlink()
+		}
+
+		select {
+		case <-c.speedWake: // 配置变了（改了间隔/开关，或来了新的一次性请求）
+		case <-time.After(interval):
+		}
 	}
 }
 

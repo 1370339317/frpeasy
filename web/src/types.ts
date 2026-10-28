@@ -129,6 +129,10 @@ export interface Settings {
   tunnel_tcp_mux: string
   /** 预建连接池大小，仅在多路复用关闭时生效 */
   tunnel_pool_count: string
+  /** 是否让客户端定期自测（'1'/'0'） */
+  speedtest_enabled: string
+  /** 自测间隔（分钟），5~1440 */
+  speedtest_interval_min: string
   [key: string]: string
 }
 
@@ -456,6 +460,8 @@ export interface SettingsBody {
   tunnel_compression?: string
   tunnel_tcp_mux?: string
   tunnel_pool_count?: string
+  speedtest_enabled?: string
+  speedtest_interval_min?: string
 }
 
 /** 系统调优现状（设置 → 隧道传输）。congestion 只在 Linux 上有意义。 */
@@ -474,11 +480,20 @@ export interface TunnelTransportState {
   compression: boolean
 }
 
+/** 客户端自测速率的调度（面板统一下发）。 */
+export interface SpeedTestConfig {
+  enabled: boolean
+  interval_min: number
+  /** 每次测速拉取的字节数，前端据此算流量成本 */
+  bytes: number
+}
+
 export interface TuningResponse {
   congestion: TuningCongestion
   transport: TunnelTransportState
   min_agent_version: string
   max_pool_count: number
+  speedtest: SpeedTestConfig
 }
 
 /** 链路自检的单个目标结果。 */

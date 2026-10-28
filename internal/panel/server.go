@@ -208,6 +208,13 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("POST /api/agents/{id}/logs", p.requireAuth(p.agentLogsRequestHandler))
 	mux.HandleFunc("GET /api/agents/{id}/logs", p.requireAuth(p.agentLogViewHandler))
 	// 云端发起卸载：标记后随该客户端下一次心跳下发，由它自己清理并退出。
+	// 主动测速：单台与"全部在线"。只排队，真正执行在客户端下次心跳之后。
+	mux.HandleFunc("POST /api/agents/{id}/speedtest", p.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		p.agentSpeedTestHandler(w, r, r.PathValue("id"))
+	}))
+	mux.HandleFunc("POST /api/agents/speedtest", p.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		p.agentSpeedTestHandler(w, r, "")
+	}))
 	mux.HandleFunc("POST /api/agents/{id}/uninstall", p.requireAuth(p.agentUninstallHandler))
 	// 撤销还没被心跳领走的卸载指令（离线点错了的唯一反悔途径）
 	mux.HandleFunc("DELETE /api/agents/{id}/uninstall", p.requireAuth(p.agentUninstallCancelHandler))

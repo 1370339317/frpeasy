@@ -266,6 +266,8 @@ func (p *Panel) tuningHandler(w http.ResponseWriter, r *http.Request) {
 			// 前端据此显示"有关 N 台客户端版本过低，暂时不能关 mux"
 			"min_agent_version": shared.MinAgentTransportVersion,
 			"max_pool_count":    maxPoolCount,
+			// 测速调度（含每次拉取的字节数，前端据此算流量成本）
+			"speedtest": p.speedTestConfig(),
 		})
 		return
 	}

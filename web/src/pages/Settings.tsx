@@ -236,6 +236,8 @@ type SettingsDraft = {
   tcpMux: string
   poolCount: string
   compress: string
+  speedEnabled: string
+  speedInterval: string
 }
 
 let draft: SettingsDraft | null = null
@@ -283,6 +285,12 @@ export function SettingsPage() {
   const [compress, setCompress] = useState<'1' | '0'>((draft?.compress as '1' | '0') ?? '1')
   const [tuning, setTuning] = useState<TuningResponse | null>(null)
   const [tuningBusy, setTuningBusy] = useState(false)
+  // 客户端测速调度。每次拉 1MB，间隔直接决定流量成本，所以跟着一起在这里配。
+  const [speedEnabled, setSpeedEnabled] = useState<'1' | '0'>(
+    (draft?.speedEnabled as '1' | '0') ?? '1',
+  )
+  const [speedInterval, setSpeedInterval] = useState(draft?.speedInterval ?? '30')
+  const [speedBusy, setSpeedBusy] = useState(false)
   // 链路自检结果。一次约 12 秒（两个目标各 6 秒上限），期间按钮转圈。
   const [diag, setDiag] = useState<DiagnoseResponse | null>(null)
   const [diagBusy, setDiagBusy] = useState(false)
@@ -309,6 +317,8 @@ export function SettingsPage() {
       tcpMux,
       poolCount,
       compress,
+      speedEnabled,
+      speedInterval,
     }
   }, [
     publicAddr,
@@ -351,6 +361,8 @@ export function SettingsPage() {
     setTcpMux((s.tunnel_tcp_mux ?? '1') === '0' ? '0' : '1')
     setPoolCount(s.tunnel_pool_count ?? '0')
     setCompress((s.tunnel_compression ?? '1') === '0' ? '0' : '1')
+    setSpeedEnabled((s.speedtest_enabled ?? '1') === '0' ? '0' : '1')
+    setSpeedInterval(s.speedtest_interval_min || '30')
     setToken('')
     setPass('')
   }, [])
@@ -427,6 +439,24 @@ export function SettingsPage() {
     }
   }
 
+  // 让客户端立刻测一次。只是排队：客户端下次心跳（约 15 秒）后执行。
+  async function triggerSpeedTest() {
+    if (speedBusy) return
+    setSpeedBusy(true)
+    try {
+      const r = await api<{ queued: number; message: string }>(
+        'POST',
+        '/api/agents/speedtest',
+        {},
+      )
+      toast(`已通知 ${r.queued} 台在线客户端测速，约 15 秒后出结果`)
+    } catch (e) {
+      toast((e as Error).message, 'bad')
+    } finally {
+      setSpeedBusy(false)
+    }
+  }
+
   const save = useCallback(async () => {
     if (saving) return
     // 设置还没加载出来时禁止保存。此时表单是一片空白，提交上去就等于
@@ -470,6 +500,10 @@ export function SettingsPage() {
       // 连接池只在 mux 关闭时才有意义，开着 mux 提交它只会让服务端白做一次校验
       if (tcpMux === '0' && trim(poolCount) !== trim(settings.tunnel_pool_count ?? '0')) {
         body.tunnel_pool_count = trim(poolCount)
+      }
+      if (speedEnabled !== (settings.speedtest_enabled ?? '1')) body.speedtest_enabled = speedEnabled
+      if (trim(speedInterval) !== trim(settings.speedtest_interval_min ?? '30')) {
+        body.speedtest_interval_min = trim(speedInterval)
       }
       // 令牌输入框拿到的是脱敏串，只有用户重新输入时才提交
       if (token.trim()) body.frps_token = token.trim()
@@ -518,6 +552,8 @@ export function SettingsPage() {
     tcpMux,
     poolCount,
     compress,
+    speedEnabled,
+    speedInterval,
     token,
     pass,
     loadSettings,
@@ -1094,6 +1130,78 @@ export function SettingsPage() {
             </div>
           </div>
         )}
+      </Card>
+
+      {/* ---------------- 客户端测速 ---------------- */}
+      {/* 这一项有真实流量成本：每次拉 1MB。10 分钟一次是每台每月 4.2GB，
+          30 分钟一次是 1.4GB。对走 CDT / 按量带宽的机器不是可以随便定的数字，
+          所以间隔要能改、能关，也要能手动测一次看当下。 */}
+      <Card
+        title="客户端测速"
+        desc="让客户端自己测「本机 → 面板」的速度 —— 这段才是隧道的真实链路"
+      >
+        <div className="grid gap-3">
+          <label className="flex cursor-pointer items-start gap-2.5">
+            <input
+              type="checkbox"
+              className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]"
+              checked={speedEnabled === '1'}
+              onChange={(e) => setSpeedEnabled(e.target.checked ? '1' : '0')}
+            />
+            <span className="min-w-0">
+              <b className="block text-[13.5px]">定期自测</b>
+              <span className="mt-0.5 block text-xs leading-[1.6] text-dim">
+                关掉后客户端不再自动测速，界面上的速度会停在最后一次结果。
+                仍可以用下面的按钮手动测一次。
+              </span>
+            </span>
+          </label>
+
+          <div className="flex flex-wrap items-end gap-3">
+            <Field label="间隔（分钟）" className="mb-0 w-[150px]">
+              <Input
+                type="number"
+                min={5}
+                max={1440}
+                value={speedInterval}
+                onChange={(e) => setSpeedInterval(e.target.value)}
+                disabled={speedEnabled === '0'}
+              />
+            </Field>
+            <div className="mb-1 text-xs leading-[1.6]">
+              {(() => {
+                const n = Number.parseInt(speedInterval, 10)
+                const mins = Number.isFinite(n) && n > 0 ? n : 30
+                // 每天 1440 分钟 / 间隔 = 次数；每次 1MB；按 30 天算
+                const timesPerDay = 1440 / mins
+                const gbPerMonth = (timesPerDay * 30) / 1024
+                return (
+                  <span className={speedEnabled === '0' ? 'text-dim' : 'text-muted'}>
+                    每台每月约{' '}
+                    <b className={gbPerMonth > 3 ? 'text-warn-fg' : 'text-fg'}>
+                      {gbPerMonth.toFixed(1)} GB
+                    </b>
+                    （{timesPerDay.toFixed(0)} 次/天，每次 1MB）
+                    {gbPerMonth > 3 && <span className="text-warn-fg"> · 偏多，考虑调大间隔</span>}
+                  </span>
+                )
+              })()}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" disabled={speedBusy} onClick={() => void triggerSpeedTest()}>
+              {speedBusy ? '下发中…' : '立即让所有在线客户端测一次'}
+            </Button>
+            <span className="text-xs text-dim">
+              只排一次队，客户端下次心跳（约 15 秒）后执行；关掉自动测速也照样能手动测。
+            </span>
+          </div>
+        </div>
+        <Hint>
+          测速走的是客户端到面板的 HTTP 通道，和隧道（frps 的裸 TCP）不完全等价，
+          但同一台机器、同一条线路，量级上可参考。改完记得点「保存」。
+        </Hint>
       </Card>
 
       <Card title="高级" desc="一般不用动">

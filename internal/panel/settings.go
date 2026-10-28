@@ -226,6 +226,21 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = p.db.SetSetting(k, v)
 			changedKeys = append(changedKeys, k)
+		case settingSpeedTestEnabled:
+			if v != "1" && v != "0" {
+				http.Error(w, "该开关只接受 1 或 0", http.StatusBadRequest)
+				return
+			}
+			_ = p.db.SetSetting(k, v)
+			changedKeys = append(changedKeys, k)
+		case settingSpeedTestIntervalMin:
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil || n < speedTestMinInterval || n > speedTestMaxInterval {
+				http.Error(w, fmt.Sprintf("测速间隔必须是 %d~%d 分钟", speedTestMinInterval, speedTestMaxInterval), http.StatusBadRequest)
+				return
+			}
+			_ = p.db.SetSetting(k, v)
+			changedKeys = append(changedKeys, k)
 		case settingTunnelPoolCount:
 			n, err := strconv.Atoi(strings.TrimSpace(v))
 			if err != nil || n < 0 || n > maxPoolCount {

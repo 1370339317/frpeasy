@@ -89,6 +89,11 @@ func (p *Panel) agentConfigHandler(w http.ResponseWriter, r *http.Request) {
 	cfg.TCPMux = &tt.TCPMux
 	cfg.Compression = &tt.Compression
 	cfg.PoolCount = tt.PoolCount
+	// 测速调度同理每轮下发：改间隔/开关，下一轮心跳就生效，不用重装客户端。
+	st := p.speedTestConfig()
+	cfg.SpeedTestEnabled = &st.Enabled
+	cfg.SpeedTestIntervalSec = st.IntervalMin * 60
+	cfg.SpeedTestRequest = p.db.PendingSpeedRequest(agent.ID)
 	json.NewEncoder(w).Encode(cfg)
 }
 
@@ -130,6 +135,11 @@ func (p *Panel) agentHeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	// 否则一次"没带字段"的心跳就会把它之前测到的真实数字抹掉。
 	if req.DownKbps > 0 {
 		_ = p.db.UpdateAgentDownKbps(req.AgentID, req.DownKbps)
+	}
+	// 主动测速的回执：客户端做完了一次性请求就带回来，这里清掉待办，
+	// 否则界面上那个"测速中"会一直转。
+	if req.SpeedReq != "" {
+		_ = p.db.ClearSpeedRequest(req.AgentID, req.SpeedReq)
 	}
 	if err := p.db.ApplyHeartbeat(req.Status); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

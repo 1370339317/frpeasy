@@ -194,6 +194,20 @@ type AgentConfig struct {
 	// （HTTP 响应体可压 3~5 倍），对已压缩内容只是多花一点 CPU。
 	Compression *bool `json:"compression,omitempty"`
 
+	// ---- 客户端自测速率的调度（都由面板决定）----
+	//
+	// 为什么要可配：每次测速要拉 1MB。默认 30 分钟一次 = 每台每月约 1.4GB，
+	// 而 10 分钟一次就是 4.2GB —— 对走流量计费的机器（CDT / 按量带宽）不是小数目。
+	// 用户应该能按自己的流量预算调间隔，或者直接关掉。
+
+	// SpeedTestEnabled 是否周期性自测。nil = 老面板没下发，按下发的历史默认行为。
+	SpeedTestEnabled *bool `json:"speed_test_enabled,omitempty"`
+	// SpeedTestIntervalSec 自动测速间隔（秒）。0 = 客户端用内置默认。
+	SpeedTestIntervalSec int `json:"speed_test_interval_sec,omitempty"`
+	// SpeedTestRequest 一次性测速请求 ID：与上次不同就立刻测一次并上报。
+	// 与 LogRequest 同一套"看到新 ID 才动"的语义，避免重复执行。
+	SpeedTestRequest string `json:"speed_test_request,omitempty"`
+
 	// FRPSRunning 面板侧 frps 当前是否在运行（运行时字段，不进配置内容）。
 	//
 	// 用途：frpc 自带的登录重连是指数退避（1s→2s→…→最长 120s），frps 停得
@@ -239,6 +253,9 @@ type HeartbeatRequest struct {
 	// DownKbps 客户端自测的「本机 → 面板」下行速率（kbps）。0 = 还没测过。
 	// 面板只做展示与提示，不参与任何调度决策。
 	DownKbps int64 `json:"down_kbps"`
+	// SpeedReq 本次心跳对应的"一次**测速请求 ID**（回执）。
+	// 面板据此确认这次主动测速已经完成，并清掉待办，避免按钮一直转圈。
+	SpeedReq string `json:"speed_req"`
 }
 
 // AgentUpdate 面板通过心跳下发给客户端的升级指令。

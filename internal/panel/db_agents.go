@@ -357,3 +357,37 @@ func (db *DB) UpdateAgentDownKbps(id string, kbps int64) error {
 	)
 	return err
 }
+
+// ---- 一次性测速请求（与"查看日志"同一套模式）----
+//
+// 语义：面板写一个请求 ID → 下一轮心跳下发给客户端 → 客户端看到新 ID 就测一次
+// 并回执 → 面板清掉。用 ID 而不是布尔，是因为客户端可能错过某一轮心跳，
+// 用布尔会分不清"还没做"和"已经做过"。
+
+// SetAgentSpeedRequest 给某台客户端排一次测速。
+func (db *DB) SetAgentSpeedRequest(id string) (string, error) {
+	reqID := shared.NewToken(6)
+	_, err := db.Exec("UPDATE agents SET speed_request=? WHERE id=?", reqID, id)
+	if err != nil {
+		return "", err
+	}
+	return reqID, nil
+}
+
+// PendingSpeedRequest 当前待处理的测速请求（配置下发用）。
+func (db *DB) PendingSpeedRequest(id string) string {
+	var reqID string
+	if err := db.QueryRow("SELECT speed_request FROM agents WHERE id=?", id).Scan(&reqID); err != nil {
+		return ""
+	}
+	return reqID
+}
+
+// ClearSpeedRequest 客户端已回执，清掉待办。
+//
+// 条件是 `speed_request = reqID`：如果这期间用户又点了一次（产生了新 ID），
+// 旧回执就不能把新请求顺手清掉，否则第二次点会没反应。
+func (db *DB) ClearSpeedRequest(id, reqID string) error {
+	_, err := db.Exec("UPDATE agents SET speed_request='' WHERE id=? AND speed_request=?", id, reqID)
+	return err
+}

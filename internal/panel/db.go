@@ -107,6 +107,8 @@ func (db *DB) migrate() error {
 	// 客户端自测的「本机 → 面板」下行速率。0 = 还没测过（老客户端不会填）。
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN down_kbps INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN speed_at TEXT NOT NULL DEFAULT ''`)
+	// 一次性的"立刻测速"请求 ID（下发后等客户端回执，再清掉）。
+	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN speed_request TEXT NOT NULL DEFAULT ''`)
 	// uninstall_requested 面板要求该客户端自卸载的待办标记。
 	// 用数据库而不是内存 map：面板重启后指令不该丢，否则用户点了卸载、
 	// 面板恰好重启，那台机器就永远收不到指令，而界面看起来「已下发」。
@@ -154,6 +156,11 @@ func (db *DB) initSettings() error {
 		"tunnel_tcp_mux": "1",
 		// 连接池：0 = 不启用（frp 默认）。仅 tcpMux 关闭时生效。
 		"tunnel_pool_count": "0",
+		// 客户端自动测速：每次要拉 1MB，按流量计费的机器上不是免费的。
+		// 默认 30 分钟 = 每台每月约 1.4GB（10 分钟会是 4.2GB），
+		// 既能看出链路趋势，又不至于让人心疼流量。可以调或直接关。
+		"speedtest_enabled":      "1",
+		"speedtest_interval_min": "30",
 		// 遗留字段：现在由两个源列表派生（见 syncMirrorBase），保留是因为
 		// 老版本客户端只认它、界面与第三方脚本也还在读。
 		"mirror_base": "",
