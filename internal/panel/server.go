@@ -84,6 +84,8 @@ type Panel struct {
 	// 用相邻两次的差值除以时间就是瞬时速率，不需要额外定时器。
 	rateMu      sync.Mutex
 	rateSamples map[int64]trafficSample
+	// nowFn 仅测试注入用（见 applyRates）。生产为 nil，取 time.Now。
+	nowFn func() time.Time
 	// 清单预热是否正在跑。心跳路径发现「还没有清单」时会触发一次后台拉取，
 	// 这个标记保证多个心跳同时触发也只出去一次请求。
 	manifestWarming atomic.Bool

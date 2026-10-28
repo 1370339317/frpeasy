@@ -14,6 +14,19 @@ import (
 // 这里不做独立定时器：前端的 5 秒轮询本身就是采样节奏，每次
 // /api/tunnels 进来算一次差值即可。多开几个标签页只是采样更密，结果不会错。
 
+// now 返回当前时间。测试可以注入固定时钟。
+//
+// 为什么需要注入：这个函数的行为依赖"两次调用的间隔"。测试里如果直接用
+// time.Now()，"间隔太短就沿用上一轮"这条断言就变成了"这两行代码之间不能超过
+// 1 秒"—— 本地快、CI 慢，于是同一条测试在本地跑 20 次全过、在 CI 上稳定失败。
+// 把时间变成输入，测试才是确定的。
+func (p *Panel) now() time.Time {
+	if p.nowFn != nil {
+		return p.nowFn()
+	}
+	return time.Now()
+}
+
 // trafficSample 一次采样。
 type trafficSample struct {
 	in      int64
@@ -34,7 +47,7 @@ const minSampleGap = time.Second
 // 容错：计数变小（frps 重启、隧道重建后累计值清零）时按 0 处理，
 // 不能算出负数 —— 界面上出现 "−3.2MB/s" 只会让人怀疑面板坏了。
 func (p *Panel) applyRates(ts []shared.Tunnel) {
-	now := time.Now()
+	now := p.now()
 	p.rateMu.Lock()
 	if p.rateSamples == nil {
 		p.rateSamples = make(map[int64]trafficSample, len(ts))
