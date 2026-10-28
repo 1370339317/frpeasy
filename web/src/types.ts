@@ -529,6 +529,10 @@ export interface DiagnoseItem {
   ms: number
   /** 建连成本：DNS + TCP + TLS 握手（毫秒）—— "第一次为什么慢"就在这里 */
   warm_ms: number
+  /** 首次阶段（8MB）耗时（毫秒） */
+  cold_ms: number
+  /** 复用阶段（4MB）耗时（毫秒） */
+  reuse_ms: number
   /** 两个阶段都远超物理上限（疑似命中本地/边缘缓存），不能当带宽依据 */
   suspect: boolean
   ok: boolean

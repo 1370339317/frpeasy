@@ -71,32 +71,42 @@ func twoPhaseHandler(slowBlocks, totalBlocks int, pause time.Duration) http.Hand
 
 // 两段测量必须真的把"首次（含慢启动）"与"复用（热连接）"区分开。
 //
-// 这条测试同时钉住两件事：
-//  1. 阶段 A 含慢启动 → 数字明显低
-//  2. 阶段 B 复用连接 → 数字明显高
+// 判据用**绝对时间差**，不用速率比值。
+// 原因：比值依赖回环传输速度，而 CI 的共享 runner 很慢 —— 传输慢到一定程度，
+// 固定的慢启动开销占比就被稀释，比值会掉到 2 以下，断言变成 flaky
+// （2026-10-29 第一次跑 CI 就栽在这）。
 //
-// 如果哪天有人把 keep-alive 关了、或者把两段时间混在一起算，
-// 这两个数就会变成一样，测试立刻失败。
+// 构造：阶段 A 的响应里前若干块各停 40ms，累计约 1 秒的固定开销；
+// 阶段 B（同一条连接上的第二次请求）不额外停顿。
+// 于是只要实现真的复用了连接、并且慢启动开销确实落在第一次上，
+// **第一次的耗时就应该比"第二次耗时 × 数据量比"多出接近 1 秒**。
 func TestProbeSpeedSeparatesColdAndReuse(t *testing.T) {
 	// 目标要够大：首次 8MB + 复用 4MB = 12MB = 192 块，否则第二阶段会越界。
-	// 前 10 块各停 40ms ≈ 400ms 的启动开销。
-	srv := httptest.NewServer(twoPhaseHandler(10, 192, 40*time.Millisecond))
+	// 25 块 × 40ms ≈ 1 秒的固定启动开销。
+	srv := httptest.NewServer(twoPhaseHandler(25, 192, 40*time.Millisecond))
 	defer srv.Close()
 
 	item := probeSpeed("test", "两阶段目标", srv.URL)
 	if !item.OK {
 		t.Fatalf("应当成功，实际 error=%q", item.Error)
 	}
-	if item.Speed <= 0 {
-		t.Fatalf("首次速率应有值，实际 %d", item.Speed)
+	if item.Speed <= 0 || item.SpeedReuse <= 0 {
+		t.Fatalf("两段都应有速率，实际 cold=%d reuse=%d", item.Speed, item.SpeedReuse)
 	}
-	if item.SpeedReuse <= 0 {
-		t.Fatalf("复用速率应有值，实际 %d（连接可能没被复用）", item.SpeedReuse)
+	if item.ColdMs <= 0 || item.ReuseMs <= 0 {
+		t.Fatalf("两段耗时都应报出来，实际 cold=%dms reuse=%dms", item.ColdMs, item.ReuseMs)
 	}
-	if item.SpeedReuse < item.Speed*2 {
+
+	// 阶段 A 读 8MB、阶段 B 读 4MB：纯传输时间应是 2:1。
+	// 若慢启动开销（1 秒）确实只落在第一次上，则：
+	//   ColdMs - 2×ReuseMs ≈ 1000ms
+	// 放宽到 500ms，留足机器波动的余量。
+	extra := item.ColdMs - 2*item.ReuseMs
+	if extra < 500 {
 		t.Fatalf(
-			"复用(%d B/s)应明显高于首次(%d B/s) —— 两段没区分开，或连接没复用",
-			item.SpeedReuse, item.Speed,
+			"首次比复用多出的时间只有 %dms（cold=%dms reuse=%dms），"+
+				"说明慢启动开销没有被剥离，或连接没被复用",
+			extra, item.ColdMs, item.ReuseMs,
 		)
 	}
 }

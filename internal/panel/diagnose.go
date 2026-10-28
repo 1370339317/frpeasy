@@ -45,6 +45,15 @@ type diagnoseItem struct {
 	Bytes int64 `json:"bytes"`
 	Ms    int64 `json:"ms"`
 
+	// ColdMs / ReuseMs 两段各自的耗时（毫秒）。
+	//
+	// 分开报有两个用处：① 诊断时能看出"慢在第一次还是每次都慢"；
+	// ② 测试可以用**时间差**判断"慢启动开销有没有被剥离"，
+	// 而不必拿回环速度当基准 —— 那个基准在慢机器上会把比值压到 2 倍以下，
+	// 让断言变成 flaky（第一次跑 CI 就栽在这）。
+	ColdMs  int64 `json:"cold_ms"`
+	ReuseMs int64 `json:"reuse_ms"`
+
 	// WarmMs 建连耗时（阶段 A 的首字节时间）：DNS + TCP 握手 + TLS 握手。
 	// 跨境的 RTT 100~200ms、握手要 3~4 个 RTT，所以常见 300~800ms。
 	WarmMs int64 `json:"warm_ms"`
@@ -229,6 +238,7 @@ func probeSpeed(key, name, url string) diagnoseItem {
 	item.WarmMs = cold.ttfb.Milliseconds()
 	item.Bytes = cold.bytes
 	item.Speed = speedOf(cold)
+	item.ColdMs = cold.dur.Milliseconds()
 
 	// 阶段 B 紧接着读下一段：连接复用（阶段 A 的 body 已读完，连接回池），
 	// 但读取的位置不同，避免拿到完全相同的缓存片段。
@@ -238,6 +248,7 @@ func probeSpeed(key, name, url string) diagnoseItem {
 	if hot.err == nil {
 		item.SpeedReuse = speedOf(hot)
 		item.Bytes += hot.bytes
+		item.ReuseMs = hot.dur.Milliseconds()
 	}
 	item.Ms = (cold.dur + hot.dur).Milliseconds()
 
