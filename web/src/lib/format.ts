@@ -180,3 +180,28 @@ function copyByExecCommand(text: string): boolean {
   }
   return ok
 }
+
+/**
+ * 比较两个语义化版本号（'0.7.34' / 'v0.7.34' / '0.7.34-beta'）。
+ * 返回 <0 表示 a 比 b 旧。
+ *
+ * 只用于"要不要提示有新版"这种展示判断，不参与更新决策 ——
+ * 真正的门禁在服务端（shared.CompareVersions），前端算错最多是提示不准，
+ * 不能让它影响任何写操作。
+ */
+export function compareVersions(a: string, b: string): number {
+  const norm = (v: string) =>
+    v
+      .trim()
+      .replace(/^v/i, '')
+      .split(/[.\-+_]/, 3)
+  const pa = norm(a)
+  const pb = norm(b)
+  for (let i = 0; i < 3; i++) {
+    const na = Number.parseInt(pa[i] ?? '0', 10)
+    const nb = Number.parseInt(pb[i] ?? '0', 10)
+    if (!Number.isFinite(na) || !Number.isFinite(nb)) return 0
+    if (na !== nb) return na - nb
+  }
+  return 0
+}

@@ -160,6 +160,9 @@ func (p *Panel) listTunnelsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// 用 frps 侧真实代理状态覆盖 agent 心跳上报的“在线”
 	p.applyProxyStates(ts)
+	// 累计流量 → 瞬时速率（相邻两次采样差分）。必须在 applyProxyStates 之后：
+	// 流量值就是它从 dashboard 填进来的。
+	p.applyRates(ts)
 	// 访问入口按当前设置实时推导，不落库 —— 改公网地址后隧道地址立刻跟着变。
 	accessHost, accessSource := p.resolveAccessHost(r)
 	bindPort, _ := strconv.Atoi(p.db.GetSetting("frps_bind_port"))

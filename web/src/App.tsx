@@ -43,8 +43,39 @@ function useHashView(): [View, (v: View) => void] {
   return [view, go]
 }
 
+/** 安全体检里"未通过"的项（只取 SSH 相关，口令那条上面已经有独立提示）。 */
+interface SecurityItem {
+  id: string
+  title: string
+  level: 'bad' | 'warn'
+  ok: boolean
+  detail: string
+  fix: string
+}
+
 function Alerts() {
   const { me, tunnels } = useApp()
+  // SSH 相关的风险项。只在概览顶部提示，不塞进设置页 ——
+  // 这类问题必须"不用去找也能看见"，藏进设置页深处就失去意义了。
+  const [sshRisks, setSshRisks] = useState<SecurityItem[]>([])
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const r = await api<{ items: SecurityItem[] }>('GET', '/api/system/security')
+        if (!alive) return
+        setSshRisks(
+          (r.items ?? []).filter((it) => !it.ok && it.id.startsWith('ssh_')),
+        )
+      } catch {
+        /* 老面板没有该接口，忽略 */
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [])
+
   const out: { tone: 'bad' | 'info' | 'warn'; text: React.ReactNode }[] = []
   if (me?.needs_password_change)
     out.push({
@@ -60,6 +91,16 @@ function Alerts() {
       tone: 'info',
       text: '未设置「公网地址」，安装命令会自动用你当前访问面板的地址。装到公网服务器后建议到「设置」里显式填写。',
     })
+  for (const r of sshRisks) {
+    out.push({
+      tone: r.level === 'bad' ? 'bad' : 'warn',
+      text: (
+        <>
+          <b>{r.title}</b>：{r.detail}
+        </>
+      ),
+    })
+  }
   if (tunnels.some((t) => t.proxy_state === 'waiting_server'))
     out.push({
       tone: 'warn',

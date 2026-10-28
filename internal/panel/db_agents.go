@@ -140,7 +140,7 @@ func parseStringList(s string) []string {
 // 列名和扫描参数必须严格一一对应，而 GetAgent / ListAgents 各写一遍的话，
 // 加一列忘一处就会「某个接口整张表读不出来」，编译期毫无提示 —— 历史上踩过。
 // 所以列名只在这里出现一次，扫描参数按同一份定义动态拼。
-const agentColsTail = "online,last_seen,created_at,services,ips,frp_version,agent_version,uninstall_requested,uninstall_sent_at,uninstall_by_local,bin_source,bin_note"
+const agentColsTail = "online,last_seen,created_at,services,ips,frp_version,agent_version,uninstall_requested,uninstall_sent_at,uninstall_by_local,bin_source,bin_note,down_kbps,speed_at"
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -157,14 +157,15 @@ func agentColumns(withTokens bool) string {
 }
 
 func scanAgentRow(s rowScanner, a *shared.Agent, withTokens bool) error {
-	var svc, ips, ver, aver string
+	var svc, ips, ver, aver, speedAt string
 	var online, uninstallReq, uninstallLocal int
+	var downKbps int64
 	var lastSeen, createdAt, sentAt sql.NullTime
 	dest := []any{&a.ID, &a.Name, &a.Os, &a.Arch}
 	if withTokens {
 		dest = append(dest, &a.InstallToken, &a.AgentToken)
 	}
-	dest = append(dest, &online, &lastSeen, &createdAt, &svc, &ips, &ver, &aver, &uninstallReq, &sentAt, &uninstallLocal, &a.BinSource, &a.BinNote)
+	dest = append(dest, &online, &lastSeen, &createdAt, &svc, &ips, &ver, &aver, &uninstallReq, &sentAt, &uninstallLocal, &a.BinSource, &a.BinNote, &downKbps, &speedAt)
 	if err := s.Scan(dest...); err != nil {
 		return err
 	}
@@ -186,6 +187,10 @@ func scanAgentRow(s rowScanner, a *shared.Agent, withTokens bool) error {
 	a.IPs = parseStringList(ips)
 	a.FRPVersion = ver
 	a.AgentVersion = aver
+	a.DownKbps = downKbps
+	if t, err := time.Parse(time.RFC3339, speedAt); err == nil {
+		a.SpeedAt = t
+	}
 	// 最后一步：心跳过期的客户端在这里被判为离线（见 applyAgentTTL）。
 	applyAgentTTL(a)
 	return nil
@@ -339,4 +344,16 @@ func applyAgentTTL(a *shared.Agent) {
 	if a.LastSeen.IsZero() || time.Since(a.LastSeen) > ttl {
 		a.Online = false
 	}
+}
+
+// UpdateAgentDownKbps 记录客户端自测的下行速率（kbps）。
+//
+// 与其它心跳字段不同，这里带时间戳：速率会随网络状况变化，
+// 界面需要能说"这是 3 分钟前测的"而不是把它当成实时值。
+func (db *DB) UpdateAgentDownKbps(id string, kbps int64) error {
+	_, err := db.Exec(
+		"UPDATE agents SET down_kbps=?, speed_at=? WHERE id=?",
+		kbps, time.Now().UTC().Format(time.RFC3339), id,
+	)
+	return err
 }

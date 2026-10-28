@@ -3,6 +3,7 @@ import { useApp } from '../store'
 import { api } from '../lib/api'
 import { copyWithHint } from '../lib/format'
 import {
+  Alert,
   Button,
   Card,
   Chip,
@@ -778,6 +779,34 @@ export function SettingsPage() {
           allowPanel
           probe={clientProbe}
         />
+        {/* 缺「面板中继」是一个很容易被忽略、但后果很重的配置错误：
+            客户端会在自己那台机器上直连 GitHub / 镜像，而国内环境经常出不去 ——
+            表现是「客户端一直在线，但 frpc 永远拉不到、隧道全离线」，
+            面板侧完全没有错误信息（2026-10-28 线上卡了 4 小时就是这么来的）。 */}
+        {!parseSources(clientSources).includes('panel') && (
+          <Alert tone="warn">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="min-w-0 flex-1">
+                当前列表里没有<b>「面板」中继</b>。客户端会在它那台机器上直连
+                GitHub / 镜像，一旦那里出网受限（国内很常见），frpc 就取不到 ——
+                现象是「客户端在线、隧道却一直离线」，面板上看不到任何报错。
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="shrink-0"
+                onClick={() =>
+                  setClientSources(
+                    ['panel', ...parseSources(clientSources).filter((x) => x !== 'panel')].join(','),
+                  )
+                }
+              >
+                把面板加到第一位
+              </Button>
+            </div>
+          </Alert>
+        )}
+
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <Button size="sm" disabled={testingClient} onClick={() => void probeClientSources()}>
             {testingClient ? '测速中…' : '测这份列表能不能取到文件'}

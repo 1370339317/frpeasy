@@ -30,6 +30,13 @@ type Tunnel struct {
 	LastSeen   time.Time `json:"last_seen"`
 	TrafficIn  int64     `json:"traffic_in"`
 	TrafficOut int64     `json:"traffic_out"`
+	// 瞬时速率（字节/秒），由面板对累计流量做差分得到，不落库。
+	//
+	// 只有累计值回答不了"是不是刚变慢"——用户看到 490MB 这个数字毫无感觉，
+	// 而 12KB/s 一眼就知道现在不通畅。差值在两个采样点之间算，
+	// 面板重启或 frps 重启（计数清零）时置 0 而不是给负数。
+	RateIn  int64 `json:"rate_in"`
+	RateOut int64 `json:"rate_out"`
 
 	// ProxyState 面板综合判定后的状态，取值：
 	//   not_deployed  未绑定机器，不下发给任何客户端
@@ -70,6 +77,15 @@ type Agent struct {
 	Online       bool                `json:"online"`
 	CreatedAt    time.Time           `json:"created_at"`
 	Services     []DiscoveredService `json:"services"` // 兼容保留：本地监听服务
+
+	// 客户端实测的「本机 → 面板」下行速率（kbps），以及测量时间。
+	//
+	// 为什么需要它：面板侧的链路自检只能测"服务器到公网"，测不到"客户端到服务器"
+	// 这一段 —— 而那一段恰恰是隧道真实吞吐所在。让客户端自己测、自己报，
+	// 面板就能直接显示"这台机器到面板只有 40KB/s"，不用再猜。
+	// 0 表示还没测过（老客户端不会填）。
+	DownKbps int64     `json:"down_kbps"`
+	SpeedAt  time.Time `json:"speed_at"`
 
 	// 卸载状态。
 	//
@@ -220,6 +236,9 @@ type HeartbeatRequest struct {
 	// 旧面板不认识这两个字段时会忽略，反之旧 agent 不填也只是显示为空。
 	BinSource string `json:"bin_source"`
 	BinNote   string `json:"bin_note"`
+	// DownKbps 客户端自测的「本机 → 面板」下行速率（kbps）。0 = 还没测过。
+	// 面板只做展示与提示，不参与任何调度决策。
+	DownKbps int64 `json:"down_kbps"`
 }
 
 // AgentUpdate 面板通过心跳下发给客户端的升级指令。
@@ -287,3 +306,5 @@ func NewTokenMask(t string) string {
 	}
 	return t[:4] + "****"
 }
+
+// 运行时速率字段附加在 Tunnel 上（不落库）。

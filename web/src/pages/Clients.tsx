@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useApp, type CommandKind } from '../store'
 import { api } from '../lib/api'
-import { copyWithHint, fmtAgo, fmtBytes } from '../lib/format'
-import type { Agent, AgentLogResponse, DiscoveredService } from '../types'
+import { compareVersions, copyWithHint, fmtAgo, fmtBytes } from '../lib/format'
+import type { Agent, AgentLogResponse, DiscoveredService, VersionResponse } from '../types'
 import {
   Alert,
   Button,
@@ -227,6 +227,9 @@ export function Clients() {
   // 命令块的引用：复制失败时用它把命令原文选中，让用户长按复制。
   // 手机浏览器（尤其国产内核 / 非 HTTPS）经常禁掉 execCommand，
   // 这条"人工路径"是最后也最可靠的一条。
+  // 面板/托管 agent 的版本，用来判断"这台客户端需不需要升级"。
+  // 单独取一次（60 秒刷新）：/api/version 要联网查清单，不能塞进 5 秒轮询。
+  const [panelVer, setPanelVer] = useState<VersionResponse | null>(null)
   // 哪台机器的服务列表处于"展开全部"状态（按 agent id 记，互不影响）
   const [expandedSvc, setExpandedSvc] = useState<string | null>(null)
   const installRef = useRef<HTMLPreElement | null>(null)
@@ -275,6 +278,45 @@ export function Clients() {
     } catch {
       /* 快照读不到不影响主流程（用户还能看到"没有内容"） */
     }
+  }
+
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const v = await api<VersionResponse>('GET', '/api/version')
+        if (alive) setPanelVer(v)
+      } catch {
+        /* 拿不到版本不影响主流程 */
+      }
+    }
+    void load()
+    const h = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load()
+    }, 60000)
+    return () => {
+      alive = false
+      window.clearInterval(h)
+    }
+  }, [])
+
+  /** 面板能给客户端下发的 agent 版本（优先"客户端实际会收到"的那个）。 */
+  const targetAgentVer = panelVer?.agent?.client_version || panelVer?.agent?.hosted || ''
+
+  /**
+   * 这台客户端的版本与面板托管版本的关系。
+   *
+   * 两个方向都要报：客户端落后要让用户知道"有新版"，客户端超前同样要报 ——
+   * 那说明面板自己还没更新（0.7.34 之前线上就出现过面板 0.7.31、客户端已经
+   * 自己更到 0.7.32，界面完全没提示，排查时以为是同一个版本）。
+   */
+  function agentVerNote(a: Agent): { text: string; tone: 'warn' | 'info' } | null {
+    const cur = a.agent_version || ''
+    if (!cur || !targetAgentVer) return null
+    const d = compareVersions(cur, targetAgentVer)
+    if (d < 0) return { text: `面板可将它升级到 ${targetAgentVer}`, tone: 'warn' }
+    if (d > 0) return { text: `比面板托管的 ${targetAgentVer} 新，建议更新面板`, tone: 'info' }
+    return null
   }
 
   /** 用某个服务直接建隧道：带上机器与服务地址跳到隧道页，弹窗已预填。 */
@@ -524,6 +566,7 @@ export function Clients() {
             const usedAddrs = new Set(
               (tunnels ?? []).filter((t) => t.agent_id === a.id).map((t) => t.local_addr),
             )
+            const vnote = agentVerNote(a)
             const st = agentState(a)
             return (
               <div key={a.id} className="rounded-xl border border-border bg-card px-4.5 py-4">
@@ -605,7 +648,14 @@ export function Clients() {
                   <b className="font-medium text-dim">agent 版本</b>
                   <span className="font-mono">
                     {a.agent_version ? (
-                      a.agent_version
+                      <>
+                        {a.agent_version}
+                        {vnote && (
+                          <Badge tone={vnote.tone}>
+                            <span className="font-sans">{vnote.text}</span>
+                          </Badge>
+                        )}
+                      </>
                     ) : (
                       <span className="text-warn">
                         旧版（未上报版本）
@@ -639,6 +689,22 @@ export function Clients() {
                   <span className="font-mono">{(a.ips ?? []).join(', ') || '—'}</span>
                   <b className="font-medium text-dim">最后心跳</b>
                   <span>{fmtAgo(a.last_seen)}</span>
+                  <b className="font-medium text-dim">到面板速度</b>
+                  <span className="font-mono">
+                    {a.down_kbps > 0 ? (
+                      <>
+                        {(a.down_kbps / 8).toFixed(0)} KB/s
+                        <span className="ml-1 font-sans text-[11px] text-dim">
+                          （{fmtAgo(a.speed_at)}测）
+                          {a.down_kbps / 8 < 200 && (
+                            <span className="text-warn-fg"> · 偏慢，隧道吞吐会受它限制</span>
+                          )}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="text-dim">等待客户端自测（客户端升到支持自测的版本后自动开始）</span>
+                    )}
+                  </span>
                 </div>
 
                 <div className="mt-3">

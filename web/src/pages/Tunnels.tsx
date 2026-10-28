@@ -96,7 +96,7 @@ export function Tunnels() {
           <Empty>还没有隧道。点右上角「+ 新建隧道」，选机器 → 选服务 → 起名，三步搞定。</Empty>
         ) : (
           <Table
-            head={['名称', '客户端', '本地服务', '公网访问', '状态', '今日流量 入/出', '']}
+            head={['名称', '客户端', '本地服务', '公网访问', '状态', '流量 入/出（带当前速率）', '']}
           >
             {tunnels.map((t) => {
               const ag = t.agent_id ? agentMap[t.agent_id] : undefined
@@ -171,7 +171,16 @@ export function Tunnels() {
                     <StateBadge t={t} />
                   </Td>
                   <Td className="font-mono text-dim">
-                    {fmtBytes(t.traffic_in)} / {fmtBytes(t.traffic_out)}
+                    <span className="block whitespace-nowrap">
+                      {fmtBytes(t.traffic_in)} / {fmtBytes(t.traffic_out)}
+                    </span>
+                    {/* 只有累计值看不出"是不是刚变慢"。速率由面板对相邻两次采样
+                        做差分得到，空闲时为 0 就不显示，避免一片 0 B/s 干扰视线。 */}
+                    {(t.rate_in > 0 || t.rate_out > 0) && (
+                      <span className="block whitespace-nowrap text-[11px] text-accent-fg">
+                        ↑{fmtBytes(t.rate_in)}/s ↓{fmtBytes(t.rate_out)}/s
+                      </span>
+                    )}
                   </Td>
                   <Td align="right" className="whitespace-nowrap">
                     <Button variant="ghost" size="sm" onClick={() => openEdit(t)}>
@@ -189,7 +198,7 @@ export function Tunnels() {
 
         <div className="mt-1.5 text-xs leading-[1.5] text-dim">
           {readOnly
-            ? `状态来自 frps 自身（dashboard 直读），「在线」= frps 上这条代理确实建立了。流量为 frps 统计的今日累计值。公网入口 ${accessHost} —— ${srcText}。`
+            ? `状态来自 frps 自身（dashboard 直读），「在线」= frps 上这条代理确实建立了。流量为 frps 统计的今日累计值，小字是最近 5 秒的平均速率。公网入口 ${accessHost} —— ${srcText}。`
             : `提示：状态以 frps 侧为准，frps 没运行时一律显示「等待服务端」，不会再误报在线。公网入口 ${accessHost} —— ${srcText}。`}
         </div>
       </Card>

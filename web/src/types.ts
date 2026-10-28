@@ -42,6 +42,10 @@ export interface Agent {
   online: boolean
   created_at: string
   services: DiscoveredService[] | null
+  /** 客户端自测的「本机 → 面板」下行速率（kbps）；0 = 还没测过 */
+  down_kbps: number
+  /** 上次测速时间（RFC3339），零值表示没测过 */
+  speed_at: string
   /** 卸载指令已排队，还没被心跳领走 */
   uninstall_requested: boolean
   /**
@@ -71,6 +75,9 @@ export interface Tunnel {
   last_seen: string
   traffic_in: number
   traffic_out: number
+  /** 瞬时速率（字节/秒），面板对累计流量做差分得到 */
+  rate_in: number
+  rate_out: number
   /** 面板综合判定：只有 online 才是 frps 侧真的建起来了 */
   proxy_state: ProxyState
   /** 由面板实时推导，不落库；草稿隧道为空 */

@@ -76,6 +76,14 @@ type Panel struct {
 	// 更新清单缓存。检查更新要访问外网，不能每次打开页面都去拉。
 	manifestMu   sync.Mutex
 	manifestInfo *manifestCache
+
+	// 隧道瞬时速率的上一次采样（按隧道 id）。
+	//
+	// frps dashboard 只给累计流量，而用户真正关心的是"现在跑多快"。
+	// 每个 /api/tunnels 请求天然就是一次采样点（前端 5 秒一轮），
+	// 用相邻两次的差值除以时间就是瞬时速率，不需要额外定时器。
+	rateMu      sync.Mutex
+	rateSamples map[int64]trafficSample
 	// 清单预热是否正在跑。心跳路径发现「还没有清单」时会触发一次后台拉取，
 	// 这个标记保证多个心跳同时触发也只出去一次请求。
 	manifestWarming atomic.Bool
@@ -214,6 +222,10 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("POST /api/system/tuning", p.requireAuth(p.tuningHandler))
 	// 链路自检：从服务器侧量几个关键目标的实际速度，用一句话给出结论。
 	mux.HandleFunc("POST /api/system/diagnose", p.requireAuth(p.diagnoseHandler))
+	// 安全体检：口令 / SSH 这类"默认配置能用、放到公网就是洞"的项。
+	mux.HandleFunc("GET /api/system/security", p.requireAuth(p.securityHandler))
+	// 客户端自测下行的流量源（用 agent token 鉴权，不走登录会话）。
+	mux.HandleFunc("GET /api/speedtest", p.speedTestHandler)
 	mux.HandleFunc("GET /api/system/versions", p.requireAuth(p.systemVersionsHandler))
 	mux.HandleFunc("GET /api/system/mirror-test", p.requireAuth(p.systemMirrorTestHandler))
 	// 排优 / 下载记录：回答「刚才那次到底走了哪个源、为什么」。

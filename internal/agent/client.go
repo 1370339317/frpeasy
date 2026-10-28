@@ -9,11 +9,13 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"frpeasy/internal/shared"
@@ -62,6 +64,10 @@ type Client struct {
 	pendingCfg *shared.AgentConfig
 	pendForce  bool
 	frpcWake   chan struct{}
+
+	// downKbps 最近一次自测的「本机 → 面板」下行速率（kbps）。0 = 还没测过。
+	// 用 atomic 是因为它被测速 goroutine 写、被心跳读。
+	downKbps atomic.Int64
 }
 
 // state 持久化本地身份，避免每次重启都向面板新建 Agent。
@@ -229,6 +235,7 @@ func (c *Client) heartbeat(statuses []shared.TunnelStatus) (*shared.HeartbeatRes
 		AgentVersion: Version,
 		BinSource:    binSource,
 		BinNote:      binNote,
+		DownKbps:     c.downKbps.Load(),
 	}
 	var resp shared.HeartbeatResponse
 	if err := c.postJSON("/api/agent/heartbeat", req, &resp); err != nil {
@@ -380,6 +387,9 @@ func (c *Client) Run() error {
 
 	// frpc 保活独立成一个 goroutine：它可能要下载十几 MB，绝不能拖住心跳。
 	go c.frpcWorker()
+	// 自测「本机 → 面板」的下行速率。同样独立成 goroutine：
+	// 一次 1MB 的下载在慢链路上要好几秒，放主循环里就是又一次心跳停摆。
+	go c.speedTestLoop()
 
 	for {
 		cfg, err := c.fetchConfig()
@@ -443,4 +453,56 @@ func (c *Client) Run() error {
 		}
 		time.Sleep(time.Duration(interval) * time.Second)
 	}
+}
+
+// 自测下行速率。
+//
+// 为什么由客户端测、而不是面板测：面板要主动连客户端，前提是客户端可被连入，
+// 而客户端的常态是在 NAT / 防火墙后面。所以只能客户端拉、自己计时。
+//
+// 频率取 10 分钟：链路质量不会秒级变化，而每次都拉 1MB 对慢链路是不小的负担
+// （跨境 40KB/s 时要 25 秒）。首次延迟 30 秒，避开启动时注册 / 拉配置 / 起 frpc
+// 的窗口 —— 那时候插一次下载会拖慢首屏，数字也不代表稳态。
+const (
+	speedTestInterval = 10 * time.Minute
+	speedTestDelay    = 30 * time.Second
+	speedTestBytes    = 1 << 20
+)
+
+func (c *Client) speedTestLoop() {
+	time.Sleep(speedTestDelay)
+	for {
+		c.measureDownlink()
+		time.Sleep(speedTestInterval)
+	}
+}
+
+// measureDownlink 拉一段数据并计时，算出下行 kbps。
+//
+// 失败不重试、不记错误日志：这是"锦上添花"的观测项，链路本来就差的时候
+// 失败是预期内的，刷日志只会淹没真正的问题。
+func (c *Client) measureDownlink() {
+	if c.agentID == "" || c.server == "" {
+		return
+	}
+	u := fmt.Sprintf("%s/api/speedtest?agent_id=%s&token=%s&bytes=%d",
+		strings.TrimRight(c.server, "/"), url.QueryEscape(c.agentID), url.QueryEscape(c.agentTok), speedTestBytes)
+
+	start := time.Now()
+	resp, err := c.httpClient.Get(u)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+	n, _ := io.Copy(io.Discard, resp.Body)
+	elapsed := time.Since(start).Seconds()
+	// 太快（<0.2s）多半是命中了缓存或数据被截断，这个数字没有参考价值，
+	// 宁可不报也不能让面板显示一个虚高的速度。
+	if n <= 0 || elapsed < 0.2 {
+		return
+	}
+	c.downKbps.Store(int64(float64(n*8) / elapsed / 1000))
 }

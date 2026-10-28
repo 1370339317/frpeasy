@@ -126,6 +126,11 @@ func (p *Panel) agentHeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	if len(req.Services) > 0 {
 		_ = p.db.UpdateAgentServices(req.AgentID, req.Services)
 	}
+	// 客户端自测的下行速率。0 = 老客户端没测过，保持库里原值不动，
+	// 否则一次"没带字段"的心跳就会把它之前测到的真实数字抹掉。
+	if req.DownKbps > 0 {
+		_ = p.db.UpdateAgentDownKbps(req.AgentID, req.DownKbps)
+	}
 	if err := p.db.ApplyHeartbeat(req.Status); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -506,4 +511,60 @@ func (p *Panel) agentLogUploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[agent] %s 回传日志 %d 字节（请求 %s）", agent.Name, len(content), req.RequestID)
 	json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// speedTestHandler GET /api/speedtest?agent_id=&token=&bytes=
+//
+// 给客户端自测「本机 → 面板」的下行速率。返回一段固定大小的二进制数据，
+// 客户端自己计时，算完随心跳上报。
+//
+// 为什么不做成"面板测、客户端配合确认"：面板主动连客户端需要它能被连入，
+// 而客户端的常态就是在 NAT 后面。只能由客户端拉、自己计时。
+//
+// 鉴权用 agent token（不是登录会话）：这是客户端调用的接口。
+func (p *Panel) speedTestHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("agent_id")
+	token := r.URL.Query().Get("token")
+	agent, err := p.db.GetAgent(id)
+	if err != nil || agent.AgentToken == "" || agent.AgentToken != token {
+		http.Error(w, "凭据无效", http.StatusUnauthorized)
+		return
+	}
+	n := int64(1 << 20) // 默认 1MB
+	if v := r.URL.Query().Get("bytes"); v != "" {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+			n = parsed
+		}
+	}
+	// 夹在 64KB~8MB：太小测不出链路特征，太大等于让客户端替我们做一次压测。
+	if n < 64<<10 {
+		n = 64 << 10
+	}
+	if n > 8<<20 {
+		n = 8 << 20
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(n, 10))
+	// 绝不能被缓存：缓存命中会让"测速"变成"读本地磁盘"，数字好看到没有意义
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.WriteHeader(http.StatusOK)
+
+	// 用固定缓冲重复写，不逐字节生成随机数 —— 测的是链路，不是 CPU。
+	// 全零内容对 HTTP 压缩没有利用价值（octet-stream 一般也不会被压）。
+	buf := make([]byte, 64<<10)
+	var written int64
+	for written < n {
+		chunk := int64(len(buf))
+		if n-written < chunk {
+			chunk = n - written
+		}
+		m, err := w.Write(buf[:chunk])
+		if err != nil {
+			return
+		}
+		written += int64(m)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
 }
