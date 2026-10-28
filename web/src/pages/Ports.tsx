@@ -1,3 +1,4 @@
+import { SettingsPage } from './Settings'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useApp } from '../store'
 import { api } from '../lib/api'
@@ -343,6 +344,9 @@ export function Ports() {
           <Hint>当前 UI 来自磁盘目录（--ui-dir），修改前端后刷新浏览器即生效，无需重编译。</Hint>
         )}
       </Card>
+      {/* 端口池：只影响自动分配的公网端口范围，属于这一页。 */}
+      <SettingsPage section="ports" />
+
     </>
   )
 }

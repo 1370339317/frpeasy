@@ -1,3 +1,4 @@
+import { SettingsPage } from './Settings'
 import { useEffect, useRef, useState } from 'react'
 import { useApp, type CommandKind } from '../store'
 import { api } from '../lib/api'
@@ -232,9 +233,11 @@ export function Clients() {
   const [panelVer, setPanelVer] = useState<VersionResponse | null>(null)
   // 哪台机器的服务列表处于"展开全部"状态（按 agent id 记，互不影响）
   const [expandedSvc, setExpandedSvc] = useState<string | null>(null)
-  // 正在等测速结果的那台机器（按 id）。测速要等客户端心跳领走请求、
-  // 拉 1MB、再把结果随下一次心跳送回来，实测 15~30 秒，所以要有个进行中状态。
-  const [probing, setProbing] = useState<string | null>(null)
+  // 正在等测速结果的机器：id → { 基线 speed_at, 下发时刻 }。
+  //
+  // 记基线而不是记布尔，是因为"有没有结果"只能靠比对 speed_at 判断 ——
+  // 客户端可能几分钟前刚测过一次，那时库里就有值，布尔无法区分新旧。
+  const [probing, setProbing] = useState<Record<string, { base: string; at: number }>>({})
 
   /**
    * 让单台客户端立刻测一次「本机 → 面板」速度。
@@ -245,34 +248,76 @@ export function Clients() {
    * 两处都需要，不重复：设置页配节奏，这里配对象。
    */
   async function measureOne(a: Agent) {
-    if (probing) return
-    setProbing(a.id)
-    const base = a.speed_at
+    if (probing[a.id]) return
+    // 记录基线：等 agents 刷新时比对 speed_at 有没有变，变了就是这次的结果。
+    // 不去自己开轮询循环 —— store 本来每 5 秒就在刷 agents，再开一条只是重复。
+    setProbing((p) => ({ ...p, [a.id]: { base: a.speed_at, at: Date.now() } }))
     try {
       await api('POST', `/api/agents/${encodeURIComponent(a.id)}/speedtest`, {})
-      // 等结果：面板只是排队，客户端下次心跳（约 15 秒）才领走请求，
-      // 测完再下次心跳送回。所以这里轮询到 speed_at 变化为止，最多 90 秒。
-      const deadline = Date.now() + 90000
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 3000))
-        const r = await api<{ agents: Agent[] }>('GET', '/api/agents')
-        const cur = (r.agents ?? []).find((x) => x.id === a.id)
-        if (cur && cur.speed_at && cur.speed_at !== base) {
-          await loadAgents()
-          toast(
-            `${a.name} 到面板：${(cur.down_kbps / 8).toFixed(0)} KB/s`,
-            cur.down_kbps / 8 < 200 ? 'bad' : undefined,
-          )
-          return
-        }
+      if (!a.online) {
+        toast(`${a.name} 当前离线，请求已排队，它下次上线时自动测`)
       }
-      toast('已下发测速请求，但 90 秒内没等到结果。客户端可能刚离线，或版本还不支持主动测速。', 'bad')
     } catch (e) {
+      setProbing((p) => {
+        const n = { ...p }
+        delete n[a.id]
+        return n
+      })
       toast((e as Error).message, 'bad')
-    } finally {
-      setProbing(null)
     }
   }
+
+  /** 取消等待（请求本身没法撤回，但界面不必再等）。 */
+  function cancelMeasure(id: string) {
+    setProbing((p) => {
+      const n = { ...p }
+      delete n[id]
+      return n
+    })
+  }
+
+  // 完成判定跟着 store 的 agents 刷新走。
+  //
+  // 用 ref 拿最新的 pending，依赖只留 [agents]：agents 每轮都是新数组，
+  // 把它放进依赖是对的（我们就是要跟着它重算）；pending 放进来则会因为
+  // 自己 setState 而反复触发。
+  const pendingRef = useRef(probing)
+  pendingRef.current = probing
+  useEffect(() => {
+    // effect-deps-ok: 这里**就是要**跟着 agents 的刷新走。
+    // agents 每轮轮询都是新数组，而这恰好是判断"客户端回传了新结果"的时机
+    // （speed_at 变了）。它不写任何表单、不覆盖用户输入，且只在满足条件时
+    // setState 一次（随后该条 pending 被删除，下一轮直接 return），不会自激。
+    const pending = pendingRef.current
+    const ids = Object.keys(pending)
+    if (ids.length === 0) return
+    let changed = false
+    const next = { ...pending }
+    for (const id of ids) {
+      const cur = agents.find((x) => x.id === id)
+      if (!cur) continue
+      const gotResult = !!cur.speed_at && cur.speed_at !== pending[id].base
+      // 120 秒：客户端心跳 15 秒，测 1MB 在慢链路上可能要几十秒，
+      // 再留一轮心跳的余量。给太紧会把"慢但成功"误判成失败。
+      const timedOut = Date.now() - pending[id].at > 120000
+      if (gotResult || timedOut) {
+        delete next[id]
+        changed = true
+        if (gotResult) {
+          const kbs = cur.down_kbps / 8
+          toast(
+            `${cur.name} 到面板：${kbs.toFixed(0)} KB/s${kbs < 200 ? '（偏慢，隧道吞吐会受它限制）' : ''}`,
+            kbs < 200 ? 'bad' : 'ok',
+          )
+        } else if (cur.online) {
+          toast(`${cur.name} 测速超时。客户端版本可能还不支持主动测速。`, 'bad')
+        } else {
+          toast(`${cur.name} 已离线，测速请求保留，等它上线后执行。`, 'bad')
+        }
+      }
+    }
+    if (changed) setProbing(next)
+  }, [agents])
   const installRef = useRef<HTMLPreElement | null>(null)
   const uninstallRef = useRef<HTMLPreElement | null>(null)
   const logPreRef = useRef<HTMLPreElement | null>(null)
@@ -747,21 +792,41 @@ export function Clients() {
                         <span className="text-dim">还没测过</span>
                       )}
                     </span>
-                    {/* 单台测速。设置页管「多久测一次」，这里管「现在就测这台」。 */}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="whitespace-nowrap px-1.5 py-0.5 text-[11.5px]"
-                      disabled={probing !== null}
-                      title={
-                        a.online
-                          ? '让这台客户端立刻测一次它到面板的速度（约 15~30 秒出结果）'
-                          : '客户端离线，请求会排队等它上线后才执行'
-                      }
-                      onClick={() => void measureOne(a)}
-                    >
-                      {probing === a.id ? '测速中…' : '立即测'}
-                    </Button>
+                    {/* 单台测速。设置页管「多久测一次」，这里管「现在就测这台」。
+                        等待期间不锁整个页面，只锁这一台的按钮，并给一个明确的
+                        "在等什么、大概多久"—— 之前只把按钮改成"测速中…"然后卡 90 秒，
+                        用户完全不知道是在等心跳还是已经卡死。 */}
+                    {probing[a.id] ? (
+                      <>
+                        <span className="flex items-center gap-1 text-[11px] text-warn-fg">
+                          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-current" />
+                          {a.online ? '已通知，等它回传…' : '已排队，等它上线'}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="whitespace-nowrap px-1.5 py-0.5 text-[11px]"
+                          title="不再等待。测速请求本身不会撤回，结果仍会更新到数字上"
+                          onClick={() => cancelMeasure(a.id)}
+                        >
+                          取消
+                        </Button>
+                      </>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="whitespace-nowrap px-1.5 py-0.5 text-[11.5px]"
+                        title={
+                          a.online
+                            ? '让这台客户端立刻测一次「本机 → 面板」的速度。约 15~30 秒出结果，可以先去别的页面'
+                            : '客户端离线：请求会排队，等它下次上线时自动执行'
+                        }
+                        onClick={() => void measureOne(a)}
+                      >
+                        测一下
+                      </Button>
+                    )}
                   </span>
                 </div>
 
@@ -931,6 +996,10 @@ export function Clients() {
           </>
         )}
       </Modal>
+      {/* 客户端测速的节奏（多久测一次、要不要测）是客户端策略，
+          和"这台机器多快"是同一个上下文，所以搬到这里。 */}
+      <SettingsPage section="client" />
+
     </>
   )
 }

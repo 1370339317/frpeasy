@@ -242,7 +242,19 @@ type SettingsDraft = {
 
 let draft: SettingsDraft | null = null
 
-export function SettingsPage() {
+/**
+ * 设置项的归属分区。
+ *
+ * 每一块都搬到"用它的那个页面"上去了，这里只留全局项（公网地址 / 外观 / 口令）。
+ * 判断标准只有一条：**用户产生这个疑问时，正站在哪个页面**。
+ *   - 「隧道为什么慢」→ 在隧道页 → 传输参数就放隧道页
+ *   - 「服务器带宽够不够」→ 在 frps 页 → 自检与内核调优就放 frps 页
+ *   - 「这台机器到面板多快」→ 在客户端页 → 测速策略就放客户端页
+ * 放在设置页等于要求用户先知道"该去哪"，而那正是他缺的信息。
+ */
+export type SettingsSection = 'global' | 'tunnel' | 'server' | 'client' | 'files' | 'ports'
+
+export function SettingsPage({ section = 'global' }: { section?: SettingsSection }) {
   const {
     settings,
     net,
@@ -733,6 +745,34 @@ export function SettingsPage() {
 
   return (
     <>
+      {/* 设置页只留"全局项"。其余设置都搬到了用它的那个页面上 ——
+          判断标准是"用户产生这个疑问时正站在哪"：在隧道页问"为什么慢"，
+          就该在隧道页能改传输参数，而不是先学会"去设置里找"。
+          这里给一份索引，避免老用户找不到东西。 */}
+      {section === 'global' && (
+        <Card title="其他设置在哪" desc="按「在哪用就在哪配」重新分过了，这里是索引">
+          <div className="grid gap-1 text-[12.5px] leading-[1.9]">
+            {[
+              ['隧道', 'tunnels', '压缩 / 关闭 tcpMux / 连接池'],
+              ['frps 服务端', 'server', '系统调优（BBR）、链路自检、frps 端口与令牌'],
+              ['客户端', 'clients', '测速的间隔与开关、立即测全部'],
+              ['端口与防火墙', 'ports', '端口池（自动分配的公网端口范围）'],
+              ['文件与更新', 'files', '二进制下载源与下载策略'],
+            ].map(([label, view, what]) => (
+              <div key={view} className="flex flex-wrap items-baseline gap-2">
+                <a
+                  className="cursor-pointer font-semibold text-accent-fg hover:underline"
+                  onClick={() => (window.location.hash = `#/${view}`)}
+                >
+                  {label}
+                </a>
+                <span className="text-dim">— {what}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
       {/* 保存失败的持久提示。放在最上面：无论失败原因属于哪一块设置，
           用户一进这个页面就能看到，不用翻卡片找。 */}
       {saveError && (
@@ -748,6 +788,8 @@ export function SettingsPage() {
         </Alert>
       )}
 
+      {/* 公网地址是全局身份，留在设置页 */}
+      {section === 'global' && (<>
       <Card title="公网地址" desc="客户端连接 frps 用的地址，也是生成安装命令的依据">
         <Field
           label="公网地址（域名或 IP，可带面板端口）"
@@ -797,7 +839,10 @@ export function SettingsPage() {
           之类的环回地址，也不涉及任何端口。
         </Hint>
       </Card>
+      </>)}
 
+      {/* 二进制下载源属于文件与更新，放在那一页 */}
+      {section === 'files' && (<>
       <Card
         title="二进制下载"
         desc="先选策略；两个有序列表从左往右试，第一个能用的就停"
@@ -987,7 +1032,10 @@ export function SettingsPage() {
           </div>
         </details>
       </Card>
+      </>)}
 
+      {/* 端口池属于端口与防火墙，放在那一页 */}
+      {section === 'ports' && (<>
       <Card title="端口池" desc="自动分配公网端口的范围">
         <div className="grid grid-cols-2 gap-3.5 max-[820px]:grid-cols-1">
           <Field label="起始端口" className="mb-0">
@@ -1003,11 +1051,14 @@ export function SettingsPage() {
         </div>
         <Hint>改端口池不会影响已建隧道。记得在服务器防火墙 / 安全组放行这些端口。</Hint>
       </Card>
+      </>)}
 
       {/* ---------------- 隧道传输 ---------------- */}
       {/* 这块存在的理由：frp 的 tcpMux 在 frps 与 frpc 必须一致，一边开一边关
           会握手后被直接断开（客户端只有 EOF、服务端一条错误都不记）。所以它
           不能放给用户改客户端配置，必须由面板统一决定并同时下发到两端。 */}
+      {/* 隧道传输参数只影响隧道，放在隧道页 */}
+      {section === 'tunnel' && (<>
       <Card
         title="隧道传输"
         desc="由面板统一决定并下发给所有客户端，两端必须一致"
@@ -1126,7 +1177,10 @@ export function SettingsPage() {
           tcpMux 变化时面板会重启 frps 以重写它的配置。
         </Hint>
       </Card>
+      </>)}
 
+      {/* 拥塞控制是服务器内核的事，放在 frps 服务端页 */}
+      {section === 'server' && (<>
       {/* ---------------- 系统调优 ---------------- */}
       <Card
         title="系统调优（拥塞控制）"
@@ -1184,11 +1238,14 @@ export function SettingsPage() {
           </div>
         )}
       </Card>
+      </>)}
 
       {/* ---------------- 链路自检 ---------------- */}
       {/* 隧道慢的时候，第一个要回答的问题是「服务器出网有没有问题」。
           以前这一步只能登服务器手工 curl 几个目标对比，现在做进面板：
           一次点击，服务器自己测一遍到国内/境外的速度，并给出可读结论。 */}
+      {/* 链路自检诊断的是服务器出网，放在 frps 服务端页 */}
+      {section === 'server' && (<>
       <Card
         title="链路自检"
         desc="从服务器侧实测到国内 / 境外的速度，用一句话判断瓶颈在哪"
@@ -1197,12 +1254,40 @@ export function SettingsPage() {
           <div className="min-w-0 flex-1 text-xs leading-[1.6] text-dim">
             排除「服务器本身出不去」这一层。若这里都正常，隧道慢的原因就在
             <b className="text-fg"> 客户端到服务器这一段</b>，或者 frp 的传输参数。
-            每个目标最多测 8 秒；前 2 秒用于把连接与拥塞窗口拉起来，不计入速率 ——
-            所以这里给的是<b>稳态</b>速度，不会因为"第一次要握手"而虚低。
           </div>
           <Button className="shrink-0" disabled={diagBusy} onClick={() => void runDiagnose()}>
-            {diagBusy ? '检测中…（约 12 秒）' : '开始自检'}
+            {diagBusy ? '检测中…（约 15 秒）' : '开始自检'}
           </Button>
+        </div>
+
+        {/* 这里解释的是用户必然会问的那个问题："为什么同一个目标，第一次测出来的
+            数字比后面小好几倍？" —— 答案是 TCP 的物理规律，不是测量出错。
+            不写清楚的话，任何人都会认为这个功能不准。 */}
+        <div className="mt-2.5 space-y-2 rounded-lg border border-border2 bg-chip px-3 py-2.5 text-[12px] leading-[1.7] text-dim">
+          <p>
+            <b className="text-fg">两个数字分别是什么：</b>
+            {' '}
+            <b className="text-fg">首次</b> = 新建连接去拿（含 DNS + TCP + TLS
+            握手、以及拥塞窗口从初值涨起来的过程），这就是你第一次打开页面时的体感；
+            <b className="text-fg">复用</b> = 紧接着在同一条连接上再拿一次，握手没有了、
+            窗口已涨满，若还有 CDN 边缘缓存，数据从就近节点直接返回。
+          </p>
+          <p>
+            <b className="text-fg">为什么两者能差好几倍：</b>
+            {' '}跨境的每个往返要 100~200ms，握手占 3~4 个往返就是 300~800ms，
+            这段时间几乎没有数据传输；之后窗口还要爬升。复用把这两笔开销全省了。
+            {' '}<b className="text-fg">两个数都是真的，只是量的是不同的事</b>
+            —— 所以这里都报出来，让你自己看差多少。
+          </p>
+          <p>
+            <b className="text-fg">这种机制怎么用在正常业务上：</b>
+            浏览器和 frp 默认就在复用连接，不用你操心；自己写的程序要开 keep-alive。
+            隧道这边对应的是
+            <b className="text-fg">「连接池」</b>：关掉多路复用后预建 N 条连接，
+            新请求不必现握手。但要说清一句：
+            <b className="text-warn-fg">隧道里拿不到 CDN 缓存带来的那部分加速</b>
+            —— 你的流量是私有的、动态的，没有第三方边缘节点帮你存。
+          </p>
         </div>
 
         {diag && (
@@ -1215,27 +1300,44 @@ export function SettingsPage() {
                 >
                   <span className="min-w-0 flex-1 truncate text-[12.5px]">{it.name}</span>
                   {it.ok ? (
-                    <b
-                      className={cx(
-                        'shrink-0 font-mono text-[12.5px]',
-                        it.speed >= 1 << 20 ? 'text-ok-fg' : 'text-warn-fg',
-                      )}
+                    <span
+                      className="flex shrink-0 items-baseline gap-1 font-mono text-[12.5px]"
+                      title="首次 = 新连接（含握手与慢启动）的实际体感；复用 = 同一条连接上第二次请求的速度，两者差多少就是「连接复用 + 缓存」省下的"
                     >
-                      {(it.speed / 1024 / 1024).toFixed(2)} MB/s
-                    </b>
+                      <span className="text-[11px] text-dim">首次</span>
+                      <b
+                        className={cx(
+                          it.suspect
+                            ? 'text-warn-fg'
+                            : it.speed >= 1 << 20
+                              ? 'text-ok-fg'
+                              : 'text-warn-fg',
+                        )}
+                      >
+                        {(it.speed / 1024 / 1024).toFixed(2)}
+                      </b>
+                      {/* 复用速度只在明显更快时才显示 —— 一样的话没必要占位置 */}
+                      {it.speed_reuse > it.speed * 1.5 && (
+                        <>
+                          <span className="ml-1.5 text-[11px] text-dim">复用</span>
+                          <b className="text-warn-fg">
+                            {(it.speed_reuse / 1024 / 1024).toFixed(2)}
+                          </b>
+                        </>
+                      )}
+                      <span className="text-[11px] text-dim">MB/s</span>
+                      {it.suspect && <span className="ml-1 text-[11px] text-warn-fg">疑似缓存</span>}
+                    </span>
                   ) : (
                     <span className="shrink-0 text-[12px] text-bad-fg">{it.error || '失败'}</span>
                   )}
-                  {/* 首包时间是解释"为什么第一次慢"的关键数字：
-                      它含 DNS + TCP + TLS 三次握手，跨境每个 RTT 100~200ms，
-                      连续几个 RTT 就过去了。而右边的速度是**丢弃预热段之后**的
-                      稳态值 —— 两者一起看才不会被"第一次 3MB/s、第二次 22MB/s"
-                      这种差异误导。 */}
+                  {/* 建连成本单列：它是"第一次为什么慢"的量化答案。
+                      握手（3~4 个 RTT）与慢启动起步都在这里，通常几百毫秒。 */}
                   <span
                     className="shrink-0 font-mono text-[11px] text-dim"
-                    title="首包 = 发请求到收到第一个字节（含 DNS/TCP/TLS 握手）；右侧是丢掉前 2 秒预热后的稳态速率"
+                    title="建连 = DNS + TCP + TLS 握手，这就是第一次访问要额外等的时间"
                   >
-                    首包 {it.ttfb_ms}ms · {(it.bytes / 1024 / 1024).toFixed(1)}MB
+                    建连 {it.warm_ms}ms · {(it.bytes / 1024 / 1024).toFixed(1)}MB
                   </span>
                 </div>
               ))}
@@ -1246,11 +1348,14 @@ export function SettingsPage() {
           </div>
         )}
       </Card>
+      </>)}
 
       {/* ---------------- 客户端测速 ---------------- */}
       {/* 这一项有真实流量成本：每次拉 1MB。10 分钟一次是每台每月 4.2GB，
           30 分钟一次是 1.4GB。对走 CDT / 按量带宽的机器不是可以随便定的数字，
           所以间隔要能改、能关，也要能手动测一次看当下。 */}
+      {/* 客户端测速是客户端的策略：放在客户端页，看结果时顺便就能调 */}
+      {section === 'client' && (<>
       <Card
         title="客户端测速"
         desc="让客户端自己测「本机 → 面板」的速度 —— 这段才是隧道的真实链路"
@@ -1318,26 +1423,11 @@ export function SettingsPage() {
           但同一台机器、同一条线路，量级上可参考。改完记得点「保存」。
         </Hint>
       </Card>
+      </>)}
 
-      <Card title="高级" desc="一般不用动">
-        <div className="grid grid-cols-2 gap-3.5 max-[820px]:grid-cols-1">
-          <Field label="frps 监听端口（改后自动重启 frps）" className="mb-0">
-            <Input type="number" value={bindPort} onChange={(e) => setBindPort(e.target.value)} />
-          </Field>
-          <Field label="frps 令牌（留空保持不变）" className="mb-0">
-            <Input
-              type="password"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              placeholder="留空则不变"
-              autoComplete="new-password"
-            />
-          </Field>
-        </div>
-        <div className="mt-3.5 grid grid-cols-2 gap-3.5 max-[820px]:grid-cols-1">
-          <Field label="frps 状态端口（dashboard，仅 127.0.0.1）" className="mb-0">
-            <Input type="number" value={dashPort} onChange={(e) => setDashPort(e.target.value)} />
-          </Field>
+{/* 外观是浏览器本地偏好，不属于任何"对象"，留在设置页。 */}
+      {section === 'global' && (
+        <Card title="外观" desc="只影响当前这台浏览器，不会同步到其它设备">
           <Field label="面板主题" className="mb-0">
             <div className="flex gap-2 pt-0.5">
               <Button
@@ -1356,9 +1446,36 @@ export function SettingsPage() {
               </Button>
             </div>
           </Field>
-        </div>
-      </Card>
+        </Card>
+      )}
 
+      {/* frps 的运行参数跟着服务端走：改端口要重启 frps、令牌要下发给所有客户端，
+          都属于"服务器本身怎么跑"，留在设置页会让人找不到。 */}
+      {section === 'server' && (
+        <Card title="frps 运行参数" desc="改端口会自动重启 frps，正在连的客户端会自动重连">
+          <div className="grid grid-cols-2 gap-3.5 max-[820px]:grid-cols-1">
+            <Field label="frps 监听端口（改后自动重启 frps）" className="mb-0">
+              <Input type="number" value={bindPort} onChange={(e) => setBindPort(e.target.value)} />
+            </Field>
+            <Field label="frps 令牌（留空保持不变）" className="mb-0">
+              <Input
+                type="password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder="留空则不变"
+                autoComplete="new-password"
+              />
+            </Field>
+          </div>
+          <Field label="frps 状态端口（dashboard，仅 127.0.0.1）" className="mt-3.5 mb-0 max-w-[280px]">
+            <Input type="number" value={dashPort} onChange={(e) => setDashPort(e.target.value)} />
+          </Field>
+          <Hint>dashboard 只监听本机，面板读它拿实时流量；不要把它暴露到公网。</Hint>
+        </Card>
+      )}
+
+      {/* 管理员口令属于账号本身，留在设置页 */}
+      {section === 'global' && (<>
       <Card title="管理员口令">
         <Field
           label="新口令（留空不改）"
@@ -1372,17 +1489,20 @@ export function SettingsPage() {
           />
         </Field>
       </Card>
+      </>)}
       {/* 版本与更新、以及各种二进制文件，都搬到了「这台服务器 → 文件与更新」。
           两处分开时，用户看到「有新版」却要去另一页看文件是否就绪，很别扭。
           这里只留一个入口，别在这里再挂一份（挂了就会出现两个更新按钮，
           状态还各自轮询、互相打架）。 */}
-      <Hint>
-        面板与客户端的版本、以及 frps / frpc / agent 各平台的二进制文件，都在左侧{' '}
+      {section === 'global' && (
+        <Hint>
+          面板与客户端的版本、以及 frps / frpc / agent 各平台的二进制文件，都在左侧{' '}
         <a className="cursor-pointer font-semibold text-accent-fg underline" onClick={() => (window.location.hash = '#/files')}>
-          这台服务器 → 文件与更新
-        </a>
-        。
-      </Hint>
+            这台服务器 → 文件与更新
+          </a>
+          。
+        </Hint>
+      )}
       <div className="flex flex-wrap items-center gap-2.5">
         <Button onClick={() => void save()} disabled={saving || !settings}>
           {saving ? '保存中…' : '保存设置'}
@@ -1398,23 +1518,29 @@ export function SettingsPage() {
         >
           放弃修改
         </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={async () => {
-            const r = await copyWithHint(settings?.install_token ?? '', null, '已复制安装令牌')
-            toast(r.msg, r.kind)
-          }}
-        >
-          复制安装令牌
-        </Button>
+        {/* 安装令牌是全局的（所有客户端都用它认领这台面板），
+            只在设置页给入口 —— 挂在隧道页只会让人以为它跟某条隧道有关。 */}
+        {section === 'global' && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={async () => {
+              const r = await copyWithHint(settings?.install_token ?? '', null, '已复制安装令牌')
+              toast(r.msg, r.kind)
+            }}
+          >
+            复制安装令牌
+          </Button>
+        )}
         {!settings && (
           <span className="text-xs text-dim">
             配置还在加载中，暂不能保存 —— 空白表单如果直接保存会把已有配置覆盖掉
           </span>
         )}
       </div>
-      <Hint>安装令牌用于客户端认领到这台面板；更换后旧客户端仍保持已授权，不影响现有隧道。</Hint>
+      {section === 'global' && (
+        <Hint>安装令牌用于客户端认领到这台面板；更换后旧客户端仍保持已授权，不影响现有隧道。</Hint>
+      )}
     </>
   )
 }

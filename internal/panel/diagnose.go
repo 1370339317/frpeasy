@@ -3,6 +3,7 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,22 +25,44 @@ import (
 
 // diagnoseItem 单个目标的结果。
 type diagnoseItem struct {
-	Key   string `json:"key"`
-	Name  string `json:"name"`
-	Speed int64  `json:"speed"` // 字节/秒，**稳态**速率（已丢弃预热段）
-	Bytes int64  `json:"bytes"`
-	Ms    int64  `json:"ms"`
-	// TTFB 从发出请求到收到第一个字节的耗时（毫秒），含 DNS/TCP/TLS 握手。
+	Key  string `json:"key"`
+	Name string `json:"name"`
+
+	// Speed 首次访问的速率（字节/秒）。
 	//
-	// 单独报出来是因为它解释了一个很容易被误解的现象：同一个目标连测两次，
-	// 第一次可能只有第二次的几十分之一。那不是"带宽变了"，而是第一次要付
-	// DNS + TCP + TLS 三次握手（跨境各 1~2 个 RTT，实测 200ms/个），
-	// 之后还要等 TCP 慢启动与 BBR 把窗口涨起来 —— 头一两秒几乎没吞吐。
-	// 把这些算进平均速率，算出来的是"含启动开销的平均值"，不是链路能力。
-	TTFB int64 `json:"ttfb_ms"`
-	OK   bool  `json:"ok"`
+	// **含** DNS/TCP/TLS 三次握手与慢启动 —— 也就是用户第一次打开页面时的真实体感。
+	// 不把这一段剥掉，是因为用户问的正是"为什么第一次慢"；剥离后就答不上了。
+	Speed int64 `json:"speed"`
+
+	// SpeedReuse 同一连接上紧接着第二次请求的速率。
+	//
+	// 它比 Speed 高多少，就是"连接复用 + CDN 边缘缓存"省下来的部分。
+	// 这个数字有独立的解释力：高得不合物理（几十上百 MB/s）说明后面读的是
+	// 边缘缓存，而不是跨境链路真的那么快 —— 用户看到这种数字很容易误判成
+	// "服务器带宽有 700MB/s"，进而对隧道速度产生不切实际的期待。
+	SpeedReuse int64 `json:"speed_reuse"`
+
+	Bytes int64 `json:"bytes"`
+	Ms    int64 `json:"ms"`
+
+	// WarmMs 建连耗时（阶段 A 的首字节时间）：DNS + TCP 握手 + TLS 握手。
+	// 跨境的 RTT 100~200ms、握手要 3~4 个 RTT，所以常见 300~800ms。
+	WarmMs int64 `json:"warm_ms"`
+
+	// Suspect 两个阶段都远超物理上限：说明数据来自本地缓冲区/缓存，
+	// 不能拿它当带宽依据。
+	Suspect bool `json:"suspect"`
+
+	OK    bool   `json:"ok"`
 	Error string `json:"error"`
 }
+
+// diagnoseImplausibleSpeed 超过这个速度就认为数据不是从链路拿的。
+//
+// 参考：这台服务器实测 egress 60MB/s、ingress 35MB/s。任何几十倍于它的
+// 读数都只能是"本地缓冲/边缘缓存"。用 150MB/s 留足余量，避免误伤真正的
+// 高速链路（10Gbps 内网级别）。
+const diagnoseImplausibleSpeed = 150 << 20
 
 // 目标选择：一个国内的、一个境外的。
 //
@@ -59,36 +82,41 @@ var diagnoseTargets = []struct{ Key, Name, URL string }{
 }
 
 const (
-	// diagnoseBudget 单个目标的**总**预算，含预热段。
-	diagnoseBudget = 8 * time.Second
-	// diagnoseWarmup 预热段：这段读到的字节只用于"把链路拉起来"，不计入速率。
+	// diagnoseColdBytes 首次测量读多少字节。
 	//
-	// 为什么必须是 2 秒：跨境链路 RTT 200ms 量级，TCP 慢启动每 RTT 翻倍窗口，
-	// 加上 BBR 要先测出带宽才有发送节奏，实测头 1.5~2 秒吞吐只有稳态的零头。
-	// 之前没有这一段，于是同一个目标"第一次自检慢、第二次快数十倍"—— 数值差得
-	// 离谱，而两次的链路条件其实完全一样：第二次复用了 TLS 连接，省掉了握手，
-	// 而且窗口已经在上一轮涨起来了。把这些算进平均，测出来的是"含启动开销的
-	// 平均值"，不是链路能力。
-	diagnoseWarmup = 2 * time.Second
-	// diagnoseSteadyMin 预热后至少测这么久，才有资格报稳态速率。
-	diagnoseSteadyMin = 2 * time.Second
-	// diagnoseSteadyLimit 预热后读到这么多字节就够定速率了。
+	// **必须比复用段大**，原因是样本噪声：新连接要经历 TCP 慢启动，头 100~200ms
+	// 吞吐只有稳态的零头。样本越小，这段"启动期"在平均值里的权重越大，结果就越
+	// 飘 —— 实测 4MB 时同样链路能测出 0.41 与 13.6 MB/s（33 倍），而同期 curl
+	// 稳定在 8~17MB/s。8MB 让启动期占比降到 20% 以内，数字才可比。
+	diagnoseColdBytes = 8 << 20
+
+	// diagnoseReuseBytes 复用测量读多少字节。
 	//
-	// 10MB 在 1MB/s 上要 10 秒（超过预算，那就在预算内测多少算多少），
-	// 在 40MB/s 上只要 0.25 秒 —— 实测三次 39.4/39.9/39.3 MB/s，精度足够。
-	// 定太大（比如 20MB）只会让每次自检多下几十 MB 无谓数据：预热段的字节
-	// 本来就不计入，真正被"用掉"的是它前面那段。
-	diagnoseSteadyLimit = 10 << 20
+	// 这一段连接已热、窗口已涨满，样本可以小一些，省带宽。
+	diagnoseReuseBytes = 4 << 20
+
+	// diagnoseColdBudget 首次测量的时间上限。
+	// 1MB/s 的链路上 8MB 要 8 秒，刚好覆盖；更慢的会提前收工。
+	diagnoseColdBudget = 9 * time.Second
+
+	// diagnoseReuseBudget 复用测量的时间上限。
+	diagnoseReuseBudget = 6 * time.Second
+
+	// diagnoseMinSample 小于这么多字节就不算有效样本。
+	diagnoseMinSample = 64 << 10
 )
 
-// diagnoseClient 只设连接级超时，不设总时长：
-// 我们要的是"这几秒里跑多快"，总时长由 context 控制。
+// diagnoseClient 只设连接级超时，不设总时长。
+//
+// **必须允许 keep-alive**：阶段 B 靠复用阶段 A 的连接来省掉第二次握手，
+// 这是"两个数字为什么不同"的一半答案。
 var diagnoseClient = &http.Client{
 	Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 10 * time.Second,
+		MaxIdleConnsPerHost:   4,
 	},
 }
 
@@ -96,104 +124,139 @@ var diagnoseClient = &http.Client{
 // 两个用户同时点会让两次结果都失真，也会把正常业务挤掉。
 var diagnoseMu sync.Mutex
 
-// probeSpeed 测一个目标的**稳态**吞吐。
+// phaseResult 一次阶段读取的原始数据。
+type phaseResult struct {
+	bytes int64
+	dur   time.Duration
+	ttfb  time.Duration
+	err   error
+}
+
+// readPhase 读一段固定范围并计时。
 //
-// 分两段：预热段（前 2 秒，字节数丢弃）+ 稳态段（之后的数据用来算速率）。
-// 不这么做的话，DNS/TCP/TLS 三次握手与 TCP 慢启动会一起被算进平均 ——
-// 同一个目标连测两次，第一次 3.7MB/s、第二次 22MB/s，用户看到的是"自检不准"。
-//
-// 不用 http.Client.Timeout 一刀切：慢链路上下载 20MB 本来要几分钟，
-// 我们要的是"这段时间里跑多快"，所以用 context 控制总时长。
-func probeSpeed(key, name, url string) diagnoseItem {
-	item := diagnoseItem{Key: key, Name: name}
-	ctx, cancel := context.WithTimeout(context.Background(), diagnoseBudget)
+// 只读固定字节数（Range），不看文件有多大 —— 这样每次测量的数据量一致，
+// 数字才可比。服务端若不支持 Range（回 200 全量），也一样只读这么多就停。
+func readPhase(rawURL string, offset, size int64, budget time.Duration) phaseResult {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		item.Error = err.Error()
-		return item
+		return phaseResult{err: err}
 	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+size-1))
 
 	start := time.Now()
 	resp, err := diagnoseClient.Do(req)
 	if err != nil {
-		item.Ms = time.Since(start).Milliseconds()
-		item.Error = tidyNetErr(err)
-		return item
+		return phaseResult{dur: time.Since(start), err: errors.New(tidyNetErr(err))}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		item.Ms = time.Since(start).Milliseconds()
-		item.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
-		return item
+		return phaseResult{dur: time.Since(start), err: fmt.Errorf("HTTP %d", resp.StatusCode)}
 	}
 
 	buf := make([]byte, 64<<10)
-	var total, steady int64
-	var firstAt, steadyAt time.Time
+	var n int64
+	var first time.Time
 	for {
 		m, readErr := resp.Body.Read(buf)
-		now := time.Now()
 		if m > 0 {
-			if firstAt.IsZero() {
-				firstAt = now
-				item.TTFB = now.Sub(start).Milliseconds()
+			if first.IsZero() {
+				first = time.Now()
 			}
-			total += int64(m)
-			if steadyAt.IsZero() {
-				// 还在预热段：这一块字节只用来把窗口拉起来，不计数。
-				if now.Sub(start) >= diagnoseWarmup {
-					steadyAt = now
-				}
-			} else {
-				steady += int64(m)
-				if steady >= diagnoseSteadyLimit {
-					break
-				}
+			n += int64(m)
+			if n >= size {
+				break
 			}
 		}
 		if readErr != nil {
-			// io.EOF 说明服务端把整个文件发完了（文件比上限小），仍然可用
-			if readErr != io.EOF {
-				item.Error = tidyNetErr(readErr)
+			// io.EOF：文件比 size 小（例如目标只有 3MB），读出多少算多少
+			if readErr != io.EOF && n == 0 {
+				return phaseResult{dur: time.Since(start), err: errors.New(tidyNetErr(readErr))}
 			}
 			break
 		}
-		// 稳态段够长了就停，别把预算耗完
-		if !steadyAt.IsZero() && now.Sub(steadyAt) >= diagnoseSteadyMin {
-			break
-		}
-		// 一直没进稳态（链路极慢）：预算用完就收工，下面会退回整体平均
-		if now.Sub(start) >= diagnoseBudget {
-			break
-		}
 	}
+	res := phaseResult{bytes: n, dur: time.Since(start)}
+	if !first.IsZero() {
+		res.ttfb = first.Sub(start)
+	}
+	return res
+}
 
-	elapsed := time.Since(start)
-	item.Bytes = total
-	item.Ms = elapsed.Milliseconds()
+// speedOf 字节/耗时 → 字节每秒。样本太小时返回 0（由调用方决定怎么处理）。
+func speedOf(r phaseResult) int64 {
+	if r.bytes < diagnoseMinSample || r.dur <= 0 {
+		return 0
+	}
+	return int64(float64(r.bytes) / r.dur.Seconds())
+}
 
-	// 优先用稳态段。
+// probeSpeed 测一个目标的两个速度：首次（冷）与复用（热）。
+//
+// 为什么是两段而不是一个数：
+//
+// 用户反复问的现象是"第一次慢、第二次快好几倍，到底哪个是真的"。
+// 答案是：**两个都是真的，但它们量的是不同的东西**。
+//   - 首次：新连接要付 DNS + TCP + TLS 三次握手（跨境 3~4 个 RTT），
+//     之后还要等拥塞窗口从初值涨上来 —— 头一两秒几乎跑不满。这是体感。
+//   - 复用：连接已建立、窗口已涨满，若中间还有 CDN 边缘缓存，数据从同城
+//     节点直接返回 —— 数字可能高到不合物理。这是"重复访问"的速度。
+//
+// 只报一个数，无论报哪个都会被误解：报首次会被当成"链路就这水平"，
+// 报复用会让人以为服务器有 700MB/s 出口。所以两个都报，让差异自己说话。
+func probeSpeed(key, name, url string) diagnoseItem {
+	item := diagnoseItem{Key: key, Name: name}
+	// 用原始 URL，**不要**加随机参数。
 	//
-	// 判定条件必须是"时长够长**或**字节够多"，不能只看时长：快链路上 20MB
-	// 在 10ms 内就读完了，那时按"必须满 0.5 秒"会退回整体平均，而整体平均
-	// 含预热段 —— 结果就是"明明很快却报出一个很慢的数"，正是这次要修的现象。
-	if !steadyAt.IsZero() && steady > 0 {
-		if d := time.Since(steadyAt).Seconds(); d > 0.001 && (d > 0.3 || steady >= 1<<20) {
-			item.Speed = int64(float64(steady) / d)
-		}
-	}
-	if item.Speed == 0 && total > 0 && elapsed > 0 {
-		item.Speed = int64(float64(total) / elapsed.Seconds())
-	}
+	// 曾经加过（想让 CDN 强制回源，避免"读缓存"虚高），但实测发现它是负收益：
+	// 国内 CDN 对陌生 query 会回源到上游，4MB 的片段要几秒才回完，把"首次"
+	// 拖到 0.33MB/s —— 那是个假慢，比虚高更误导人。而且两段对比的设计本身
+	// 就想要第二阶段吃到缓存，加参数等于和它对着干。
+	probeURL := url
 
-	// 读到数据就算成功（读满是正常结束，不是错误）
-	if total > 0 {
+	// 阶段 A 之前清掉空闲连接，保证它是真的冷启动。
+	// 不清的话，上一次自检留下的连接会让"首次"也变快，两个数字就没区别了。
+	diagnoseClient.CloseIdleConnections()
+
+	cold := readPhase(probeURL, 0, diagnoseColdBytes, diagnoseColdBudget)
+	if cold.err != nil {
+		item.Error = cold.err.Error()
+		item.Ms = cold.dur.Milliseconds()
+		return item
+	}
+	item.WarmMs = cold.ttfb.Milliseconds()
+	item.Bytes = cold.bytes
+	item.Speed = speedOf(cold)
+
+	// 阶段 B 紧接着读下一段：连接复用（阶段 A 的 body 已读完，连接回池），
+	// 但读取的位置不同，避免拿到完全相同的缓存片段。
+	//
+	// 这一段失败不影响整体结论 —— 拿到首次数字就已经能用了。
+	hot := readPhase(probeURL, diagnoseColdBytes, diagnoseReuseBytes, diagnoseReuseBudget)
+	if hot.err == nil {
+		item.SpeedReuse = speedOf(hot)
+		item.Bytes += hot.bytes
+	}
+	item.Ms = (cold.dur + hot.dur).Milliseconds()
+
+	if item.Speed == 0 && item.Bytes > 0 {
+		// 阶段 A 样本太小（链路极慢）：用整体推算，至少给个量级
+		item.Speed = int64(float64(item.Bytes) / (cold.dur + hot.dur).Seconds())
+	}
+	if item.Speed > 0 {
 		item.OK = true
 		item.Error = ""
 	} else if item.Error == "" {
 		item.Error = "没有收到数据"
+	}
+
+	// 两个阶段都快到不合物理 → 数据不是从链路来的。
+	// 只标 Suspect、不擅自改数字：用户看到 700MB/s 加上"疑似缓存"，
+	// 比我们偷偷报一个"修正后"的假数字要诚实得多。
+	if item.Speed > diagnoseImplausibleSpeed && item.SpeedReuse > diagnoseImplausibleSpeed {
+		item.Suspect = true
 	}
 	return item
 }
@@ -222,7 +285,7 @@ func tidyNetErr(err error) string {
 
 // diagnoseHandler 链路自检接口。
 //
-// POST 触发一次测量。同步返回（约 12 秒），前端显示 loading。
+// POST 触发一次测量。同步返回（约 10~20 秒），前端显示 loading。
 // 做成同步是为了简单：异步要额外存状态、处理并发点击、清理过期结果，
 // 而这一次测量的时长用户完全等得起。
 func (p *Panel) diagnoseHandler(w http.ResponseWriter, r *http.Request) {
@@ -265,16 +328,31 @@ func diagnoseAdvice(items []diagnoseItem) string {
 	if cn == nil || gl == nil {
 		return "自检没有跑完，请重试。"
 	}
-	cnOK, glOK := cn.OK && cn.Speed >= fast, gl.OK && gl.Speed >= fast
+	// 可疑读数不能当判断依据，否则会得出"境外比国内快二十倍"这种荒谬结论。
+	cnOK := cn.OK && !cn.Suspect && cn.Speed >= fast
+	glOK := gl.OK && !gl.Suspect && gl.Speed >= fast
+
+	// 有可疑项时先点出来：用户看到 700MB/s 会以为服务器是神仙，
+	// 而真相是数据从边缘缓存读的，跟链路能力无关。
+	var suspectNote string
+	for _, it := range items {
+		if it.Suspect {
+			suspectNote = fmt.Sprintf(
+				"（%s 两个阶段都读到 %d MB/s，超过服务器出口的物理上限，几乎肯定来自本地/边缘缓存，不作为判断依据。）",
+				it.Name, it.Speed>>20,
+			)
+			break
+		}
+	}
 
 	switch {
 	case cnOK && glOK:
-		return "服务器出网正常（国内与境外都能跑满）。若隧道仍然慢，问题在客户端到服务器这一段，或 frp 的传输参数 —— 可以先试「关闭 TCP 多路复用」，并在客户端那台机器上测一下它到服务器的速度。"
+		return suspectNote + "服务器出网正常（国内与境外都能跑满）。若隧道仍然慢，问题在客户端到服务器这一段，或 frp 的传输参数 —— 可以先试「关闭 TCP 多路复用」，并在客户端那台机器上测一下它到服务器的速度。"
 	case cnOK && !glOK:
-		return "服务器到国内正常、到境外很慢：跨境出口拥塞。如果客户端在国内，这条流量本来就不该绕境外 —— 换国内节点或加全球加速（GA）比调任何参数都有效。"
+		return suspectNote + "服务器到国内正常、到境外很慢：跨境出口拥塞。如果客户端在国内，这条流量本来就不该绕境外 —— 换国内节点或加全球加速（GA）比调任何参数都有效。"
 	case !cnOK && glOK:
-		return "到境外正常、到国内慢：通常是对该镜像的临时限速或路由问题，换个国内目标再测一次确认。"
+		return suspectNote + "到境外正常、到国内慢：通常是对该镜像的临时限速或路由问题，换个国内目标再测一次确认。"
 	default:
-		return "两个方向都慢：先看云控制台的公网带宽是否被限速、以及服务器是否被 DDoS 防护限制。这一层不解决，调 frp 参数没有意义。"
+		return suspectNote + "两个方向都慢：先看云控制台的公网带宽是否被限速、以及服务器是否被 DDoS 防护限制。这一层不解决，调 frp 参数没有意义。"
 	}
 }

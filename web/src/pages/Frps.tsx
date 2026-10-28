@@ -1,3 +1,4 @@
+import { SettingsPage } from './Settings'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useApp } from '../store'
 import { api } from '../lib/api'
@@ -284,6 +285,10 @@ export function Frps() {
           {log || '—'}
         </div>
       </Card>
+      {/* 服务器侧的诊断与内核调优跟着 frps 走：自检问的是"服务器出网行不行"，
+          BBR 调的是服务器内核，用户站在这一页才会想这两件事。 */}
+      <SettingsPage section="server" />
+
     </>
   )
 }

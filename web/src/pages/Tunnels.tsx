@@ -1,3 +1,4 @@
+import { SettingsPage } from './Settings'
 import { useEffect, useState } from 'react'
 import { useApp, type TunnelDraft } from '../store'
 import { api } from '../lib/api'
@@ -250,19 +251,22 @@ export function Tunnels() {
                     <Button variant="ghost" size="sm" onClick={() => openEdit(t)}>
                       编辑
                     </Button>{' '}
+                    {/* 用 primary 而不是 ghost：三个 ghost 按钮并排时，"测速"在
+                        视觉上跟"编辑 / 删除"完全同级，用户扫一眼根本注意不到。
+                        它是这一页唯一能给出"这条隧道到底多快"的动作，值得突出。 */}
                     <Button
-                      variant="ghost"
                       size="sm"
+                      className="whitespace-nowrap px-2 py-0.5"
                       disabled={probes[t.id] === 'loading' || !t.agent_id}
                       // 测不了的情况要说原因，不然用户只看到按钮灰着
                       title={
                         !t.agent_id
                           ? '未绑定机器，没有可测的目标'
-                          : '从服务器经隧道压一次，测这条链路的实际吞吐'
+                          : '从本服务器压一次数据，走 frps → frpc → 客户端本地服务，测这条隧道的实际吞吐（约 1~8 秒）'
                       }
                       onClick={() => void runProbe(t)}
                     >
-                      测速
+                      {probes[t.id] === 'loading' ? '测速中' : '测速'}
                     </Button>{' '}
                     <Button variant="danger" size="sm" onClick={() => void del(t)}>
                       删除
@@ -283,8 +287,14 @@ export function Tunnels() {
           {' '}流量三行：「累计」是 frps 统计的今日总量；「↑↓ 每秒」是最近 5 秒用户实际在
           用多少（没人访问就是 0）；「实测」是点「测速」后主动压出来的链路吞吐上限。
           上传 = 用户 → 服务，下载 = 服务 → 用户。
+          右侧「测速」量的是<b className="text-fg">服务器 → frps → frpc → 客户端本地服务</b>
+          这一整段的吞吐，也就是用户走这条隧道时的真实上限；它不是"你这台电脑到服务器"的速度。
         </div>
       </Card>
+
+      {/* 隧道传输参数（压缩 / tcpMux / 连接池）原本在「设置」里。
+          它只影响隧道行为，用户在隧道页才会问"为什么慢"，所以搬到这里。 */}
+      <SettingsPage section="tunnel" />
 
       <TunnelModal
         open={modalOpen}

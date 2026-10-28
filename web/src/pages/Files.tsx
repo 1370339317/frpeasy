@@ -1,3 +1,4 @@
+import { SettingsPage } from './Settings'
 import { useCallback, useEffect, useState } from 'react'
 import { useApp } from '../store'
 import { api } from '../lib/api'
@@ -227,6 +228,10 @@ export function Files() {
         「内置」表示它随面板发布包一起部署，删除它没有意义 —— 界面会拦住。
         服务端 frp 正在运行时也不能删：删了会立刻被重新拉取，白白中断隧道。
       </Hint>
+      {/* 下载源与策略：决定"取不到 frp / agent 二进制时去哪拿"，
+          和这一页的二进制列表是同一件事，所以搬到这里。 */}
+      <SettingsPage section="files" />
+
     </div>
   )
 }
