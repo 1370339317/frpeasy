@@ -143,3 +143,82 @@ func TestReplaceBinaryStopsFrpcWhenRenameFails(t *testing.T) {
 		t.Fatal("rename 失败后应先停掉 frpc（否则重试也永远撞同一个句柄）")
 	}
 }
+
+// 面板下发的传输层参数必须原样落到 frpc.toml。
+//
+// frp 的 tcpMux 在 frps 与 frpc 必须一致：面板写了 false、这里还写 true，
+// 结果就是握手后被服务端断开，客户端只有 `connect to server error: EOF`，
+// 服务端日志一条错误都不留 —— 线上排查一次的成本极高，所以钉死在测试里。
+func TestGenerateConfigUsesPanelTransport(t *testing.T) {
+	m := NewFrpcManager(t.TempDir())
+	off := false
+	on := true
+	cfg := shared.AgentConfig{
+		FRPSAddr:  "1.2.3.4:7000",
+		FRPSToken: "tok",
+		TCPMux:    &off,
+		PoolCount: 8,
+		// 压缩显式关掉
+		Compression: &off,
+		Tunnels: []shared.Tunnel{
+			{ID: 1, Protocol: "tcp", LocalAddr: "127.0.0.1:8080", PublicPort: 21000},
+		},
+	}
+	path, _, err := m.GenerateConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := readFileString(t, path)
+
+	if !strings.Contains(content, "transport.tcpMux = false") {
+		t.Fatalf("必须按面板下发写 tcpMux=false:\n%s", content)
+	}
+	// poolCount 只在 mux 关闭时有意义
+	if !strings.Contains(content, "transport.poolCount = 8") {
+		t.Fatalf("mux 关闭时应写入连接池:\n%s", content)
+	}
+	if strings.Contains(content, "useCompression") {
+		t.Fatalf("压缩被显式关闭时不应再写 useCompression:\n%s", content)
+	}
+
+	// 反过来：mux 开着时不得写连接池（frp 会忽略，写进去只会误导后来的人）
+	cfg2 := cfg
+	cfg2.TCPMux = &on
+	cfg2.Compression = &on
+	path2, _, err := m.GenerateConfig(cfg2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2 := readFileString(t, path2)
+	if strings.Contains(c2, "poolCount") {
+		t.Fatalf("mux 开启时不应写 poolCount:\n%s", c2)
+	}
+	if !strings.Contains(c2, "transport.useCompression = true") {
+		t.Fatalf("压缩开启时应写入 useCompression:\n%s", c2)
+	}
+}
+
+// 面板没下发（老面板，字段为 nil）时必须保持历史默认：mux 开、压缩开。
+// 否则"升级客户端"本身就会让所有现有隧道断开。
+func TestGenerateConfigDefaultsWhenPanelSilent(t *testing.T) {
+	m := NewFrpcManager(t.TempDir())
+	cfg := shared.AgentConfig{
+		FRPSAddr:  "1.2.3.4:7000",
+		FRPSToken: "tok",
+		Tunnels: []shared.Tunnel{
+			{ID: 1, Protocol: "tcp", LocalAddr: "127.0.0.1:8080", PublicPort: 21000},
+		},
+	}
+	path, _, err := m.GenerateConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := readFileString(t, path)
+	// 不写 tcpMux = 让 frp 用自己的默认（true），这是最安全的兼容行为
+	if strings.Contains(content, "transport.tcpMux") {
+		t.Fatalf("面板没下发时不应擅自写 tcpMux:\n%s", content)
+	}
+	if !strings.Contains(content, "transport.useCompression = true") {
+		t.Fatalf("压缩的历史默认是开启:\n%s", content)
+	}
+}

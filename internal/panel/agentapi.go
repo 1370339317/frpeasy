@@ -83,6 +83,12 @@ func (p *Panel) agentConfigHandler(w http.ResponseWriter, r *http.Request) {
 		// 回传后面板立刻清空 —— 所以这里每轮读的都是"当前是否真的在等"。
 		LogRequest: p.db.PendingAgentLogRequest(agent.ID),
 	}
+	// 传输层参数每轮下发：改设置后下一轮心跳就生效，不用重装客户端。
+	// 这里取地址是安全的：tt 是本次请求的局部变量，编码完即弃。
+	tt := p.tunnelTransport()
+	cfg.TCPMux = &tt.TCPMux
+	cfg.Compression = &tt.Compression
+	cfg.PoolCount = tt.PoolCount
 	json.NewEncoder(w).Encode(cfg)
 }
 

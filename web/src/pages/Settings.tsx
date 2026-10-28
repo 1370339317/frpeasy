@@ -19,6 +19,8 @@ import type {
   SettingsSaveResult,
   SourceEvent,
   SourceEventsResponse,
+  TuningCongestion,
+  TuningResponse,
 } from '../types'
 
 // 内置候选源。用户也可以自己填前缀 —— 镜像会挂、会改名，写死清单不现实。
@@ -228,6 +230,10 @@ type SettingsDraft = {
   mode: string
   probe: Record<string, ProbeResult>
   clientProbe: Record<string, ProbeResult>
+  // 隧道传输层（'1'/'0' 与库里的写法保持一致，避免两套表示来回转换）
+  tcpMux: string
+  poolCount: string
+  compress: string
 }
 
 let draft: SettingsDraft | null = null
@@ -268,6 +274,13 @@ export function SettingsPage() {
   const [pEnd, setPEnd] = useState(draft?.pEnd ?? '')
   const [bindPort, setBindPort] = useState(draft?.bindPort ?? '')
   const [dashPort, setDashPort] = useState(draft?.dashPort ?? '')
+  // 隧道传输层：三个值都由面板统一下发给客户端（frp 的 tcpMux 两端必须一致，
+  // 所以它只能有一个来源）。初值同样优先取草稿。
+  const [tcpMux, setTcpMux] = useState<'1' | '0'>((draft?.tcpMux as '1' | '0') ?? '1')
+  const [poolCount, setPoolCount] = useState(draft?.poolCount ?? '0')
+  const [compress, setCompress] = useState<'1' | '0'>((draft?.compress as '1' | '0') ?? '1')
+  const [tuning, setTuning] = useState<TuningResponse | null>(null)
+  const [tuningBusy, setTuningBusy] = useState(false)
   const [token, setToken] = useState('')
   const [pass, setPass] = useState('')
   const [saving, setSaving] = useState(false)
@@ -288,6 +301,9 @@ export function SettingsPage() {
       mode,
       probe,
       clientProbe,
+      tcpMux,
+      poolCount,
+      compress,
     }
   }, [
     publicAddr,
@@ -326,6 +342,10 @@ export function SettingsPage() {
     setPEnd(s.port_range_end ?? '')
     setBindPort(s.frps_bind_port ?? '')
     setDashPort(s.dashboard_port ?? '')
+    // 库里的默认是 '1'；写成 '0' 才算关闭，其它任何值都当作开（保守方向）
+    setTcpMux((s.tunnel_tcp_mux ?? '1') === '0' ? '0' : '1')
+    setPoolCount(s.tunnel_pool_count ?? '0')
+    setCompress((s.tunnel_compression ?? '1') === '0' ? '0' : '1')
     setToken('')
     setPass('')
   }, [])
@@ -339,6 +359,52 @@ export function SettingsPage() {
   useEffect(() => {
     void loadNet()
   }, [loadNet])
+
+  // 系统调优现状（当前拥塞算法 / BBR 是否可用）。
+  //
+  // 单独一个接口：它读 /proc，和设置 KV 不是一回事。老面板没有它，
+  // 所以这里失败要静默 —— 不能因为多问了一个新接口就让整个设置页报错。
+  const loadTuning = useCallback(async () => {
+    try {
+      setTuning(await api<TuningResponse>('GET', '/api/system/tuning'))
+    } catch {
+      /* 老版本面板没有该接口，忽略 */
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadTuning()
+  }, [loadTuning])
+
+  // 切换拥塞控制。
+  //
+  // 会写 /etc/sysctl.d/99-frpeasy-bbr.conf 并立即生效 —— 这是真正的系统变更，
+  // 所以先让用户确认一次，并说明可撤销（删文件 + 重启即回系统默认）。
+  async function toggleBBR(enable: boolean) {
+    if (tuningBusy) return
+    if (
+      enable &&
+      !confirm(
+        '在当前服务器上启用 BBR 拥塞控制？\n\n' +
+          '会写入 /etc/sysctl.d/99-frpeasy-bbr.conf 并立即生效。' +
+          '已经建立的连接不受影响，新建的连接才会用 BBR。\n\n' +
+          '跨境链路上这一步通常是 5~13 倍的差别。随时可以撤销。',
+      )
+    )
+      return
+    setTuningBusy(true)
+    try {
+      const r = await api<{ congestion: TuningCongestion }>('POST', '/api/system/tuning', {
+        action: enable ? 'enable_bbr' : 'disable_bbr',
+      })
+      setTuning((t) => (t ? { ...t, congestion: r.congestion } : t))
+      toast(enable ? '已启用 BBR，现有隧道连接会在重连后切换' : '已撤销 BBR 配置')
+    } catch (e) {
+      toast((e as Error).message, 'bad')
+    } finally {
+      setTuningBusy(false)
+    }
+  }
 
   const save = useCallback(async () => {
     if (saving) return
@@ -376,6 +442,14 @@ export function SettingsPage() {
       if (trim(pEnd) !== trim(settings.port_range_end ?? '')) body.port_range_end = trim(pEnd)
       if (trim(bindPort) !== trim(settings.frps_bind_port ?? '')) body.frps_bind_port = trim(bindPort)
       if (trim(dashPort) !== trim(settings.dashboard_port ?? '')) body.dashboard_port = trim(dashPort)
+      // 隧道传输层。tcpMux 只有在真的变了才提交 —— 它是唯一会重启 frps 的项，
+      // 而 UI 每次保存都会回传全部字段，不比对就会「改个无关设置也把隧道断一次」。
+      if (compress !== (settings.tunnel_compression ?? '1')) body.tunnel_compression = compress
+      if (tcpMux !== (settings.tunnel_tcp_mux ?? '1')) body.tunnel_tcp_mux = tcpMux
+      // 连接池只在 mux 关闭时才有意义，开着 mux 提交它只会让服务端白做一次校验
+      if (tcpMux === '0' && trim(poolCount) !== trim(settings.tunnel_pool_count ?? '0')) {
+        body.tunnel_pool_count = trim(poolCount)
+      }
       // 令牌输入框拿到的是脱敏串，只有用户重新输入时才提交
       if (token.trim()) body.frps_token = token.trim()
       if (pass) body.new_password = pass
@@ -420,6 +494,9 @@ export function SettingsPage() {
     pEnd,
     bindPort,
     dashPort,
+    tcpMux,
+    poolCount,
+    compress,
     token,
     pass,
     loadSettings,
@@ -787,6 +864,134 @@ export function SettingsPage() {
           </Field>
         </div>
         <Hint>改端口池不会影响已建隧道。记得在服务器防火墙 / 安全组放行这些端口。</Hint>
+      </Card>
+
+      {/* ---------------- 隧道传输 ---------------- */}
+      {/* 这块存在的理由：frp 的 tcpMux 在 frps 与 frpc 必须一致，一边开一边关
+          会握手后被直接断开（客户端只有 EOF、服务端一条错误都不记）。所以它
+          不能放给用户改客户端配置，必须由面板统一决定并同时下发到两端。 */}
+      <Card
+        title="隧道传输"
+        desc="由面板统一决定并下发给所有客户端，两端必须一致"
+      >
+        <div className="grid gap-3.5">
+          <label className="flex cursor-pointer items-start gap-2.5">
+            <input
+              type="checkbox"
+              className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]"
+              checked={compress === '1'}
+              onChange={(e) => setCompress(e.target.checked ? '1' : '0')}
+            />
+            <span className="min-w-0">
+              <b className="block text-[13.5px]">压缩传输内容</b>
+              <span className="mt-0.5 block text-xs leading-[1.6] text-dim">
+                跨境 / 小带宽链路上通常能提升 3~5 倍 —— 隧道里的 HTML/JS/JSON 会被压一遍。
+                对图片、zip 这类已经压缩过的内容没有收益，只是多花一点 CPU。
+              </span>
+            </span>
+          </label>
+
+          <label className="flex cursor-pointer items-start gap-2.5">
+            <input
+              type="checkbox"
+              className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]"
+              checked={tcpMux === '0'}
+              onChange={(e) => setTcpMux(e.target.checked ? '0' : '1')}
+            />
+            <span className="min-w-0">
+              <b className="block text-[13.5px]">
+                关闭 TCP 多路复用（tcpMux）
+                {tcpMux === '0' && <span className="ml-1.5 text-[11.5px] text-ok-fg">已关闭</span>}
+              </b>
+              <span className="mt-0.5 block text-xs leading-[1.6] text-dim">
+                frp 默认把所有隧道塞进一条 TCP 连接，而它的单流窗口是 256KB 硬编码，
+                吞吐上限 ≈ 256KB ÷ RTT（跨境 200ms 时只有 ~1.3MB/s）。关掉之后每个隧道
+                独占连接，才能跑满链路。
+                <b className="text-warn-fg">
+                  {' '}要求所有客户端 ≥ {tuning?.min_agent_version ?? '0.7.34'}；切换时隧道会中断十几秒。
+                </b>
+              </span>
+            </span>
+          </label>
+
+          {tcpMux === '0' && (
+            <Field
+              label={`连接池大小（0~${tuning?.max_pool_count ?? 32}，仅多路复用关闭时生效）`}
+              className="mb-0 max-w-[220px]"
+            >
+              <Input
+                type="number"
+                min={0}
+                max={tuning?.max_pool_count ?? 32}
+                value={poolCount}
+                onChange={(e) => setPoolCount(e.target.value)}
+                placeholder="0"
+              />
+            </Field>
+          )}
+        </div>
+        <Hint>
+          改动点「保存」后生效：客户端在下一轮心跳（约 15 秒）拿到新配置并重连。
+          tcpMux 变化时面板会重启 frps 以重写它的配置。
+        </Hint>
+      </Card>
+
+      {/* ---------------- 系统调优 ---------------- */}
+      <Card
+        title="系统调优（拥塞控制）"
+        desc="决定这条链路上 TCP 能跑多快；跨境丢包链路上差别可达数倍"
+      >
+        {tuning?.congestion.supported ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="min-w-0">
+              <div className="text-[13px]">
+                当前拥塞控制：
+                <b
+                  className={cx(
+                    'ml-1 font-mono',
+                    tuning.congestion.cc === 'bbr' ? 'text-ok-fg' : 'text-warn-fg',
+                  )}
+                >
+                  {tuning.congestion.cc || '未知'}
+                </b>
+              </div>
+              <div className="mt-1 text-xs leading-[1.6] text-dim">
+                {tuning.congestion.cc === 'bbr'
+                  ? 'BBR 已启用：不依赖丢包信号判断拥塞，跨境丢包链路上表现明显优于 CUBIC。'
+                  : tuning.congestion.bbr_available
+                    ? 'CUBIC 会把丢包当成拥塞信号，一路收缩窗口 —— 跨境链路上实测吞吐会塌到 KB/s 量级。建议启用 BBR。'
+                    : '当前内核没有可用的 BBR 模块，无法切换。'}
+              </div>
+            </div>
+            <div className="ml-auto flex shrink-0 gap-2">
+              {tuning.congestion.cc === 'bbr' ? (
+                <Button
+                  variant="ghost"
+                  disabled={tuningBusy}
+                  onClick={() => void toggleBBR(false)}
+                >
+                  撤销 BBR
+                </Button>
+              ) : (
+                <Button
+                  disabled={tuningBusy || !tuning.congestion.bbr_available}
+                  onClick={() => void toggleBBR(true)}
+                >
+                  {tuningBusy ? '处理中…' : '启用 BBR'}
+                </Button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="text-xs leading-[1.6] text-dim">
+            {tuning ? tuning.congestion.error || '当前平台不支持在面板内调整' : '读取中…'}
+            {tuning && !tuning.congestion.supported && (
+              <span className="mt-1 block">
+                面板只管理服务器上的 frps，而拥塞控制是服务器内核的事，所以在非 Linux 面板上这栏不适用。
+              </span>
+            )}
+          </div>
+        )}
       </Card>
 
       <Card title="高级" desc="一般不用动">

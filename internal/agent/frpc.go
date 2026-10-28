@@ -447,6 +447,21 @@ func (m *FrpcManager) GenerateConfig(cfg shared.AgentConfig) (string, string, er
 	// 设为 false 后 frpc 常驻、自己带退避重连，frps 一起来 2s 内就恢复
 	// （已用隔离实验实测：停 60s 期间 frpc 存活，重启后 2s 内端口重新可连）。
 	b.WriteString("loginFailExit = false\n")
+	// 传输层：值来自面板，**不要在这里写死**。
+	//
+	// tcpMux 必须与 frps 一致：面板在 frps.toml 里改了，这里也必须跟着改，
+	// 否则握手后被服务端直接断开，客户端只看到 `connect to server error: EOF`。
+	// nil 表示面板没下发（老面板），此时保持 frp 的历史默认（开），
+	// 这样"面板升级"本身不会让任何现有隧道掉线。
+	if cfg.TCPMux != nil {
+		fmt.Fprintf(&b, "transport.tcpMux = %t\n", *cfg.TCPMux)
+		// poolCount 只在 mux 关闭时有意义：开着 mux 时 frp 会忽略它，
+		// 写进配置只会让后来看文件的人以为它在生效。
+		if !*cfg.TCPMux && cfg.PoolCount > 0 {
+			fmt.Fprintf(&b, "transport.poolCount = %d\n", cfg.PoolCount)
+		}
+	}
+	// 压缩是 per-proxy 的，放在下面的 [[proxies]] 里（见下）。
 	for _, t := range cfg.Tunnels {
 		// 只生成 tcp。历史脏数据（http/udp）在这里必须跳过，否则 frpc 会因为
 		// "http 类型不接受 remotePort" 解析失败直接退出 —— 一条坏记录
@@ -457,16 +472,21 @@ func (m *FrpcManager) GenerateConfig(cfg shared.AgentConfig) (string, string, er
 		host, port := splitHostPort(t.LocalAddr)
 		// transport.useCompression：跨境 / 小带宽链路上唯一的软件侧增益。
 		//
-		// 实测背景（2026-10-28）：服务器在新加坡，面板直连下载 17MB 只有 58KB/s，
-		// 而隧道吞吐 30~37KB/s —— 瓶颈是链路带宽，不是 frp 也不是代码。
-		// 这种链路上 frp 的协议开销占比很高，对 HTTP 响应体（HTML/JS/CSS/JSON）
-		// 做一次压缩通常能换回 3~5 倍的有效吞吐。
+		// 实测背景（2026-10-28）：服务器在东京，跨境链路上 frp 的协议开销占比很高，
+		// 对 HTTP 响应体（HTML/JS/CSS/JSON）做一次压缩通常能换回 3~5 倍有效吞吐。
+		// 对已压缩内容（jpeg/zip/tls）没有收益，但只多花 CPU —— 现代 CPU 的 deflate
+		// 在几百 MB/s 量级，而这条链路上限只有几十 KB/s，代价可忽略。
 		//
-		// 对已压缩的内容（jpeg/zip/tls 流）没有收益，但 frp 的压缩只增加 CPU，
-		// 不影响正确性，也不会让裸 TCP 场景变慢到可感知 —— 现代 CPU 的 deflate
-		// 在几百 MB/s 量级，而这条链路的上限只有几十 KB/s。
-		fmt.Fprintf(&b, "\n[[proxies]]\nname = %q\ntype = %q\nlocalIP = %q\nlocalPort = %d\nremotePort = %d\ntransport.useCompression = true\n",
+		// 开关由面板下发（设置 → 隧道传输）；nil = 老面板没下发，按历史默认开启。
+		compress := true
+		if cfg.Compression != nil {
+			compress = *cfg.Compression
+		}
+		fmt.Fprintf(&b, "\n[[proxies]]\nname = %q\ntype = %q\nlocalIP = %q\nlocalPort = %d\nremotePort = %d\n",
 			fmt.Sprintf("t%d", t.ID), "tcp", host, port, t.PublicPort)
+		if compress {
+			b.WriteString("transport.useCompression = true\n")
+		}
 	}
 	out := filepath.Join(m.cfgDir, "frpc.toml")
 	content := []byte(b.String())

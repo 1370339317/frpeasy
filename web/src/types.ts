@@ -113,6 +113,15 @@ export interface Settings {
   client_sources: string
   /** 下载策略：auto = 下载前临时测速排优；manual = 按上面的顺序 */
   source_mode: string
+  /** 隧道是否压缩传输内容（'1' / '0'） */
+  tunnel_compression: string
+  /**
+   * 隧道是否启用 frp 的 TCP 多路复用（yamux）。'1' / '0'。
+   * **两端必须一致**：面板同时写进 frps.toml 和客户端配置，所以只能在面板改。
+   */
+  tunnel_tcp_mux: string
+  /** 预建连接池大小，仅在多路复用关闭时生效 */
+  tunnel_pool_count: string
   [key: string]: string
 }
 
@@ -437,6 +446,32 @@ export interface SettingsBody {
   server_sources?: string
   client_sources?: string
   source_mode?: string
+  tunnel_compression?: string
+  tunnel_tcp_mux?: string
+  tunnel_pool_count?: string
+}
+
+/** 系统调优现状（设置 → 隧道传输）。congestion 只在 Linux 上有意义。 */
+export interface TuningCongestion {
+  supported: boolean
+  /** 当前拥塞控制算法，如 cubic / bbr */
+  cc: string
+  bbr_available: boolean
+  recommended: boolean
+  error: string
+}
+
+export interface TunnelTransportState {
+  tcp_mux: boolean
+  pool_count: number
+  compression: boolean
+}
+
+export interface TuningResponse {
+  congestion: TuningCongestion
+  transport: TunnelTransportState
+  min_agent_version: string
+  max_pool_count: number
 }
 
 export interface SettingsSaveResult {

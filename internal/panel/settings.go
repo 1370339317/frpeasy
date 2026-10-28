@@ -198,6 +198,42 @@ func (p *Panel) settingsHandler(w http.ResponseWriter, r *http.Request) {
 				_ = p.db.SetSetting(k, v)
 				changedKeys = append(changedKeys, k)
 			}
+		// ---- 隧道传输层 ----
+		// tcpMux 是两端一致的开关，改它必须同时重启 frps（重新生成 frps.toml），
+		// 客户端在下一轮心跳拿到新配置后重连，中间约 15~30 秒隧道不可用。
+		case settingTunnelTCPMux:
+			if v != "1" && v != "0" {
+				http.Error(w, "该开关只接受 1 或 0", http.StatusBadRequest)
+				return
+			}
+			next := p.tunnelTransport()
+			next.TCPMux = v == "1"
+			// 关掉 mux 前必须确认所有客户端都认得这个字段：frp 的 tcpMux 两端必须
+			// 一致，老客户端仍会用默认 true，然后握手后被服务端断开 —— 现象是
+			// "隧道全断，而 frps / frpc 日志里都没有一条错误"，极难自查。
+			if err := p.checkTunnelTransportChange(next); err != nil {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+			_ = p.db.SetSetting(k, v)
+			changedKeys = append(changedKeys, k)
+			needFrpsRestart = true
+		case settingTunnelCompression:
+			// 压缩是 per-proxy 参数，只影响客户端生成的 frpc.toml，不需要动 frps。
+			if v != "1" && v != "0" {
+				http.Error(w, "该开关只接受 1 或 0", http.StatusBadRequest)
+				return
+			}
+			_ = p.db.SetSetting(k, v)
+			changedKeys = append(changedKeys, k)
+		case settingTunnelPoolCount:
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil || n < 0 || n > maxPoolCount {
+				http.Error(w, fmt.Sprintf("连接池大小必须是 0~%d 的整数", maxPoolCount), http.StatusBadRequest)
+				return
+			}
+			_ = p.db.SetSetting(k, v)
+			changedKeys = append(changedKeys, k)
 		case "prefetch_all":
 			if v == "1" || v == "0" {
 				_ = p.db.SetSetting(k, v)

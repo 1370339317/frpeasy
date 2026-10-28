@@ -142,6 +142,15 @@ func (db *DB) initSettings() error {
 		"port_range_start": strconv.Itoa(shared.DefaultPortRangeStart),
 		"port_range_end":   strconv.Itoa(shared.DefaultPortRangeEnd),
 		"frp_version":      shared.DefaultFRPVersion,
+		// ---- 隧道传输层 ----
+		// 压缩默认开：跨境/小带宽链路上 HTTP 响应体能压 3~5 倍，代价可忽略。
+		"tunnel_compression": "1",
+		// tcpMux 默认**保持开启**：这是 frp 的历史默认值，改成关闭必须两端同时生效，
+		// 而存量客户端的版本参差不齐。默认开 = 升级面板不会造成任何现有隧道中断；
+		// 想要更高吞吐的人到设置里显式关闭（面板会先检查客户端版本够不够）。
+		"tunnel_tcp_mux": "1",
+		// 连接池：0 = 不启用（frp 默认）。仅 tcpMux 关闭时生效。
+		"tunnel_pool_count": "0",
 		// 遗留字段：现在由两个源列表派生（见 syncMirrorBase），保留是因为
 		// 老版本客户端只认它、界面与第三方脚本也还在读。
 		"mirror_base": "",

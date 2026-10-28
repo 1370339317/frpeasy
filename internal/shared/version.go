@@ -126,6 +126,14 @@ func CompareVersions(a, b string) int {
 	}
 }
 
+// MinAgentTransportVersion 支持"隧道传输层参数下发"（tcpMux / poolCount /
+// compression）的最低 agent 版本。
+//
+// 用途：面板要把 frps 的 tcpMux 改成 false 时，必须先确认所有客户端都认这个字段。
+// frp 的 tcpMux 两端必须一致 —— 老客户端仍会用默认 true，然后握手后被服务端断开，
+// 表现为"隧道全断、服务端日志一条错误都不留"，是那种最难查的故障。
+const MinAgentTransportVersion = "0.7.34"
+
 // VersionKnown 这个版本串能不能参与比较（"dev"、git hash 这类不能）。
 //
 // 用途：做「最低版本」门槛时必须区分「确实是旧版」和「版本号根本认不出来」。

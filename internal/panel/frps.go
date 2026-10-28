@@ -308,6 +308,10 @@ func (m *FrpsManager) generateConfig() (string, error) {
 	m.dashPort = dashPort
 	m.mu.Unlock()
 	dashUser, dashPass := m.dashCredentials()
+	// 传输层：tcpMux 必须与客户端一致，所以它由面板统一生成、并随配置下发。
+	// 客户端侧见 FrpcManager.GenerateConfig —— 那一条链路断了就会
+	// 「服务端关 mux、客户端还开着」，握手后被直接断开。
+	tcpMux := m.db.GetSetting(settingTunnelTCPMux) != "0"
 	// frp >= 0.52 的 toml 用顶层驼峰键；旧版 INI 的 [common]/bind_port 写法在 .toml 中不合法。
 	cfg := fmt.Sprintf(`# 由 frpeasy 自动生成，请勿手改
 bindPort = %d
@@ -315,11 +319,13 @@ bindPort = %d
 auth.method = "token"
 auth.token = %q
 
+transport.tcpMux = %t
+
 webServer.addr = "127.0.0.1"
 webServer.port = %d
 webServer.user = %q
 webServer.password = %q
-`, bindPort, token, dashPort, dashUser, dashPass)
+`, bindPort, token, tcpMux, dashPort, dashUser, dashPass)
 	out := filepath.Join(m.cfgDir, "frps.toml")
 	if err := os.WriteFile(out, []byte(cfg), 0o644); err != nil {
 		return "", err

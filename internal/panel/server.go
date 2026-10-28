@@ -207,6 +207,11 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("GET /api/frps", p.requireAuth(p.frpsControlHandler))
 	mux.HandleFunc("POST /api/frps", p.requireAuth(p.frpsControlHandler))
 	mux.HandleFunc("GET /api/system/network", p.requireAuth(p.systemNetworkHandler))
+	// 隧道传输层的当前生效值（给设置页展示）+ 系统调优状态。
+	// 单独一个只读接口，是因为它要读 /proc，不适合塞进 /api/settings（那是个
+	// 纯 KV 表，混进派生值会让"保存时只提交改动项"的逻辑变复杂）。
+	mux.HandleFunc("GET /api/system/tuning", p.requireAuth(p.tuningHandler))
+	mux.HandleFunc("POST /api/system/tuning", p.requireAuth(p.tuningHandler))
 	mux.HandleFunc("GET /api/system/versions", p.requireAuth(p.systemVersionsHandler))
 	mux.HandleFunc("GET /api/system/mirror-test", p.requireAuth(p.systemMirrorTestHandler))
 	// 排优 / 下载记录：回答「刚才那次到底走了哪个源、为什么」。

@@ -156,6 +156,28 @@ type AgentConfig struct {
 	// 与 Sources 一起下发，客户端据此决定要不要自己测 —— 面板测不到客户端那台机器的网络。
 	SourceMode string `json:"source_mode"`
 
+	// ---- 隧道传输层参数（面板统一决定，两端必须一致）----
+	//
+	// 为什么必须由面板下发、而不是写死在客户端：
+	// frp 的 transport.tcpMux 在 frps 与 frpc **必须相同**，一边 true 一边 false
+	// 会握手后立刻被服务端断开（实测客户端日志只有 `connect to server error: EOF`，
+	// 服务端日志里连一条错误都不留）。所以这个开关只能有一个来源 —— 面板。
+	//
+	// 用指针是为了区分"老面板没下发"与"明确要求 false"：
+	// nil = 按客户端自己的历史默认值走（true），不会因为升级客户端而改变行为。
+
+	// TCPMux 是否启用 frp 的 TCP 多路复用（yamux）。
+	// 关掉 = 每个代理独占一条 TCP，绕过 yamux 的单流窗口限制。
+	// yamux 的 stream window 是 256KB 硬编码，吞吐上限 ≈ 256KB / RTT：
+	// 跨境 194ms 时只有 ~1.3MB/s，这正是"链路明明很宽、隧道却跑不满"的主因。
+	TCPMux *bool `json:"tcp_mux,omitempty"`
+	// PoolCount 预建连接池大小，仅在 TCPMux=false 时生效。
+	// 多条连接并行分摊，能把丢包链路上的单连接瓶颈摊薄。
+	PoolCount int `json:"pool_count,omitempty"`
+	// Compression 是否对隧道流做压缩。跨境小带宽链路上通常收益明显
+	// （HTTP 响应体可压 3~5 倍），对已压缩内容只是多花一点 CPU。
+	Compression *bool `json:"compression,omitempty"`
+
 	// FRPSRunning 面板侧 frps 当前是否在运行（运行时字段，不进配置内容）。
 	//
 	// 用途：frpc 自带的登录重连是指数退避（1s→2s→…→最长 120s），frps 停得
