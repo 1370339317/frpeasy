@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"frpeasy/internal/shared"
@@ -45,6 +46,22 @@ type Client struct {
 	// 面板每轮配置都会带上"当前是否在等日志"，没有这个去重就会每 15 秒
 	// 上传一次同样的 64KB —— 用户点了查看日志之后，面板要持续收几百 KB 垃圾。
 	lastLogReq string
+
+	// frpc 保活走后台 worker，**绝不能在心跳循环里同步做**。
+	//
+	// 事故（2026-10-28，线上客户端）：Reconcile 里可能要下载 frpc（面板中继
+	// 或几个镜像），而一次失败的下载有 90 秒停滞窗口。它被同步调用在主循环里，
+	// 于是心跳整段停摆 —— 面板 60 秒判离线，界面显示"客户端离线、隧道全离线"，
+	// 用户在客户端机器上却看到进程好好地活着。4 小时里它一直在反复重试下载，
+	// 而每一次都在阻塞心跳。
+	//
+	// 现在主循环只把"最新配置"投递给 worker（同一个 key 覆盖，不会堆积），
+	// 自己立刻去发心跳。下载慢就慢，客户端至少始终在线，界面也能看到
+	// "frpc 未就绪"而不是整个客户端消失。
+	frpcMu     sync.Mutex
+	pendingCfg *shared.AgentConfig
+	pendForce  bool
+	frpcWake   chan struct{}
 }
 
 // state 持久化本地身份，避免每次重启都向面板新建 Agent。
@@ -74,6 +91,7 @@ func NewClient(server, installTok, name, dataDir string) (*Client, error) {
 		dataDir:    dataDir,
 		frpc:       NewFrpcManager(dataDir),
 		httpClient: &http.Client{Timeout: 20 * time.Second},
+		frpcWake:   make(chan struct{}, 1),
 	}
 	// 面板地址始终注入：即使某个客户端一路走镜像，面板仍是配置与版本的唯一来源。
 	c.frpc.SetPanelBase(server)
@@ -269,6 +287,66 @@ func localReachable(localAddr string) bool {
 	return true
 }
 
+// probeTunnels 并发探测所有隧道的本地服务。
+//
+// 串行时每条最坏 2 秒：隧道一多、本地服务又都没起，光这一步就能吃掉整个
+// 心跳周期（15 秒），心跳跟着延迟。并发之后总耗时约等于最慢的那一条。
+func probeTunnels(tunnels []shared.Tunnel) []shared.TunnelStatus {
+	out := make([]shared.TunnelStatus, len(tunnels))
+	var wg sync.WaitGroup
+	for i, t := range tunnels {
+		wg.Add(1)
+		go func(i int, t shared.Tunnel) {
+			defer wg.Done()
+			out[i] = shared.TunnelStatus{TunnelID: t.ID, Online: localReachable(t.LocalAddr)}
+		}(i, t)
+	}
+	wg.Wait()
+	return out
+}
+
+// requestReconcile 把"该按这份配置保活 frpc"投给后台 worker。
+//
+// 同一个 key 只保留最新一份：配置每 15 秒下发一次，若每次都排队，
+// 一次慢下载之后会积压一长串过期配置，恢复时还要逐份重放。
+func (c *Client) requestReconcile(cfg shared.AgentConfig, force bool) {
+	if c.frpc == nil {
+		return
+	}
+	c.frpcMu.Lock()
+	c.pendingCfg = &cfg
+	c.pendForce = c.pendForce || force
+	c.frpcMu.Unlock()
+	// 非阻塞唤醒：channel 已满说明 worker 还没处理，那一份就是最新的。
+	select {
+	case c.frpcWake <- struct{}{}:
+	default:
+	}
+}
+
+// frpcWorker 独占 frpc 的保活：下载、生成配置、起停进程都在这里做。
+//
+// 只有这一个 goroutine 调 Reconcile，所以不需要额外的并发保护 ——
+// FrpcManager 内部的锁只需应对"Stop 与 Reconcile 交错"。
+func (c *Client) frpcWorker() {
+	for range c.frpcWake {
+		c.frpcMu.Lock()
+		cfg := c.pendingCfg
+		force := c.pendForce
+		c.pendingCfg = nil
+		c.pendForce = false
+		c.frpcMu.Unlock()
+		if cfg == nil {
+			continue
+		}
+		if err := c.frpc.Reconcile(*cfg, force); err != nil {
+			// 失败会在这里留一行，随后 60 秒冷却再试 ——
+			// 关键是这行现在真的写得进 agent.log（见 logSink 的说明）。
+			log.Println("[agent] frpc 保活失败:", err)
+		}
+	}
+}
+
 // Run 主循环。
 // Shutdown 停掉本进程拉起的子进程（frpc），供信号处理路径调用。
 //
@@ -299,6 +377,9 @@ func (c *Client) Run() error {
 		// 顺手写回 state，保证「卸载前报备」打到的是当前地址。
 		c.saveState()
 	}
+
+	// frpc 保活独立成一个 goroutine：它可能要下载十几 MB，绝不能拖住心跳。
+	go c.frpcWorker()
 
 	for {
 		cfg, err := c.fetchConfig()
@@ -333,18 +414,11 @@ func (c *Client) Run() error {
 		// 停更久会到 120s），强制重启能压到 1 秒级。
 		forceRestart := cfg.FRPSRunning && !c.lastFRPSRunning
 		c.lastFRPSRunning = cfg.FRPSRunning
-		if err := c.frpc.Reconcile(*cfg, forceRestart); err != nil {
-			log.Println("[agent] frpc 保活失败:", err)
-		}
+		// 投递给后台 worker，立即返回：心跳不能被下载/解压阻塞（见字段说明）。
+		c.requestReconcile(*cfg, forceRestart)
 
-		// 构造状态上报
-		statuses := make([]shared.TunnelStatus, 0, len(cfg.Tunnels))
-		for _, t := range cfg.Tunnels {
-			statuses = append(statuses, shared.TunnelStatus{
-				TunnelID: t.ID,
-				Online:   localReachable(t.LocalAddr),
-			})
-		}
+		// 构造状态上报（并发探测，最坏 2 秒而不是 2 秒 × 隧道数）
+		statuses := probeTunnels(cfg.Tunnels)
 		resp, herr := c.heartbeat(statuses)
 		if herr != nil {
 			log.Println("[agent] 心跳失败:", herr)

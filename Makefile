@@ -14,7 +14,7 @@ GOARCH_LOCAL      := $(shell go env GOARCH)
 EXE_SUFFIX        := $(if $(filter windows,$(GOOS_LOCAL)),.exe,)
 LOCAL_AGENT_ASSET := $(BIN_DIR)/$(BINARY_AGENT)-$(GOOS_LOCAL)-$(GOARCH_LOCAL)$(EXE_SUFFIX)
 DATA_DIR      ?= ./data
-VERSION       ?= 0.7.31
+VERSION       ?= 0.7.32
 
 # 发布相关的仓库信息。改仓库就要改这里 —— 它同时决定：
 #   - 绿色包 systemd unit 里写死的更新源（FRPEASY_UPDATE_BASE）
@@ -39,7 +39,7 @@ BUILD_FLAGS := -trimpath
 # 文档自检脚本用 Python 跑（不引入额外依赖，Linux/macOS/Windows 都有）。
 PYTHON ?= python3
 
-.PHONY: all build stage-local web web-install web-dev dev-ui build-alpine build-alpine-amd64 build-alpine-arm64 build-arm build-386 build-windows build-android stage-agent manifest check-manifest check-docs bundle dist run tidy clean
+.PHONY: all build stage-local web web-install web-dev dev-ui build-alpine build-alpine-amd64 build-alpine-arm64 build-arm build-386 build-windows build-android stage-agent manifest check-manifest check-docs check-web-deps bundle dist run tidy clean
 
 all: build
 
@@ -173,6 +173,14 @@ check-manifest:
 # 而这些断链不会有任何报错，只是读者点过去 404。
 check-docs:
 	@$(PYTHON) tools/check_docs_links.py
+
+# 前端 effect 依赖体检：抓"依赖里含 store 数组/对象 + 里面写表单 state"的写法。
+#
+# 这类 bug 语法对、类型对、不报错，只有人坐在那儿打字才会发现 ——
+# 表现是"输入框自己清空了 / 光标被抢走"。React 不会替你判断某个 state
+# 现在代表服务端事实还是用户草稿，所以只能靠约定 + 静态检查挡住。
+check-web-deps:
+	@$(PYTHON) tools/check_effect_deps.py --strict
 
 # 绿色包：每个 linux 面板产物打一个 tar.gz（二进制 + systemd unit + 使用说明）。
 # 人手动下载时用这个；裸二进制留给一键脚本和自更新。

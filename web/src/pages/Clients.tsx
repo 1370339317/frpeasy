@@ -2,12 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import { useApp, type CommandKind } from '../store'
 import { api } from '../lib/api'
 import { copyWithHint, fmtAgo, fmtBytes } from '../lib/format'
-import type { Agent, AgentLogResponse } from '../types'
+import type { Agent, AgentLogResponse, DiscoveredService } from '../types'
 import {
   Alert,
   Button,
   Card,
-  Chip,
   Led,
   Modal,
   Pre,
@@ -213,6 +212,7 @@ function agentState(a: Agent): {
 export function Clients() {
   const {
     agents,
+    tunnels,
     install,
     uninstall,
     installBase,
@@ -220,12 +220,15 @@ export function Clients() {
     accessHost,
     loadAll,
     loadAgents,
+    setTunnelDraft,
     toast,
   } = useApp()
   const [kind, setKind] = useState<CommandKind>('linux')
   // 命令块的引用：复制失败时用它把命令原文选中，让用户长按复制。
   // 手机浏览器（尤其国产内核 / 非 HTTPS）经常禁掉 execCommand，
   // 这条"人工路径"是最后也最可靠的一条。
+  // 哪台机器的服务列表处于"展开全部"状态（按 agent id 记，互不影响）
+  const [expandedSvc, setExpandedSvc] = useState<string | null>(null)
   const installRef = useRef<HTMLPreElement | null>(null)
   const uninstallRef = useRef<HTMLPreElement | null>(null)
   const logPreRef = useRef<HTMLPreElement | null>(null)
@@ -272,6 +275,14 @@ export function Clients() {
     } catch {
       /* 快照读不到不影响主流程（用户还能看到"没有内容"） */
     }
+  }
+
+  /** 用某个服务直接建隧道：带上机器与服务地址跳到隧道页，弹窗已预填。 */
+  function newTunnelFrom(a: Agent, s: DiscoveredService) {
+    setTunnelDraft({ agentID: a.id, localAddr: s.addr, name: s.name })
+    // 用 hash 导航：useHashView 监听 hashchange，会切到「隧道」页。
+    window.location.hash = '#/tunnels'
+    toast('已带上这台机器和这个服务，起个名字就能建', 'ok')
   }
 
   /** 发起一次日志请求（也用于「重新拉取」）。 */
@@ -490,7 +501,10 @@ export function Clients() {
         </div>
       </Card>
 
-      <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(290px,1fr))]">
+      {/* auto-fit 而不是 auto-fill：auto-fill 会按 minmax 的下限铺出多列空轨道，
+          只有一台客户端时它只占最左边一格（实测 290px 宽，右侧全空），
+          服务名和地址全被截断。auto-fit 会把空轨道折叠掉，卡片自己撑开。 */}
+      <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fit,minmax(360px,1fr))]">
         {agents.length === 0 ? (
           <div className="rounded-xl border border-border bg-card px-4.5 py-4">
             <div className="text-[14.5px] font-[650]">还没有客户端</div>
@@ -501,8 +515,15 @@ export function Clients() {
         ) : (
           agents.map((a) => {
             const svcs = a.services ?? []
-            const shown = svcs.slice(0, 8)
+            // 展开状态按机器记：一台展开不影响另一台。
+            const limit = expandedSvc === a.id ? svcs.length : 8
+            const shown = svcs.slice(0, limit)
             const rest = svcs.length - shown.length
+            // 已经建过隧道的本地地址：再点一次去建只会撞同一个服务，
+            // 不如直接标出来，让用户知道这台机器上哪些服务已经通了。
+            const usedAddrs = new Set(
+              (tunnels ?? []).filter((t) => t.agent_id === a.id).map((t) => t.local_addr),
+            )
             const st = agentState(a)
             return (
               <div key={a.id} className="rounded-xl border border-border bg-card px-4.5 py-4">
@@ -621,27 +642,72 @@ export function Clients() {
                 </div>
 
                 <div className="mt-3">
-                  <label className="mb-1 block text-[12.5px] text-muted">
-                    本机探测到的服务（{svcs.length}）{rest > 0 ? '，仅显示前 8 个' : ''}
-                  </label>
-                  <div className="flex flex-wrap gap-2">
-                    {shown.length === 0 ? (
-                      <span className={cx('text-xs text-dim')}>
-                        未上报本机服务（客户端离线，或该机器上确实没有监听端口）
-                      </span>
-                    ) : (
-                      shown.map((s) => (
-                        <Chip key={s.addr} static sub={s.addr}>
-                          {s.name}
-                        </Chip>
-                      ))
-                    )}
-                    {rest > 0 && (
-                      <Chip static sub="建隧道时可全部选">
-                        还有 {rest} 个
-                      </Chip>
+                  <div className="mb-1 flex items-baseline gap-2">
+                    <label className="text-[12.5px] text-muted">
+                      本机探测到的服务（{svcs.length}）
+                    </label>
+                    {(rest > 0 || (expandedSvc === a.id && svcs.length > 8)) && (
+                      <button
+                        onClick={() => setExpandedSvc(rest > 0 ? a.id : null)}
+                        className="ml-auto shrink-0 cursor-pointer border-none bg-transparent text-[11.5px] whitespace-nowrap text-accent-fg hover:underline"
+                      >
+                        {rest > 0 ? `展开全部 ${svcs.length} 个` : '收起'}
+                      </button>
                     )}
                   </div>
+                  <div className="mb-2 text-[11.5px] leading-[1.5] text-dim">
+                    点「建隧道」会用这台机器和这个服务直接开单，不用在弹窗里再选一遍。
+                  </div>
+                  {shown.length === 0 ? (
+                    <div className="rounded-[9px] border border-dashed border-border2 px-3 py-2.5 text-xs text-dim">
+                      未上报本机服务（客户端离线，或该机器上确实没有监听端口）。
+                      也可以直接到「隧道」页手填 host:port 建一条。
+                    </div>
+                  ) : (
+                    <div className="grid gap-1.5 min-[560px]:grid-cols-2">
+                      {shown.map((s) => {
+                        const used = usedAddrs.has(s.addr)
+                        return (
+                          <div
+                            key={s.addr}
+                            className={cx(
+                              'flex items-center gap-2 rounded-[9px] border px-2.5 py-1.5 transition',
+                              used
+                                ? 'border-border bg-card2/60'
+                                : 'border-border2 bg-chip hover:border-accent',
+                            )}
+                          >
+                            {/* 置信度 3 = 面板根据进程名/端口判断它大概率是主服务，值得优先看 */}
+                            <span
+                              className={cx(
+                                'h-1.5 w-1.5 shrink-0 rounded-full',
+                                s.confidence >= 3 ? 'bg-accent' : 'bg-border3',
+                              )}
+                              title={s.confidence >= 3 ? '高置信度：大概率是主服务' : '低置信度'}
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-[12.5px] font-medium">{s.name}</div>
+                              <div className="truncate font-mono text-[11px] text-dim">
+                                {s.addr}
+                              </div>
+                            </div>
+                            {used ? (
+                              <span className="shrink-0 text-[11px] text-dim">已有隧道</span>
+                            ) : (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="touch-copy shrink-0 whitespace-nowrap px-2 py-0.5"
+                                onClick={() => newTunnelFrom(a, s)}
+                              >
+                                建隧道 →
+                              </Button>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
             )

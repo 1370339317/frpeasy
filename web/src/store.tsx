@@ -67,10 +67,30 @@ interface AppData {
   panelPort: string
 }
 
+/**
+ * 从「客户端」页跳到「隧道」页时带上的一笔草稿。
+ *
+ * 用途：客户端卡片里点某个探测到的服务，直接带着"哪台机器 + 哪个服务"去
+ * 打开新建隧道弹窗，不用让用户在新弹窗里再选一遍机器、再抄一次端口。
+ *
+ * 这是一次性交接：Tunnels 页读到后立刻清空（见 consumeTunnelDraft），
+ * 否则轮询重渲染会让弹窗反复打开。
+ */
+export interface TunnelDraft {
+  agentID: string
+  localAddr: string
+  /** 预填的隧道名（默认用服务名，用户可改） */
+  name?: string
+}
+
 interface AppContextValue extends AppData {
   agentMap: Record<string, Agent>
   /** 数据是否至少加载过一次（用于首屏骨架） */
   ready: boolean
+  /** 跨页的一次性建隧道草稿；null 表示没有待处理 */
+  tunnelDraft: TunnelDraft | null
+  /** 写入草稿（由 Clients 页在点击服务时调用） */
+  setTunnelDraft: (d: TunnelDraft | null) => void
   loadAll: () => Promise<void>
   /** 返回最新隧道数组：轮询"是否全部恢复在线"时要用到返回值 */
   loadTunnels: () => Promise<Tunnel[]>
@@ -126,6 +146,9 @@ export function AppProvider({
   const [ready, setReady] = useState(false)
   const [theme, setThemeState] = useState<Theme>(() => readStoredTheme())
   const [toasts, setToasts] = useState<ToastItem[]>([])
+  // 跨页交接的建隧道草稿。只在用户点击"用这个服务建隧道"时写入，
+  // 不属于轮询数据，所以不会被 5 秒刷新冲掉。
+  const [tunnelDraft, setTunnelDraft] = useState<TunnelDraft | null>(null)
   const toastId = useRef(0)
 
   // 主题落到 <html data-theme>，颜色由 CSS 变量驱动
@@ -289,6 +312,8 @@ export function AppProvider({
       ...data,
       agentMap,
       ready,
+      tunnelDraft,
+      setTunnelDraft,
       loadAll,
       loadTunnels,
       loadAgents,
@@ -308,6 +333,7 @@ export function AppProvider({
       data,
       agentMap,
       ready,
+      tunnelDraft,
       loadAll,
       loadTunnels,
       loadAgents,

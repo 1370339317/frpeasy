@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useApp } from '../store'
+import { useApp, type TunnelDraft } from '../store'
 import { api } from '../lib/api'
 import { fmtAgo } from '../lib/format'
 import {
@@ -25,11 +25,14 @@ import type { Tunnel, TunnelBody } from '../types'
 export function TunnelModal({
   open,
   tunnel,
+  prefill,
   onClose,
   onSaved,
 }: {
   open: boolean
   tunnel: Tunnel | null
+  /** 从「客户端」页点某个服务带过来的草稿：机器 + 服务地址 + 建议的名字 */
+  prefill?: TunnelDraft | null
   onClose: () => void
   onSaved: () => void
 }) {
@@ -48,8 +51,8 @@ export function TunnelModal({
   //
   // 正确模型：表单的初值只由"打开弹窗的那一瞬间"决定。
   // args 放进 ref 只是为了在打开时读到最新值，不参与依赖比较。
-  const seedRef = useRef({ tunnel, agents })
-  seedRef.current = { tunnel, agents }
+  const seedRef = useRef({ tunnel, agents, prefill })
+  seedRef.current = { tunnel, agents, prefill }
   const seededRef = useRef(false)
 
   useEffect(() => {
@@ -60,16 +63,18 @@ export function TunnelModal({
     }
     if (seededRef.current) return
     seededRef.current = true
-    const { tunnel: t, agents: ags } = seedRef.current
-    setName(t?.name ?? '')
-    setLocal(t?.local_addr ?? '')
+    const { tunnel: t, agents: ags, prefill: pf } = seedRef.current
+    // 预填优先于"编辑回填"：从客户端页点进来时 t 一定是 null，
+    // 但把它写在前面能保证以后两种入口都用同一套取值顺序。
+    setName(pf?.name ?? t?.name ?? '')
+    setLocal(pf?.localAddr ?? t?.local_addr ?? '')
     // 编辑时把当前公网端口填出来。原来这里永远是空的，用户想改端口
     // 得先去列表里看一眼现在是多少，否则不知道该填什么。
     // 清空后再保存仍是"保留原端口"（后端只在 manual_port>0 时才改），不会误换。
     setPort(t ? String(t.public_port || '') : '')
     // 「只有一台机器就默认选中它」同样只在打开时判断一次：
     // 跟着轮询走的话，用户主动点了「先不部署」也会被改回去。
-    setAgentID(t?.agent_id ?? (ags.length === 1 ? ags[0].id : ''))
+    setAgentID(pf?.agentID || t?.agent_id || (ags.length === 1 ? ags[0].id : ''))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 

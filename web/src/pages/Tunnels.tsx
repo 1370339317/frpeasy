@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { useApp } from '../store'
+import { useEffect, useState } from 'react'
+import { useApp, type TunnelDraft } from '../store'
 import { api } from '../lib/api'
 import { copyWithHint, fmtBytes } from '../lib/format'
 import { Badge, Button, Card, Empty, Table, Td, Led } from '../components/ui'
@@ -30,9 +30,27 @@ function StateBadge({ t }: { t: Tunnel }) {
 }
 
 export function Tunnels() {
-  const { tunnels, agentMap, frps, accessHost, accessSource, loadTunnels, toast } = useApp()
+  const { tunnels, agentMap, frps, accessHost, accessSource, loadTunnels, tunnelDraft, setTunnelDraft, toast } = useApp()
   const [editing, setEditing] = useState<Tunnel | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
+  // 从「客户端」页带过来的建隧道草稿（哪台机器 + 哪个服务）。
+  // 只在交接那一刻消费一次，消费后清空 —— 否则轮询重渲染会把弹窗反复打开。
+  const [prefill, setPrefill] = useState<TunnelDraft | null>(null)
+
+  useEffect(() => {
+    if (!tunnelDraft) return
+    setEditing(null)
+    setPrefill(tunnelDraft)
+    setModalOpen(true)
+    setTunnelDraft(null)
+  }, [tunnelDraft, setTunnelDraft])
+
+  /** 这条隧道的本地地址对应客户端上报的哪个服务（认不出返回空串）。 */
+  function svcNameOf(t: Tunnel): string {
+    const ag = t.agent_id ? agentMap[t.agent_id] : null
+    const hit = (ag?.services ?? []).find((s) => s.addr === t.local_addr)
+    return hit?.name ?? ''
+  }
 
   const readOnly = frps?.running && frps.port_alive && frps.dashboard_ok
   const srcText =
@@ -107,7 +125,21 @@ export function Tunnels() {
                     )}
                   </Td>
                   <Td>
-                    <span className="font-mono">{t.local_addr}</span>
+                    {/* 只显示 host:port 时，用户看不出这条隧道实际穿透的是什么服务
+                        （127.0.0.1:8788 到底是网盘、面板还是别的）。客户端上报过服务名
+                        就一起显示，认不出来才退回纯地址。 */}
+                    {svcNameOf(t) ? (
+                      <span className="block">
+                        <b className="block max-w-[12rem] truncate font-medium" title={svcNameOf(t)}>
+                          {svcNameOf(t)}
+                        </b>
+                        <span className="block font-mono text-[11.5px] text-dim">
+                          {t.local_addr}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="font-mono">{t.local_addr}</span>
+                    )}
                   </Td>
                   <Td>
                     {/* 以后端下发的 access_url 为准（已按当前公网地址推导）；
@@ -165,7 +197,12 @@ export function Tunnels() {
       <TunnelModal
         open={modalOpen}
         tunnel={editing}
-        onClose={() => setModalOpen(false)}
+        prefill={prefill}
+        onClose={() => {
+          setModalOpen(false)
+          // 关掉就把草稿丢掉，下次从客户端点进来才是新的一份
+          setPrefill(null)
+        }}
         onSaved={() => {
           setModalOpen(false)
           void loadTunnels()

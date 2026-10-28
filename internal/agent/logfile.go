@@ -47,9 +47,38 @@ func SetupFileLog(dataDir string) (func(), error) {
 	if err != nil {
 		return noop, err
 	}
-	log.SetOutput(io.MultiWriter(os.Stderr, f))
+	log.SetOutput(&logSink{f: f, also: os.Stderr})
 	log.SetFlags(log.LstdFlags)
 	return func() { _ = f.Close() }, nil
+}
+
+// logSink 把日志写进文件，同时尽力复制一份到 stderr。
+//
+// **不能用 io.MultiWriter**：它的语义是"依次写，遇到第一个错误就返回"，
+// 后面的 writer 根本不会被调用。而 Windows 计划任务启动的进程**没有控制台**，
+// 往 os.Stderr 写会直接失败 —— 于是 MultiWriter 在第一步就返回错误，
+// 真正该写进去的文件一行都没收到。
+//
+// 这不是理论问题：线上客户端就是这么丢掉整段日志的 —— 进程活了 4 小时、
+// 期间反复尝试下载、却只在 agent.log 里留下启动那两行，排查时完全看不到
+// "它在干什么、卡在哪"，只能靠翻文件系统里残留的临时文件去猜。
+//
+// 所以顺序反过来：文件是唯一可信的目的地（写失败才算失败），
+// stderr 只是"顺手复制给前台看"，失败就忽略。
+type logSink struct {
+	mu   sync.Mutex
+	f    *os.File
+	also io.Writer
+}
+
+func (w *logSink) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.also != nil {
+		// 忽略错误：没有控制台是常态，不是故障。
+		_, _ = w.also.Write(p)
+	}
+	return w.f.Write(p)
 }
 
 // rotateLog 超过上限就滚成 .1（旧的 .1 直接丢掉）。
