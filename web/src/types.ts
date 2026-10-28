@@ -474,6 +474,23 @@ export interface TuningResponse {
   max_pool_count: number
 }
 
+/** 链路自检的单个目标结果。 */
+export interface DiagnoseItem {
+  key: string
+  name: string
+  /** 字节/秒 */
+  speed: number
+  bytes: number
+  ms: number
+  ok: boolean
+  error: string
+}
+
+export interface DiagnoseResponse {
+  items: DiagnoseItem[]
+  advice: string
+}
+
 export interface SettingsSaveResult {
   ok?: boolean
   public_addr_changed?: boolean

@@ -212,6 +212,8 @@ func (p *Panel) Run(listen string) error {
 	// 纯 KV 表，混进派生值会让"保存时只提交改动项"的逻辑变复杂）。
 	mux.HandleFunc("GET /api/system/tuning", p.requireAuth(p.tuningHandler))
 	mux.HandleFunc("POST /api/system/tuning", p.requireAuth(p.tuningHandler))
+	// 链路自检：从服务器侧量几个关键目标的实际速度，用一句话给出结论。
+	mux.HandleFunc("POST /api/system/diagnose", p.requireAuth(p.diagnoseHandler))
 	mux.HandleFunc("GET /api/system/versions", p.requireAuth(p.systemVersionsHandler))
 	mux.HandleFunc("GET /api/system/mirror-test", p.requireAuth(p.systemMirrorTestHandler))
 	// 排优 / 下载记录：回答「刚才那次到底走了哪个源、为什么」。

@@ -17,6 +17,7 @@ import type {
   Settings as SettingsShape,
   SettingsBody,
   SettingsSaveResult,
+  DiagnoseResponse,
   SourceEvent,
   SourceEventsResponse,
   TuningCongestion,
@@ -281,6 +282,9 @@ export function SettingsPage() {
   const [compress, setCompress] = useState<'1' | '0'>((draft?.compress as '1' | '0') ?? '1')
   const [tuning, setTuning] = useState<TuningResponse | null>(null)
   const [tuningBusy, setTuningBusy] = useState(false)
+  // 链路自检结果。一次约 12 秒（两个目标各 6 秒上限），期间按钮转圈。
+  const [diag, setDiag] = useState<DiagnoseResponse | null>(null)
+  const [diagBusy, setDiagBusy] = useState(false)
   const [token, setToken] = useState('')
   const [pass, setPass] = useState('')
   const [saving, setSaving] = useState(false)
@@ -403,6 +407,22 @@ export function SettingsPage() {
       toast((e as Error).message, 'bad')
     } finally {
       setTuningBusy(false)
+    }
+  }
+
+  // 链路自检：让服务器自己测一遍到国内/境外的速度。
+  //
+  // 这一步回答的是"服务器出网有没有问题"，排除掉这一层之后，
+  // 隧道慢就只能在客户端那段链路或 frp 传输参数里找原因了。
+  async function runDiagnose() {
+    if (diagBusy) return
+    setDiagBusy(true)
+    try {
+      setDiag(await api<DiagnoseResponse>('POST', '/api/system/diagnose', {}))
+    } catch (e) {
+      toast((e as Error).message, 'bad')
+    } finally {
+      setDiagBusy(false)
     }
   }
 
@@ -990,6 +1010,59 @@ export function SettingsPage() {
                 面板只管理服务器上的 frps，而拥塞控制是服务器内核的事，所以在非 Linux 面板上这栏不适用。
               </span>
             )}
+          </div>
+        )}
+      </Card>
+
+      {/* ---------------- 链路自检 ---------------- */}
+      {/* 隧道慢的时候，第一个要回答的问题是「服务器出网有没有问题」。
+          以前这一步只能登服务器手工 curl 几个目标对比，现在做进面板：
+          一次点击，服务器自己测一遍到国内/境外的速度，并给出可读结论。 */}
+      <Card
+        title="链路自检"
+        desc="从服务器侧实测到国内 / 境外的速度，用一句话判断瓶颈在哪"
+      >
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="min-w-0 flex-1 text-xs leading-[1.6] text-dim">
+            排除「服务器本身出不去」这一层。若这里都正常，隧道慢的原因就在
+            <b className="text-fg"> 客户端到服务器这一段</b>，或者 frp 的传输参数。
+            单个目标最多测 6 秒、12MB。
+          </div>
+          <Button className="shrink-0" disabled={diagBusy} onClick={() => void runDiagnose()}>
+            {diagBusy ? '检测中…（约 12 秒）' : '开始自检'}
+          </Button>
+        </div>
+
+        {diag && (
+          <div className="mt-3">
+            <div className="grid gap-1.5">
+              {diag.items.map((it) => (
+                <div
+                  key={it.key}
+                  className="flex flex-wrap items-center gap-2 rounded-[9px] border border-border2 bg-chip px-2.5 py-1.5"
+                >
+                  <span className="min-w-0 flex-1 truncate text-[12.5px]">{it.name}</span>
+                  {it.ok ? (
+                    <b
+                      className={cx(
+                        'shrink-0 font-mono text-[12.5px]',
+                        it.speed >= 1 << 20 ? 'text-ok-fg' : 'text-warn-fg',
+                      )}
+                    >
+                      {(it.speed / 1024 / 1024).toFixed(2)} MB/s
+                    </b>
+                  ) : (
+                    <span className="shrink-0 text-[12px] text-bad-fg">{it.error || '失败'}</span>
+                  )}
+                  <span className="shrink-0 font-mono text-[11px] text-dim">
+                    {(it.bytes / 1024 / 1024).toFixed(1)}MB / {it.ms}ms
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2.5 rounded-lg border border-accent/30 bg-accent-dim px-3 py-2 text-[12.5px] leading-[1.65]">
+              {diag.advice}
+            </div>
           </div>
         )}
       </Card>
