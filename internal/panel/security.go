@@ -29,8 +29,17 @@ type securityItem struct {
 
 const sshdConfigPath = "/etc/ssh/sshd_config"
 
-// checkSecurity 跑一遍检查。
+// checkSecurity 跑一遍检查（用系统的 sshd 配置路径）。
 func (p *Panel) checkSecurity() []securityItem {
+	return p.checkSecurityAt(sshdConfigPath)
+}
+
+// checkSecurityAt 同 checkSecurity，但可以指定 sshd 配置路径。
+//
+// 单独抽出来只是为了让测试能注入临时路径 —— 否则测试只能在"有 sshd 的 Linux"
+// 或"没有它的 Windows"里二选一，在另一种环境上必然失败（第一次跑 CI 就栽在这：
+// 本地 Windows 假定没有 sshd_config，而 CI 是 Ubuntu，那里有）。
+func (p *Panel) checkSecurityAt(sshdPath string) []securityItem {
 	items := []securityItem{}
 
 	// 1) 面板管理员口令
@@ -54,7 +63,7 @@ func (p *Panel) checkSecurity() []securityItem {
 	// 2) SSH：root 直登 + 密码登录
 	// 面板跑在公网 VPS 上，SSH 的 22 端口是全互联网扫描的重点目标。
 	// 两者同时开着，等于把 root 口令暴露在无限次尝试之下。
-	cfg, err := readSSHDConfig(sshdConfigPath)
+	cfg, err := readSSHDConfig(sshdPath)
 	if err != nil {
 		// 读不到（非 Linux / 容器 / 没装 sshd）就不报这一项 ——
 		// 不能因为"看不见"就断言"有问题"。

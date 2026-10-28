@@ -48,14 +48,17 @@ func TestReadSSHDConfigRespectsOverrideOrder(t *testing.T) {
 	}
 }
 
-// 没有 sshd_config（非 Linux / 容器）时只返回口令那一条，
+// 读不到 sshd_config（容器 / 非 Linux）时只返回口令那一条，
 // 不能因为看不见就去断言 SSH 有问题。
+//
+// 用注入的路径而非真实路径：真实路径在不同环境里有时有、有时没有，
+// 把测试绑死在"这台机器上有没有 /etc/ssh/sshd_config"上必然在另一种环境失败。
 func TestSecuritySkipsSSHWhenConfigMissing(t *testing.T) {
 	db := newTestDB(t)
 	p := &Panel{db: db}
 	_ = db.SetSetting("admin_pass", "admin")
 
-	items := p.checkSecurity()
+	items := p.checkSecurityAt(filepath.Join(t.TempDir(), "no-such-sshd_config"))
 	ids := map[string]bool{}
 	for _, it := range items {
 		ids[it.ID] = true
@@ -63,7 +66,6 @@ func TestSecuritySkipsSSHWhenConfigMissing(t *testing.T) {
 	if !ids["admin_pass"] {
 		t.Fatal("口令检查必须始终存在")
 	}
-	// 本机是 Windows，没有 /etc/ssh/sshd_config
 	if ids["ssh_root_login"] || ids["ssh_password_auth"] {
 		t.Fatalf("读不到 sshd 配置时不应报告 SSH 项，实际: %v", ids)
 	}
@@ -75,7 +77,8 @@ func TestSecurityFlagsDefaultPassword(t *testing.T) {
 	p := &Panel{db: db}
 
 	_ = db.SetSetting("admin_pass", "admin")
-	items := p.checkSecurity()
+	absent := filepath.Join(t.TempDir(), "absent")
+	items := p.checkSecurityAt(absent)
 	if len(items) == 0 || items[0].ID != "admin_pass" {
 		t.Fatalf("第一项应是口令检查: %+v", items)
 	}
@@ -84,7 +87,7 @@ func TestSecurityFlagsDefaultPassword(t *testing.T) {
 	}
 
 	_ = db.SetSetting("admin_pass", "a-real-password")
-	items = p.checkSecurity()
+	items = p.checkSecurityAt(absent)
 	if !items[0].OK {
 		t.Fatal("改过口令后应判为通过")
 	}
