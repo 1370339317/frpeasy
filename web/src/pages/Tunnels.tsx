@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { useApp, type TunnelDraft } from '../store'
 import { api } from '../lib/api'
 import { copyWithHint, fmtBytes } from '../lib/format'
-import { Badge, Button, Card, Empty, Table, Td, Led } from '../components/ui'
+import { Badge, Button, Card, Empty, Table, Td, Led, cx } from '../components/ui'
 import type { Tunnel, TunnelProbeResult } from '../types'
 import { TunnelModal } from './TunnelModal'
 
@@ -239,10 +239,24 @@ export function Tunnels() {
                           </span>
                         )
                       }
+                      // 两个数字分工不同：
+                      //   吞吐 = 传大文件的能力（窗口内反复请求测出来）
+                      //   单次 = 打开这个服务一次要等多久（体感，受 RTT 支配）
+                      // 网页应用由很多小请求组成，卡不卡主要看后者。
                       return (
-                        <span className="block whitespace-nowrap text-[11px] text-ok-fg">
+                        <span
+                          className="block whitespace-nowrap text-[11px] text-ok-fg"
+                          title={`窗口内请求 ${pr.requests} 次，共 ${fmtBytes(pr.bytes)}；单次是第一个请求从发出到读完的耗时`}
+                        >
                           实测 {pr.speed > 0 ? `${fmtBytes(pr.speed)}/s` : '—'}
-                          <span className="ml-1 text-dim">RTT {pr.rtt_ms}ms</span>
+                          <span
+                            className={cx(
+                              'ml-1',
+                              pr.first_ms > 500 ? 'text-bad-fg' : pr.first_ms > 250 ? 'text-warn-fg' : 'text-dim',
+                            )}
+                          >
+                            · 单次 {pr.first_ms}ms
+                          </span>
                         </span>
                       )
                     })()}

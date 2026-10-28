@@ -501,10 +501,15 @@ export interface TunnelProbeResult {
   tunnel_id: number
   /** TCP 握手往返（毫秒），经隧道，含客户端↔服务器那段 */
   rtt_ms: number
-  /** 稳态吞吐（字节/秒）；非 HTTP 服务为 0 */
+  /** 第一个请求的完整耗时（毫秒）—— 打开这个服务一次要等多久，体感数字 */
+  first_ms: number
+  first_bytes: number
+  /** 窗口内反复请求的平均吞吐（字节/秒）；非 HTTP 服务为 0 */
   speed: number
   bytes: number
   ms: number
+  /** 窗口内发了几次请求。1 表示响应太大只测到一次 */
+  requests: number
   /** 目标是否是 HTTP 服务；false 表示只测了连通性与延迟 */
   http: boolean
   ok: boolean
