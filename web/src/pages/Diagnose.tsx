@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useApp } from '../store'
 import { api } from '../lib/api'
-import { fmtBytes } from '../lib/format'
+import { fmtAgo, fmtBytes } from '../lib/format'
 import { Button, Card, Field, Hint, Select, cx } from '../components/ui'
 import type { TunnelProbeResult } from '../types'
 
@@ -690,16 +690,21 @@ export function DiagnosePage() {
                 而且 toneOfSpeed 也随之判成"极慢"，等于把好链路报成坏链路。 */}
             <Lines
               rows={[
+                // 必须带上"多久前测的"：这两个数字来自客户端自测，而定期自测
+                // 是可以关掉的。不标时间的话，用户会拿几小时前的数字当现在的能力，
+                // 于是"上面写着 2.6MB/s，实际却卡"—— 数据没错，是时间错了。
                 [
                   '下行（服务器→客户端）',
                   agent && agent.down_kbps > 0
-                    ? `${fmtBytes(agent.down_kbps * 125)}/s`
+                    ? `${fmtBytes(agent.down_kbps * 125)}/s（${fmtAgo(agent.speed_at)}测）`
                     : '未测',
                   agent && agent.down_kbps > 0 ? toneOfSpeed(agent.down_kbps * 125) : 'dim',
                 ],
                 [
                   '上行（客户端→服务器）',
-                  agent && agent.up_kbps > 0 ? `${fmtBytes(agent.up_kbps * 125)}/s` : '未测',
+                  agent && agent.up_kbps > 0
+                    ? `${fmtBytes(agent.up_kbps * 125)}/s（${fmtAgo(agent.speed_at)}测）`
+                    : '未测',
                   agent && agent.up_kbps > 0 ? toneOfSpeed(agent.up_kbps * 125) : 'dim',
                 ],
               ]}
