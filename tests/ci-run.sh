@@ -21,7 +21,13 @@ echo "::error::「$*」失败（exit $rc），下面是关键行"
 
 # 先挑信号最强的行：测试失败、panic、编译错误。注解有条数上限，
 # 直接 tail 一大段会挤掉真正有用的那几行。
-picked=$(grep -aE '(--- FAIL|^\s+--- FAIL|^FAIL|panic:|_test\.go:[0-9]+:|cannot |undefined:)' "$log" | head -8)
+# 顺序很重要：**断言消息**（`xxx_test.go:146: 应成功转发，实际 502（…）`）
+# 比只有测试名的 `--- FAIL: TestX` 有用得多。第一次抓注解时把这两个混在一起取
+# head -8，结果 8 行全被 FAIL 行占满、真正的失败原因被挤掉了，白等一轮 CI。
+picked=$(grep -aE '(_test\.go:[0-9]+:|panic:|cannot |undefined:|Error:)' "$log" | head -8)
+if [ -z "$picked" ]; then
+  picked=$(grep -aE '(--- FAIL|^FAIL)' "$log" | head -8)
+fi
 if [ -z "$picked" ]; then
   # 没有典型的失败标记（比如 npm / make 报错）：退回最后几行
   picked=$(tail -8 "$log")
