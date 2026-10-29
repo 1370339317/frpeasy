@@ -538,6 +538,8 @@ export function DiagnosePage() {
   // 关闭 tcpMux 时结论要优先指向它 —— 这是实测代价最大的一项配置。
   const muxOff = settings?.tunnel_tcp_mux === '0'
   const verdict = done ? buildVerdict(s3, s1, s2, muxOff) : null
+  // 同时存在的其他问题一起列出来，避免"修完一条再测一次、白等一轮"。
+  const extras = done && verdict ? extraFindings(s3, s1, s2, muxOff, verdict.title) : []
 
   return (
     <>
@@ -688,6 +690,30 @@ export function DiagnosePage() {
           </div>
         )}
 
+        {/* 主结论之外的其他发现。
+            一次体检常常同时命中好几个独立问题（丢包 + ② 转发损耗 + 上行极慢），
+            只报一条会让人修完一处再来测一次，白等一轮。 */}
+        {extras.length > 0 && (
+          <div className="mt-2.5 rounded-lg border border-border2 bg-chip px-3.5 py-2.5">
+            <div className="mb-1 text-[12px] font-[650] text-fg">
+              同时还发现 {extras.length} 项
+            </div>
+            <ul className="grid gap-1 text-[12px] leading-[1.65]">
+              {extras.map((e, i) => (
+                <li key={i} className="flex gap-1.5">
+                  <span
+                    className={cx(
+                      'mt-[7px] inline-block h-1.5 w-1.5 shrink-0 rounded-full',
+                      e.tone === 'bad' ? 'bg-bad-fg' : 'bg-warn-fg',
+                    )}
+                  />
+                  <span className={e.tone === 'bad' ? 'text-bad-fg' : 'text-warn-fg'}>{e.text}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {/* mux 关着就始终提醒一句，不管这次测快还是测慢。
             原因：它是"二值分布"——关掉之后有时也能跑到 2.9MB/s，
             单次测量碰巧撞上快的那一档就不会触发结论里的那条判断。
@@ -739,6 +765,75 @@ export function DiagnosePage() {
       </Card>
     </>
   )
+}
+
+/**
+ * 除主结论之外的**其他发现**。
+ *
+ * 为什么需要：这三段是同时测量、互相独立的问题源，一次体检可能同时命中好几条。
+ * 之前只报"最严重的那一条"，用户看到"链路在丢包"就以为只有这一个问题 ——
+ * 而实测里 ② 只有 ① 的 1/5 这种"转发损耗"、上行极慢、mux 关着，往往同时存在。
+ * 只报一条等于让人修完一处再回来测第二次，白等一轮。
+ *
+ * 与主结论重复的项按关键词跳过，避免同一件事说两遍。
+ */
+function extraFindings(
+  s3: BrowserSeg,
+  s1: TunnelProbeResult | null,
+  s2: ProxySeg,
+  muxOff: boolean,
+  mainTitle: string,
+): { tone: 'ok' | 'warn' | 'bad'; text: string }[] {
+  const out: { tone: 'ok' | 'warn' | 'bad'; text: string }[] = []
+  const said = (kw: string) => mainTitle.includes(kw)
+
+  if (muxOff && !said('tcpMux')) {
+    out.push({
+      tone: 'bad',
+      text: '「关闭 TCP 多路复用」是开着的。它会让速度在两档之间乱跳（3~6MB/s 与 20~60KB/s），建议取消勾选。',
+    })
+  }
+  if (s3.sampleCount > 0 && s3.slowCount / s3.sampleCount >= 0.1 && !said('丢包')) {
+    out.push({
+      tone: 'bad',
+      text: `延迟有抖动：${s3.slowCount}/${s3.sampleCount} 次请求超过中位数两倍（p95 ${Math.round(s3.rttP95)}ms）。丢包导致的 TCP 重传退避，参数改不了。`,
+    })
+  }
+  if (s3.upErr && s3.down > 0 && !said('上行')) {
+    out.push({
+      tone: 'warn',
+      text: `上行传不完（${s3.upErr}）而下行有 ${fmtBytes(s3.down)}/s。影响「从你这台机器往外发」的所有大流量。`,
+    })
+  }
+  if (s1 && s1.http && s1.speed > 0 && s2.state === 'done' && s2.speed > 0 && !said('②')) {
+    const ratio = Math.max(s1.speed, s2.speed) / Math.min(s1.speed, s2.speed)
+    const slower = s2.speed < s1.speed
+    if (ratio >= 2.5) {
+      out.push({
+        tone: 'warn',
+        text: `② 与 ① ${slower ? '慢' : '快'} ${ratio.toFixed(1)} 倍（${fmtBytes(s2.speed)}/s vs ${fmtBytes(s1.speed)}/s）。② 多绕一次面板转发，正常应接近 ①；差得多说明转发这一环有损耗，或这一轮恰好撞上卡顿。`,
+      })
+    }
+  }
+  if (s1 && s1.ok && s1.http && s1.first_ms > 500 && !said('单次')) {
+    out.push({
+      tone: 'warn',
+      text: `单次请求 ${s1.first_ms}ms（首字节 ${s1.ttfb_ms}ms）。网页由几十个小请求组成，卡不卡主要看这个数。`,
+    })
+  }
+  if (s3.rtt > 150 && !said('延迟偏高')) {
+    out.push({
+      tone: 'warn',
+      text: `到服务器的基础延迟 ${Math.round(s3.rtt)}ms，是物理距离决定的，软件层换不回来。`,
+    })
+  }
+  if (s1 && s1.attempts > 1) {
+    out.push({
+      tone: 'bad',
+      text: `隧道首次探测抽到了失效连接（第 ${s1.attempts} 次才通）。连接池里的旧连接被网络设备回收了，升级客户端可解决。`,
+    })
+  }
+  return out
 }
 
 function segTone(s: SegState): 'ok' | 'bad' | 'warn' | 'idle' {
