@@ -747,9 +747,10 @@ export function DiagnosePage() {
           <p>
             <b className="text-fg">② 你 → 隧道 → 服务</b>
             {' '}
-            经面板同源转发，一次计时覆盖 ③+①。它比 min(③, ①) 低很多时，问题出在「转发」这一环 ——
-            要么是 frp 的传输参数（连接池、mux），要么是面板代理本身的串行读写开销。
-            两者要分开：先关掉 tcpMux 再测一次做对照，那是你能控制的变量。
+            经面板同源转发，一次计时覆盖 ③+①。<b className="text-fg">它本来就比 ① 低 2~5 倍</b>
+            ——因为除了读隧道，还要再把数据串行写一遍给浏览器（实测 ① 5.0MB/s 时，
+            curl 直测 ② 是 1.9MB/s，浏览器里再降到 1.2MB/s）。所以 ② 是用来回答
+            「我实际能拿到多少」的，不是用来衡量隧道能力的。差超过 5 倍才说明转发这一环有问题。
           </p>
           <p>
             <b className="text-fg">关于「单次请求」</b>
@@ -805,13 +806,16 @@ function extraFindings(
       text: `上行传不完（${s3.upErr}）而下行有 ${fmtBytes(s3.down)}/s。影响「从你这台机器往外发」的所有大流量。`,
     })
   }
+  // ② 比 ① 低是**常态**，不是故障：② 除了读隧道，还要再把数据写一遍给浏览器，
+  // 这一段是串行的。实测 ① 5.0MB/s 时 curl 直测 ② 是 1.9MB/s（2.6 倍），
+  // 浏览器再降一档到 1.2MB/s（约 4 倍）。所以阈值取 5 倍 ——
+  // 低于 5 倍不报警，否则会把正常现象当成问题，让人去修一个不存在的东西。
   if (s1 && s1.http && s1.speed > 0 && s2.state === 'done' && s2.speed > 0 && !said('②')) {
     const ratio = Math.max(s1.speed, s2.speed) / Math.min(s1.speed, s2.speed)
-    const slower = s2.speed < s1.speed
-    if (ratio >= 2.5) {
+    if (ratio >= 5) {
       out.push({
         tone: 'warn',
-        text: `② 与 ① ${slower ? '慢' : '快'} ${ratio.toFixed(1)} 倍（${fmtBytes(s2.speed)}/s vs ${fmtBytes(s1.speed)}/s）。② 多绕一次面板转发，正常应接近 ①；差得多说明转发这一环有损耗，或这一轮恰好撞上卡顿。`,
+        text: `② 与 ① 差 ${ratio.toFixed(1)} 倍（${fmtBytes(s2.speed)}/s vs ${fmtBytes(s1.speed)}/s）。② 本身就会比 ① 低 2~5 倍（多一次串行转发），超过这个范围才说明转发这一环有问题。`,
       })
     }
   }
