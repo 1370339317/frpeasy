@@ -498,14 +498,18 @@ const (
 	// 4MB 时 1MB/s 的慢链路要 4 秒（可接受），10MB/s 的要 0.4 秒（够采样）。
 	// 注意面板侧 /api/speedtest 必须允许这个大小，两边要一起改。
 	speedTestBytes       = 4 << 20
-	// 上行测量分块：每块 64KB、最多 8 块（512KB 上限）、单块 8 秒超时。
+	// 上行测量分块：每块 512KB、最多 4 块（2MB 上限）、单块 15 秒超时。
 	//
-	// 不能像下行那样一次推 4MB：用户上行实测会掉到 4KB/s，4MB 要 1000 秒，
-	// 会把测速 worker 完全堵死（而它同时还要回应面板的一次性请求）。
-	// 分块后能自适应：快链路跑满 8 块，慢链路传一两块就停，用已完成的部分算速率。
-	upChunkSize    = 64 << 10
-	upMaxChunks    = 8
-	upChunkTimeout = 8 * time.Second
+	// 分块是为了不让慢链路把测速 worker 堵死（用户上行会掉到 4KB/s，
+	// 一次推 4MB 要一千秒）。**但块不能太小** —— 每块都要等一个 RTT 的确认，
+	// 串行上传的吞吐上限就是 块大小 ÷ RTT：
+	//     64KB ÷ 100ms = 640KB/s   ← 最初按 64KB 分块，测出来正好 691KB/s，
+	//                                 而同一时刻隧道同方向能跑 6.5MB/s，差 10 倍。
+	// 也就是说那个数字测的是 RTT，不是带宽。512KB 把上限提到 ~5MB/s（40Mbps），
+	// 覆盖家宽上行的常见范围；超过 40Mbps 的上行会被低估，可接受的取舍。
+	upChunkSize    = 512 << 10
+	upMaxChunks    = 4
+	upChunkTimeout = 15 * time.Second
 	// speedMinInterval 防止面板下发一个荒谬的值（比如 1 秒）把链路打满。
 	speedMinInterval = time.Minute
 )

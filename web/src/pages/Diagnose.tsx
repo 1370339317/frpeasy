@@ -632,17 +632,23 @@ export function DiagnosePage() {
             {/* 客户端自测的上下行（agent ↔ 面板，不经过隧道）。
                 这两行是回答"那条宽带到底上下行各多少"的唯一数据源：
                 隧道测速只能测出一个方向，而家宽的上下行常常差几十倍。 */}
+            {/* 单位换算：down_kbps/up_kbps 是 **kbps**（千比特/秒），
+                而 fmtBytes 要的是**字节/秒**。换算 = kbps × 1000 ÷ 8 = kbps × 125。
+                之前这里写成 /8，结果 12.2MB/s 被显示成 12.2KB/s —— 小了 1000 倍，
+                而且 toneOfSpeed 也随之判成"极慢"，等于把好链路报成坏链路。 */}
             <Lines
               rows={[
                 [
                   '下行（服务器→客户端）',
-                  agent && agent.down_kbps > 0 ? `${fmtBytes(agent.down_kbps / 8)}/s` : '未测',
-                  agent && agent.down_kbps > 0 ? toneOfSpeed(agent.down_kbps / 8) : 'dim',
+                  agent && agent.down_kbps > 0
+                    ? `${fmtBytes(agent.down_kbps * 125)}/s`
+                    : '未测',
+                  agent && agent.down_kbps > 0 ? toneOfSpeed(agent.down_kbps * 125) : 'dim',
                 ],
                 [
                   '上行（客户端→服务器）',
-                  agent && agent.up_kbps > 0 ? `${fmtBytes(agent.up_kbps / 8)}/s` : '未测',
-                  agent && agent.up_kbps > 0 ? toneOfSpeed(agent.up_kbps / 8) : 'dim',
+                  agent && agent.up_kbps > 0 ? `${fmtBytes(agent.up_kbps * 125)}/s` : '未测',
+                  agent && agent.up_kbps > 0 ? toneOfSpeed(agent.up_kbps * 125) : 'dim',
                 ],
               ]}
             />
