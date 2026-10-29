@@ -243,6 +243,36 @@ type SettingsDraft = {
 let draft: SettingsDraft | null = null
 
 /**
+ * 把「库里的设置」映射成「表单值」。
+ *
+ * 单独抽出来是为了让两件事用**同一套映射**：
+ *   ① 回填表单；② 判断「表单值是否等于服务器值」。
+ * 如果两处各写一遍，迟早会漂移 —— 那类 bug 的表现是"明明没改却提示未保存"，
+ * 或者反过来"改了却认为已保存"。
+ *
+ * ⚠ 键的顺序必须与下面的 formSig 完全一致：两处都用 JSON.stringify 做签名比较，
+ * 键序不同会永远判不相等。
+ */
+function deriveForm(s: SettingsShape) {
+  return {
+    publicAddr: s.public_addr ?? '',
+    mode: s.source_mode || 'manual',
+    serverSources: s.server_sources || 'github',
+    clientSources: s.client_sources || 'panel',
+    pStart: s.port_range_start ?? '',
+    pEnd: s.port_range_end ?? '',
+    bindPort: s.frps_bind_port ?? '',
+    dashPort: s.dashboard_port ?? '',
+    // 库里的默认是 '1'；写成 '0' 才算关闭，其它任何值都当作开（保守方向）
+    tcpMux: (s.tunnel_tcp_mux ?? '1') === '0' ? '0' : '1',
+    poolCount: s.tunnel_pool_count ?? '0',
+    compress: (s.tunnel_compression ?? '1') === '0' ? '0' : '1',
+    speedEnabled: (s.speedtest_enabled ?? '1') === '0' ? '0' : '1',
+    speedInterval: s.speedtest_interval_min || '30',
+  }
+}
+
+/**
  * 设置项的归属分区。
  *
  * 每一块都搬到"用它的那个页面"上去了，这里只留全局项（公网地址 / 外观 / 口令）。
@@ -364,33 +394,78 @@ export function SettingsPage({ section = 'global' }: { section?: SettingsSection
   // 有草稿时直接当作已回填：草稿就是用户正在编辑的那份。
   const hydrated = useRef(draft !== null)
 
+  // 上一次「灌进表单的值」与「它对应的服务器值」的快照。
+  //
+  // 只有 hydrated 一个布尔是不够的：它一次置位就永不再回填，于是**服务器值被
+  // 外部改动**时表单仍停在旧值，用户一按保存就把外部改动覆盖回去。
+  // 实测就发生过：用 API 把 tcpMux 改成「开」，用户在旧页面上点保存，
+  // 又变回「关」——然后困惑「明明改了怎么又回去了」。
+  //
+  // 两个签名区分两种差异：
+  //   ① formSig ≠ seed.form  → 用户在编辑，绝不能碰
+  //   ② serverSig ≠ seed.server 且表单没动 → 应当跟上服务器
+  const seedRef = useRef<{ form: string; server: string } | null>(null)
+
   // fillForm 把「库里的值」灌进表单。抽出来是为了让「放弃修改」也能复用：
   // 那个按钮原来只是重新 loadSettings，而 loadSettings 会因为 hydrated 已置位
   // 不再回填，于是点了没反应。
   const fillForm = useCallback((s: SettingsShape) => {
-    setPublicAddr(s.public_addr ?? '')
-    setMode(s.source_mode || 'manual')
-    setServerSources(s.server_sources || 'github')
-    setClientSources(s.client_sources || 'panel')
-    setPStart(s.port_range_start ?? '')
-    setPEnd(s.port_range_end ?? '')
-    setBindPort(s.frps_bind_port ?? '')
-    setDashPort(s.dashboard_port ?? '')
-    // 库里的默认是 '1'；写成 '0' 才算关闭，其它任何值都当作开（保守方向）
-    setTcpMux((s.tunnel_tcp_mux ?? '1') === '0' ? '0' : '1')
-    setPoolCount(s.tunnel_pool_count ?? '0')
-    setCompress((s.tunnel_compression ?? '1') === '0' ? '0' : '1')
-    setSpeedEnabled((s.speedtest_enabled ?? '1') === '0' ? '0' : '1')
-    setSpeedInterval(s.speedtest_interval_min || '30')
+    const f = deriveForm(s)
+    setPublicAddr(f.publicAddr)
+    setMode(f.mode)
+    setServerSources(f.serverSources)
+    setClientSources(f.clientSources)
+    setPStart(f.pStart)
+    setPEnd(f.pEnd)
+    setBindPort(f.bindPort)
+    setDashPort(f.dashPort)
+    setTcpMux(f.tcpMux as '1' | '0')
+    setPoolCount(f.poolCount)
+    setCompress(f.compress as '1' | '0')
+    setSpeedEnabled(f.speedEnabled as '1' | '0')
+    setSpeedInterval(f.speedInterval)
     setToken('')
     setPass('')
+    // 灌完立刻记下基线：此刻表单与服务器是同一份
+    const sig = JSON.stringify(f)
+    seedRef.current = { form: sig, server: sig }
   }, [])
 
+  // 当前表单值的签名（键顺序必须与 deriveForm 完全一致，否则永远判不相等）
+  const formSig = JSON.stringify({
+    publicAddr,
+    mode,
+    serverSources,
+    clientSources,
+    pStart,
+    pEnd,
+    bindPort,
+    dashPort,
+    tcpMux,
+    poolCount,
+    compress,
+    speedEnabled,
+    speedInterval,
+  } satisfies ReturnType<typeof deriveForm>)
+  const serverSig = settings ? JSON.stringify(deriveForm(settings)) : ''
+
+  // settings 每轮轮询都是新对象，用 ref 取最新值，让 effect 只依赖两个字符串签名。
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
+
   useEffect(() => {
-    if (!settings || hydrated.current) return
-    hydrated.current = true
-    fillForm(settings)
-  }, [settings, fillForm])
+    if (!serverSig) return
+    if (!hydrated.current) {
+      hydrated.current = true
+      if (settingsRef.current) fillForm(settingsRef.current)
+      return
+    }
+    const seed = seedRef.current
+    // 表单仍是上次灌进去的那一套（用户没动）→ 说明差异来自外部改动，跟上它
+    if (seed && formSig === seed.form && serverSig !== seed.server && settingsRef.current) {
+      fillForm(settingsRef.current)
+    }
+  }, [serverSig, formSig, fillForm])
 
   useEffect(() => {
     void loadNet()
