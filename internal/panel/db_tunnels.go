@@ -166,10 +166,23 @@ func (db *DB) NextFreePort(protocol string) (int, error) {
 	return 0, fmt.Errorf("端口池已耗尽(%d-%d)", start, end)
 }
 
-// portBindable 探测本机此刻能否绑定该端口，绑完立刻释放。
+// portBindable 判断这个端口现在是否还能被 frps 绑定（绑完立刻释放）。
 //
-// 只能排除「已经被占死」的端口。从探测到 frps 真正 bind 之间仍有窗口，
-// 但这个窗口只有毫秒级，而常驻服务占用的端口是长期存在的 —— 挡掉后者已足够。
+// 只能排除「已经被占死」的端口：从探测到 frps 真正 bind 之间仍有毫秒级窗口，
+// 但常驻服务占用的端口是长期存在的，挡掉后者已足够。
+//
+// ⚠ 光「试着 bind」是不够的：**Windows 允许重复绑定同一端口**，
+// 于是端口已被占用时 net.Listen("0.0.0.0:port") 照样成功 —— 护栏形同虚设。
+// 后果不小：占用端口被放过 → 生成 frps 配置后 frps 启动时 bind 失败、进程退出
+// → **这台机器上所有隧道一起掉线**，界面上只看到"全都离线"，
+// 完全指不出是哪条隧道、哪个端口的问题。
+//
+// 所以先调 portListening（连一下，能连上就说明有人在听），
+// 再退回 bind 探针兜住"绑了但没监听"的情形。portListening 本身还会探本机
+// 内网 IP，覆盖"服务只绑某个网卡地址"的情况。
+//
+// 这个盲区是 2026-10-29 在 CI 上暴露的：同一份测试 Windows 上过、Linux 上挂
+// （Linux 的 bind 探针能发现端口被占，Windows 不能）。
 func portBindable(protocol string, port int) bool {
 	addr := "0.0.0.0:" + strconv.Itoa(port)
 	if strings.EqualFold(protocol, "udp") {
@@ -179,6 +192,10 @@ func portBindable(protocol string, port int) bool {
 		}
 		_ = conn.Close()
 		return true
+	}
+	// 先连一下：这是 Windows 上唯一有效的判据（见 portListening 注释）
+	if portListening(port) {
+		return false
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {

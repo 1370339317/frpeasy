@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"net"
 	"path/filepath"
 	"testing"
 
@@ -227,4 +228,29 @@ func TestUpdateBaseFromEnv(t *testing.T) {
 			t.Fatalf("应为空串（=不检查更新），得到 %q", got)
 		}
 	})
+}
+
+// 端口已被监听时必须判为不可用 —— 这条是 Windows 上的关键补丁。
+//
+// 原先只靠「试着 bind 0.0.0.0:port」，而 **Windows 允许重复绑定同一端口**，
+// 于是端口被占用时也会返回"可用"：护栏失效 → 用户填了被占的端口能存进去 →
+// frps 启动时 bind 失败直接退出 → **这台机器上所有隧道一起掉线**。
+// 2026-10-29 在 CI 上暴露：同一份测试 Windows 过、Linux 挂。
+func TestPortBindableRejectsListeningPort(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	if portBindable("tcp", port) {
+		_ = ln.Close()
+		t.Fatalf("端口 %d 正在被监听，必须判为不可用", port)
+	}
+
+	// 关掉 listener 之后应恢复为可用（LISTEN socket 关闭不产生 TIME_WAIT）
+	_ = ln.Close()
+	if !portBindable("tcp", port) {
+		t.Fatalf("端口 %d 已释放，应判为可用", port)
+	}
 }

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"frpeasy/internal/shared"
 )
 
 // 下行测速必须真的发满字节，而且数据要**不可压缩**。
@@ -129,10 +131,7 @@ func TestTunnelProxyDownForwardsThroughTunnel(t *testing.T) {
 	port := portOfURL(t, srv.URL)
 
 	db := newTestDB(t)
-	tun, err := db.CreateTunnel("测速隧道", "127.0.0.1:8080", "tcp", port, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	tun := newTestTunnelPointingAt(t, db, "测速隧道", port)
 	p := &Panel{db: db}
 
 	rec := httptest.NewRecorder()
@@ -183,10 +182,7 @@ func TestTunnelProxyDownFailsWhenNoData(t *testing.T) {
 	}()
 
 	db := newTestDB(t)
-	tun, err := db.CreateTunnel("黑洞隧道", "127.0.0.1:8080", "tcp", ln.Addr().(*net.TCPAddr).Port, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	tun := newTestTunnelPointingAt(t, db, "黑洞隧道", ln.Addr().(*net.TCPAddr).Port)
 	p := &Panel{db: db}
 
 	rec := httptest.NewRecorder()
@@ -219,6 +215,42 @@ func TestTunnelProxyDownUnknownTunnel(t *testing.T) {
 }
 
 // --- 小工具 ---
+
+// newTestTunnelPointingAt 建一条隧道，并把它指向一个**已经在监听**的端口。
+//
+// 为什么不直接把端口传给 CreateTunnel：那里会校验「这个公网端口在本机是否空闲」
+// ——那是合理的生产护栏（端口被占 → frps 绑不上 → 整机隧道全掉）。但测试的意图
+// 正好相反：我们就是要把流量引到自己起的测试服务上，那个端口当然已经被监听。
+//
+// 直接传会撞上护栏：Windows 上碰巧能过（它的 bind 探针对已监听端口不敏感），
+// Linux 上直接被拒 —— 同一份测试两个平台结论不同。CI 第一次跑就炸在这里：
+//   linktest_test.go:134: 端口 40047 在本机已被其它服务监听…frps 绑不上它
+//
+// 所以：先用一个**空闲**端口过护栏，再用 SQL 把 public_port 改指到目标端口。
+// 这样测的是"转发行为"，而不是"端口分配护栏"（后者另有测试覆盖）。
+func newTestTunnelPointingAt(t *testing.T, db *DB, name string, port int) *shared.Tunnel {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	free := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	tun, err := db.CreateTunnel(name, "127.0.0.1:8080", "tcp", free, "")
+	if err != nil {
+		t.Fatalf("建隧道失败: %v", err)
+	}
+	if _, err := db.Exec("UPDATE tunnels SET public_port=? WHERE id=?", port, tun.ID); err != nil {
+		t.Fatalf("改公网端口失败: %v", err)
+	}
+	got, err := db.GetTunnel(tun.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
 
 // portOfURL 从 httptest 的 URL 里取出端口号。
 func portOfURL(t *testing.T, rawURL string) int {
