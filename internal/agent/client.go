@@ -68,6 +68,10 @@ type Client struct {
 	// downKbps 最近一次自测的「本机 → 面板」下行速率（kbps）。0 = 还没测过。
 	// 用 atomic 是因为它被测速 goroutine 写、被心跳读。
 	downKbps atomic.Int64
+	// upKbps 最近一次自测的「本机 → 面板」**上行**速率（kbps）。
+	// 必须与下行分开：家庭宽带上下行严重不对等（实测下行 9.5MB/s、上行 4KB/s~841KB/s），
+	// 合成一个数字会让人把瓶颈判到错误的方向。
+	upKbps atomic.Int64
 	// speedReqDone 已完成的一次性测速请求 ID，随心跳回执给面板。
 	speedReqDone atomic.Value // string
 
@@ -251,6 +255,7 @@ func (c *Client) heartbeat(statuses []shared.TunnelStatus) (*shared.HeartbeatRes
 		BinSource:    binSource,
 		BinNote:      binNote,
 		DownKbps:     c.downKbps.Load(),
+		UpKbps:       c.upKbps.Load(),
 		SpeedReq:     c.speedReqDoneValue(),
 	}
 	var resp shared.HeartbeatResponse
@@ -493,6 +498,14 @@ const (
 	// 4MB 时 1MB/s 的慢链路要 4 秒（可接受），10MB/s 的要 0.4 秒（够采样）。
 	// 注意面板侧 /api/speedtest 必须允许这个大小，两边要一起改。
 	speedTestBytes       = 4 << 20
+	// 上行测量分块：每块 64KB、最多 8 块（512KB 上限）、单块 8 秒超时。
+	//
+	// 不能像下行那样一次推 4MB：用户上行实测会掉到 4KB/s，4MB 要 1000 秒，
+	// 会把测速 worker 完全堵死（而它同时还要回应面板的一次性请求）。
+	// 分块后能自适应：快链路跑满 8 块，慢链路传一两块就停，用已完成的部分算速率。
+	upChunkSize    = 64 << 10
+	upMaxChunks    = 8
+	upChunkTimeout = 8 * time.Second
 	// speedMinInterval 防止面板下发一个荒谬的值（比如 1 秒）把链路打满。
 	speedMinInterval = time.Minute
 )
@@ -555,9 +568,11 @@ func (c *Client) speedTestLoop() {
 
 		if reqID != "" && reqID != c.speedReqDoneValue() {
 			c.measureDownlink()
+			c.measureUplink()
 			c.speedReqDone.Store(reqID)
 		} else if enabled {
 			c.measureDownlink()
+			c.measureUplink()
 		}
 
 		select {
@@ -601,4 +616,59 @@ func (c *Client) measureDownlink() {
 		return
 	}
 	c.downKbps.Store(int64(float64(n*8) / elapsed / 1000))
+}
+
+// measureUplink 分块往上推数据，算出「本机 → 面板」的上行 kbps。
+//
+// 为什么要分块、而不是照搬下行的"一次推 4MB"：
+// 用户上行实测会掉到 3.9KB/s，4MB 需要一千秒 —— 测速 worker 会被完全堵死，
+// 连面板点的一次性测速也排不进去。分块后每一块单独超时，
+// 慢链路传一两块就收手，用已完成的部分算速率；快链路跑满上限。
+//
+// 失败不重试、不打日志：这是观测项，链路差的时候失败是预期内的。
+func (c *Client) measureUplink() {
+	if c.agentID == "" || c.server == "" {
+		return
+	}
+	u := fmt.Sprintf("%s/api/speedtest/up?agent_id=%s&token=%s",
+		strings.TrimRight(c.server, "/"),
+		url.QueryEscape(c.agentID), url.QueryEscape(c.agentTok))
+
+	// 非零内容：全零的 body 一旦被任何一层压缩，测出来就是压缩速度。
+	chunk := make([]byte, upChunkSize)
+	for i := range chunk {
+		chunk[i] = byte(i*31 + 7)
+	}
+
+	var total int64
+	var elapsed time.Duration
+	for i := 0; i < upMaxChunks; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), upChunkTimeout)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(chunk))
+		if err != nil {
+			cancel()
+			return
+		}
+		req.Header.Set("Content-Type", "application/octet-stream")
+		start := time.Now()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			cancel()
+			break
+		}
+		ok := resp.StatusCode == http.StatusOK
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		cancel()
+		if !ok {
+			break
+		}
+		// 只累计成功那一块的时间，速率才是"成功传输时的速率"。
+		elapsed += time.Since(start)
+		total += upChunkSize
+	}
+	if total == 0 || elapsed <= 0 {
+		return
+	}
+	c.upKbps.Store(int64(float64(total*8) / elapsed.Seconds() / 1000))
 }

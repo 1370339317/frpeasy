@@ -625,23 +625,46 @@ export function DiagnosePage() {
 
           <SegmentCard
             no="①"
-            name="服务器 → 客户端"
-            what="从服务器压进隧道，测这条隧道本身的能力"
+            name="客户端那条链路"
+            what="客户端多在家庭宽带上，上下行严重不对等 —— 必须分开看"
             tone={s1 ? (s1.ok ? 'ok' : 'bad') : 'idle'}
           >
-            {!s1 && <Placeholder />}
+            {/* 客户端自测的上下行（agent ↔ 面板，不经过隧道）。
+                这两行是回答"那条宽带到底上下行各多少"的唯一数据源：
+                隧道测速只能测出一个方向，而家宽的上下行常常差几十倍。 */}
+            <Lines
+              rows={[
+                [
+                  '下行（服务器→客户端）',
+                  agent && agent.down_kbps > 0 ? `${fmtBytes(agent.down_kbps / 8)}/s` : '未测',
+                  agent && agent.down_kbps > 0 ? toneOfSpeed(agent.down_kbps / 8) : 'dim',
+                ],
+                [
+                  '上行（客户端→服务器）',
+                  agent && agent.up_kbps > 0 ? `${fmtBytes(agent.up_kbps / 8)}/s` : '未测',
+                  agent && agent.up_kbps > 0 ? toneOfSpeed(agent.up_kbps / 8) : 'dim',
+                ],
+              ]}
+            />
+            <div className="my-1.5 border-t border-border2" />
+            {!s1 && <Placeholder text="隧道侧未测" />}
             {s1 && !s1.ok && <FailLine err={s1.err} hint={s1.hint} />}
             {s1 && s1.ok && !s1.http && (
-              <Lines rows={[['说明', s1.note || '非 HTTP，无法测吞吐', 'dim']]} />
+              <Lines rows={[['经隧道访问服务', s1.note || '非 HTTP，测不了吞吐', 'dim']]} />
             )}
             {s1 && s1.ok && s1.http && (
               <Lines
                 rows={[
-                  ['吞吐', `${fmtBytes(s1.speed)}/s`, toneOfSpeed(s1.speed)],
+                  ['经隧道访问服务', `${fmtBytes(s1.speed)}/s`, toneOfSpeed(s1.speed)],
                   ['单次请求', `${s1.first_ms}ms`, toneOfMs(s1.first_ms)],
                   ['首字节', `${s1.ttfb_ms}ms`, toneOfMs(s1.ttfb_ms)],
                 ]}
               />
+            )}
+            {agent && agent.down_kbps === 0 && (
+              <div className="mt-1.5 text-[11px] leading-[1.6] text-dim">
+                客户端还没测过上下行，去「客户端」页点一次「测一下」。
+              </div>
             )}
           </SegmentCard>
 

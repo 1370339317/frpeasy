@@ -245,6 +245,8 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("GET /api/system/security", p.requireAuth(p.securityHandler))
 	// 客户端自测下行的流量源（用 agent token 鉴权，不走登录会话）。
 	mux.HandleFunc("GET /api/speedtest", p.speedTestHandler)
+	// 上行测速：客户端往上推 4MB，服务端计数。上下行必须分开看（家宽严重不对称）。
+	mux.HandleFunc("POST /api/speedtest/up", p.speedTestUpHandler)
 	mux.HandleFunc("GET /api/system/versions", p.requireAuth(p.systemVersionsHandler))
 	mux.HandleFunc("GET /api/system/mirror-test", p.requireAuth(p.systemMirrorTestHandler))
 	// 排优 / 下载记录：回答「刚才那次到底走了哪个源、为什么」。

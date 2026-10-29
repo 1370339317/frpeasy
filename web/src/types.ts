@@ -44,6 +44,14 @@ export interface Agent {
   services: DiscoveredService[] | null
   /** 客户端自测的「本机 → 面板」下行速率（kbps）；0 = 还没测过 */
   down_kbps: number
+  /**
+   * 客户端自测的上行速率（kbps）；0 = 还没测过。
+   *
+   * 必须与下行分开看：客户端绝大多数在家庭宽带上，上下行严重不对等。
+   * 实测同一台机器下行 9.5MB/s、上行在 3.9KB/s~841KB/s 之间跳 ——
+   * 合成一个"吞吐"会让人把瓶颈判到错误的方向。
+   */
+  up_kbps: number
   /** 上次测速时间（RFC3339），零值表示没测过 */
   speed_at: string
   /** 卸载指令已排队，还没被心跳领走 */

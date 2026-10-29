@@ -3,6 +3,7 @@ package panel
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -135,6 +136,11 @@ func (p *Panel) agentHeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	// 否则一次"没带字段"的心跳就会把它之前测到的真实数字抹掉。
 	if req.DownKbps > 0 {
 		_ = p.db.UpdateAgentDownKbps(req.AgentID, req.DownKbps)
+	}
+	// 上行同理、独立判断：家庭宽带上下行不对等，而两者是两次独立测量，
+	// 一次只成功一个方向时不能把另一个方向已经测到的值抹掉。
+	if req.UpKbps > 0 {
+		_ = p.db.UpdateAgentUpKbps(req.AgentID, req.UpKbps)
 	}
 	// 主动测速的回执：客户端做完了一次性请求就带回来，这里清掉待办，
 	// 否则界面上那个"测速中"会一直转。
@@ -521,6 +527,40 @@ func (p *Panel) agentLogUploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[agent] %s 回传日志 %d 字节（请求 %s）", agent.Name, len(content), req.RequestID)
 	json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// speedTestUpHandler POST /api/speedtest/up?agent_id=&token=
+//
+// 给客户端自测「本机 → 面板」的**上行**速率：客户端往上推数据，服务端只计数。
+//
+// 为什么必须与下行分开测：客户端绝大多数在家庭宽带上，上下行严重不对等。
+// 实测同一台机器下行 9.5MB/s，上行在 3.9KB/s~841KB/s 之间跳 —— 只报一个
+// "吞吐"会让人以为那条宽带是对称的，从而把瓶颈判到错误的方向。
+//
+// 鉴权同上，用 agent token（这是客户端调用的接口）。
+func (p *Panel) speedTestUpHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.URL.Query().Get("agent_id")
+	token := r.URL.Query().Get("token")
+	agent, err := p.db.GetAgent(id)
+	if err != nil || agent.AgentToken == "" || agent.AgentToken != token {
+		http.Error(w, "凭据无效", http.StatusUnauthorized)
+		return
+	}
+	// 与下行同一个上限，两边必须一致：客户端按 4MB 发，服务端就该允许 4MB。
+	// 不一致会导致一个方向永远测不出来（客户端发了、服务端提前拒）。
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
+	n, err := io.Copy(io.Discard, r.Body)
+	if err != nil && n == 0 {
+		http.Error(w, "上传中断", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]int64{"bytes": n})
 }
 
 // speedTestHandler GET /api/speedtest?agent_id=&token=&bytes=

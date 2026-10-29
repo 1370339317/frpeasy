@@ -775,7 +775,10 @@ export function Clients() {
                   <span className="font-mono">{(a.ips ?? []).join(', ') || '—'}</span>
                   <b className="font-medium text-dim">最后心跳</b>
                   <span>{fmtAgo(a.last_seen)}</span>
-                  <b className="font-medium text-dim">到面板速度</b>
+                  {/* 上下行必须分两行：客户端多在家庭宽带上，两者严重不对等，
+                      合成一个"吞吐"会让人把瓶颈判到错误的方向（实测这台机器
+                      下行 9.5MB/s、上行最差时只有 3.9KB/s）。 */}
+                  <b className="font-medium text-dim">到面板 · 下行</b>
                   <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
                     <span className="font-mono">
                       {a.down_kbps > 0 ? (
@@ -784,7 +787,7 @@ export function Clients() {
                           <span className="ml-1 font-sans text-[11px] text-dim">
                             （{fmtAgo(a.speed_at)}测）
                             {a.down_kbps / 8 < 200 && (
-                              <span className="text-warn-fg"> · 偏慢，隧道吞吐会受它限制</span>
+                              <span className="text-warn-fg"> · 偏慢</span>
                             )}
                           </span>
                         </>
@@ -792,6 +795,25 @@ export function Clients() {
                         <span className="text-dim">还没测过</span>
                       )}
                     </span>
+                  </span>
+                  <b className="font-medium text-dim">到面板 · 上行</b>
+                  <span className="font-mono">
+                    {a.up_kbps > 0 ? (
+                      <>
+                        {(a.up_kbps / 8).toFixed(0)} KB/s
+                        {a.down_kbps > 0 && a.up_kbps * 5 < a.down_kbps && (
+                          <span className="ml-1 font-sans text-[11px] text-warn-fg">
+                            · 只有下行的 {Math.round((a.up_kbps / a.down_kbps) * 100)}%，
+                            上传/提交会明显慢
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <span className="text-dim">还没测过</span>
+                    )}
+                  </span>
+                  <b className="font-medium text-dim">测速</b>
+                  <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
                     {/* 单台测速。设置页管「多久测一次」，这里管「现在就测这台」。
                         等待期间不锁整个页面，只锁这一台的按钮，并给一个明确的
                         "在等什么、大概多久"—— 之前只把按钮改成"测速中…"然后卡 90 秒，

@@ -106,6 +106,10 @@ func (db *DB) migrate() error {
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN agent_version TEXT NOT NULL DEFAULT ''`)
 	// 客户端自测的「本机 → 面板」下行速率。0 = 还没测过（老客户端不会填）。
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN down_kbps INTEGER NOT NULL DEFAULT 0`)
+	// up_kbps 与 down_kbps 分开存：客户端常在家庭宽带上，上下行严重不对等
+	// （实测同一台机器单流下行 9.5MB/s、上行 3.9KB/s~841KB/s）。
+	// 只报一个"吞吐"会让用户以为那条宽带是对称的。
+	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN up_kbps INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN speed_at TEXT NOT NULL DEFAULT ''`)
 	// 一次性的"立刻测速"请求 ID（下发后等客户端回执，再清掉）。
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN speed_request TEXT NOT NULL DEFAULT ''`)

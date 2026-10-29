@@ -85,7 +85,13 @@ type Agent struct {
 	// 面板就能直接显示"这台机器到面板只有 40KB/s"，不用再猜。
 	// 0 表示还没测过（老客户端不会填）。
 	DownKbps int64     `json:"down_kbps"`
-	SpeedAt  time.Time `json:"speed_at"`
+	// UpKbps 客户端自测的「本机 → 面板」**上行**速率（kbps）。
+	//
+	// 必须与下行分开：客户端绝大多数在家庭宽带上，上下行严重不对等
+	// （实测同一台机器下行 9.5MB/s，上行在 3.9KB/s~841KB/s 之间跳）。
+	// 只报一个合计吞吐会让人误以为那条宽带是对称的，从而错判瓶颈方向。
+	UpKbps  int64     `json:"up_kbps"`
+	SpeedAt time.Time `json:"speed_at"`
 
 	// 卸载状态。
 	//
@@ -259,6 +265,8 @@ type HeartbeatRequest struct {
 	// DownKbps 客户端自测的「本机 → 面板」下行速率（kbps）。0 = 还没测过。
 	// 面板只做展示与提示，不参与任何调度决策。
 	DownKbps int64 `json:"down_kbps"`
+	// UpKbps 客户端自测的上行速率（kbps）。家庭宽带上下行不对等，必须分开报。
+	UpKbps int64 `json:"up_kbps"`
 	// SpeedReq 本次心跳对应的"一次**测速请求 ID**（回执）。
 	// 面板据此确认这次主动测速已经完成，并清掉待办，避免按钮一直转圈。
 	SpeedReq string `json:"speed_req"`

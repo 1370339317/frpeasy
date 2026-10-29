@@ -154,3 +154,58 @@ func TestCollectVersionsReportsCacheBehind(t *testing.T) {
 		t.Fatalf("缓存已追平（hosted=%q），不该再报 cache_behind", r2.Agent.Hosted)
 	}
 }
+
+// 上下行速率必须能分别存取，且互不覆盖。
+//
+// 这两列是回答"客户端那条宽带上下行各多少"的唯一数据源。客户端多在
+// 家庭宽带上，二者差几十倍（实测下行 9.5MB/s、上行最差 3.9KB/s），
+// 合成一个数字会把瓶颈判到错误方向。
+//
+// 另外这条测试也顺手锁住 agents 的列映射：agentColsTail 与 scanAgentRow
+// 的 dest 必须严格一一对应，历史上漏改一处就整张表读不出来。
+func TestAgentUpDownKbpsRoundTrip(t *testing.T) {
+	db := newTestDB(t)
+	a := &shared.Agent{ID: "sp1", Name: "speed", Os: "windows", Arch: "amd64", InstallToken: "it", AgentToken: "at"}
+	if err := db.CreateAgent(a); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.UpdateAgentDownKbps("sp1", 80000); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateAgentUpKbps("sp1", 4000); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetAgent("sp1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DownKbps != 80000 {
+		t.Fatalf("下行应为 80000，实际 %d", got.DownKbps)
+	}
+	if got.UpKbps != 4000 {
+		t.Fatalf("上行应为 4000，实际 %d（写上行不能把下行覆盖掉）", got.UpKbps)
+	}
+
+	// 再单独更新下行，上行必须保持不变
+	if err := db.UpdateAgentDownKbps("sp1", 90000); err != nil {
+		t.Fatal(err)
+	}
+	got2, err := db.GetAgent("sp1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2.UpKbps != 4000 {
+		t.Fatalf("只更新下行时上行不应改变，实际 %d", got2.UpKbps)
+	}
+
+	// 列表接口也要带上这两列（ListAgents 用的是不带 token 的列集合）
+	list, err := db.ListAgents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].DownKbps != 90000 || list[0].UpKbps != 4000 {
+		t.Fatalf("列表接口应带上上下行，实际 %+v", list)
+	}
+}
