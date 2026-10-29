@@ -499,8 +499,8 @@ export interface TuningResponse {
 /** 隧道级测速结果（从服务器经 frps → frpc → 客户端服务）。 */
 export interface TunnelProbeResult {
   tunnel_id: number
-  /** TCP 握手往返（毫秒），经隧道，含客户端↔服务器那段 */
-  rtt_ms: number
+  /** 首字节耗时（毫秒）——最接近"纯延迟"的数字。注意不是 TCP 握手：那一段是本地回环，无意义 */
+  ttfb_ms: number
   /** 第一个请求的完整耗时（毫秒）—— 打开这个服务一次要等多久，体感数字 */
   first_ms: number
   first_bytes: number
@@ -510,11 +510,17 @@ export interface TunnelProbeResult {
   ms: number
   /** 窗口内发了几次请求。1 表示响应太大只测到一次 */
   requests: number
+  /** 探测用了几个来回才拿到响应。>1 = 第一次抽到了失效连接（隧道"能用但会卡"） */
+  attempts: number
   /** 目标是否是 HTTP 服务；false 表示只测了连通性与延迟 */
   http: boolean
   ok: boolean
+  /** 面向上层的一句结论（需要提醒时非空） */
   note: string
+  /** 失败原因。ok=false 时必定非空 */
   err: string
+  /** 排障建议：下一步该查什么 */
+  hint: string
 }
 
 /** 链路自检的单个目标结果。 */

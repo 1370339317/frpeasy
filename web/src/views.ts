@@ -1,6 +1,14 @@
 /** 视图清单：导航、标题、hash 路由都用这一份，避免三处各写一遍。 */
 
-export type View = 'overview' | 'tunnels' | 'clients' | 'server' | 'ports' | 'files' | 'settings'
+export type View =
+  | 'overview'
+  | 'tunnels'
+  | 'clients'
+  | 'diagnose'
+  | 'server'
+  | 'ports'
+  | 'files'
+  | 'settings'
 
 export interface ViewItem {
   key: View
@@ -28,6 +36,9 @@ export const VIEW_GROUPS: { key: string; title: string; items: ViewItem[] }[] = 
       { key: 'overview', icon: '▣', label: '概览' },
       { key: 'tunnels', icon: '⇄', label: '隧道' },
       { key: 'clients', icon: '▤', label: '客户端' },
+      // 体检和隧道是同一件事的两面：「怎么建」在隧道页，「为什么慢」在这页。
+      // 放在同一组，用户问"隧道卡"时不用去「系统」里翻。
+      { key: 'diagnose', icon: '◎', label: '链路体检' },
     ],
   },
   {

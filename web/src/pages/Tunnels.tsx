@@ -230,33 +230,66 @@ export function Tunnels() {
                       }
                       if (!pr) return null
                       if (!pr.ok) {
+                        // 失败时必须把**原因**写出来，不能只写"测速失败"。
+                        // 2026-10-29 的事故就是：数据没回来被说成"不是 HTTP 服务"，
+                        // 用户以为功能不支持，实际是隧道坏了。
                         return (
                           <span
-                            className="block max-w-[13rem] truncate text-[11px] text-bad-fg"
-                            title={pr.err}
+                            className="block max-w-[15rem] truncate text-[11px] text-bad-fg"
+                            title={[pr.err, pr.hint].filter(Boolean).join('\n\n')}
                           >
-                            测速失败
+                            ✕ {pr.err || '测速失败'}
                           </span>
                         )
                       }
-                      // 两个数字分工不同：
+                      // 非 HTTP（SSH / 数据库 / 远程桌面）：只有延迟可报，不编吞吐。
+                      if (!pr.http) {
+                        return (
+                          <span
+                            className="block max-w-[15rem] truncate text-[11px] text-dim"
+                            title={pr.note}
+                          >
+                            ○ 非 HTTP，仅连通 · {pr.ttfb_ms}ms
+                          </span>
+                        )
+                      }
+                      // 三个数字分工不同：
                       //   吞吐 = 传大文件的能力（窗口内反复请求测出来）
                       //   单次 = 打开这个服务一次要等多久（体感，受 RTT 支配）
-                      // 网页应用由很多小请求组成，卡不卡主要看后者。
+                      //   TTFB = 去掉传输部分后的纯延迟，最接近"点一下要等多久才动"
+                      // 网页应用由很多小请求组成，卡不卡主要看后两个。
                       return (
                         <span
-                          className="block whitespace-nowrap text-[11px] text-ok-fg"
-                          title={`窗口内请求 ${pr.requests} 次，共 ${fmtBytes(pr.bytes)}；单次是第一个请求从发出到读完的耗时`}
+                          className="block whitespace-nowrap text-[11px]"
+                          title={[
+                            `窗口内请求 ${pr.requests} 次，共 ${fmtBytes(pr.bytes)}`,
+                            `首字节 ${pr.ttfb_ms}ms、整次读完 ${pr.first_ms}ms`,
+                            pr.attempts > 1 ? `首次抽到失效连接，第 ${pr.attempts} 次才通` : '',
+                            pr.note,
+                          ].filter(Boolean).join('\n')}
                         >
-                          实测 {pr.speed > 0 ? `${fmtBytes(pr.speed)}/s` : '—'}
+                          <span className="text-ok-fg">
+                            实测 {pr.speed > 0 ? `${fmtBytes(pr.speed)}/s` : '—'}
+                          </span>
                           <span
                             className={cx(
                               'ml-1',
-                              pr.first_ms > 500 ? 'text-bad-fg' : pr.first_ms > 250 ? 'text-warn-fg' : 'text-dim',
+                              pr.first_ms > 500
+                                ? 'text-bad-fg'
+                                : pr.first_ms > 250
+                                  ? 'text-warn-fg'
+                                  : 'text-dim',
                             )}
                           >
                             · 单次 {pr.first_ms}ms
                           </span>
+                          {/* 重试过就标黄：这是"隧道能用但会卡"的现场证据，
+                              藏着不说等于把最有价值的诊断信息丢了。 */}
+                          {pr.attempts > 1 && (
+                            <span className="ml-1 text-warn-fg" title={pr.note}>
+                              · 重试{pr.attempts}次
+                            </span>
+                          )}
                         </span>
                       )
                     })()}
@@ -264,6 +297,21 @@ export function Tunnels() {
                   <Td align="right" className="whitespace-nowrap">
                     <Button variant="ghost" size="sm" onClick={() => openEdit(t)}>
                       编辑
+                    </Button>{' '}
+                    {/* 行内测速只回答"快不快"；"慢在哪一段"需要三段对照，
+                        那件事放在「链路体检」页做。这里给一个直达入口 ——
+                        用户问出"为什么慢"时不用自己去菜单里找。 */}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="whitespace-nowrap"
+                      title="分段测量：你→服务器 / 服务器→客户端 / 完整路径，定位到底卡在哪一段"
+                      onClick={() => {
+                        sessionStorage.setItem('diag_tunnel', String(t.id))
+                        window.location.hash = '#/diagnose'
+                      }}
+                    >
+                      体检
                     </Button>{' '}
                     {/* 用 primary 而不是 ghost：三个 ghost 按钮并排时，"测速"在
                         视觉上跟"编辑 / 删除"完全同级，用户扫一眼根本注意不到。

@@ -188,6 +188,13 @@ func (p *Panel) Run(listen string) error {
 	// 隧道级测速：从服务器本地经 frps → frpc → 客户端服务，测这条隧道的真实吞吐。
 	// 这是验证「关闭 TCP 多路复用」有没有效果的唯一实测手段。
 	mux.HandleFunc("POST /api/tunnels/{id}/speedtest", p.requireAuth(p.tunnelSpeedTestHandler))
+	// 浏览器侧测速（测「用户 → 服务器」这一段，服务器无法反向测用户）。
+	// 这三个端点做的事就是"发点数据、量多久"，所以不写业务日志，也不碰数据库。
+	mux.HandleFunc("GET /api/linktest/ping", p.requireAuth(p.linkTestPingHandler))
+	mux.HandleFunc("GET /api/linktest/down", p.requireAuth(p.linkTestDownHandler))
+	mux.HandleFunc("POST /api/linktest/up", p.requireAuth(p.linkTestUpHandler))
+	// ② 用户视角的完整路径：浏览器经面板转发进隧道，一次计时覆盖 ③+①。
+	mux.HandleFunc("GET /api/tunnels/{id}/proxy-down", p.requireAuth(p.tunnelProxyDownHandler))
 	mux.HandleFunc("POST /api/tunnels", p.requireAuth(p.createTunnelHandler))
 	mux.HandleFunc("DELETE /api/tunnels/{id}", p.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		id, ok := parseID(r.URL.Path)

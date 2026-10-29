@@ -177,6 +177,11 @@ func TestGenerateConfigUsesPanelTransport(t *testing.T) {
 	if !strings.Contains(content, "transport.poolCount = 8") {
 		t.Fatalf("mux 关闭时应写入连接池:\n%s", content)
 	}
+	// 池连接必须带 keepalive，否则空闲后被 NAT 回收成"两端都以为活着"的黑洞。
+	// 2026-10-29 线上实测：并发 12 个请求 7 个卡到超时（详见 GenerateConfig 注释）。
+	if !strings.Contains(content, "transport.dialServerKeepalive = 30") {
+		t.Fatalf("开启连接池时必须写 dialServerKeepalive，否则空闲连接会被 NAT 静默丢弃:\n%s", content)
+	}
 	if strings.Contains(content, "useCompression") {
 		t.Fatalf("压缩被显式关闭时不应再写 useCompression:\n%s", content)
 	}
@@ -192,6 +197,10 @@ func TestGenerateConfigUsesPanelTransport(t *testing.T) {
 	c2 := readFileString(t, path2)
 	if strings.Contains(c2, "poolCount") {
 		t.Fatalf("mux 开启时不应写 poolCount:\n%s", c2)
+	}
+	// 没有池连接就不需要额外的 keepalive：控制连接本身有 30s 应用层心跳。
+	if strings.Contains(c2, "dialServerKeepalive") {
+		t.Fatalf("没有连接池时不必写 dialServerKeepalive:\n%s", c2)
 	}
 	if !strings.Contains(c2, "transport.useCompression = true") {
 		t.Fatalf("压缩开启时应写入 useCompression:\n%s", c2)

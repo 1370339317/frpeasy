@@ -8,6 +8,7 @@ import { Toasts } from './components/Toasts'
 import { Alert } from './components/ui'
 import { isView, type View } from './views'
 import { Overview } from './pages/Overview'
+import { DiagnosePage } from './pages/Diagnose'
 import { Tunnels } from './pages/Tunnels'
 import { Clients } from './pages/Clients'
 import { Frps } from './pages/Frps'
@@ -136,6 +137,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       {view === 'overview' && <Overview />}
       {view === 'tunnels' && <Tunnels />}
       {view === 'clients' && <Clients />}
+      {view === 'diagnose' && <DiagnosePage />}
       {view === 'server' && <Frps />}
       {view === 'ports' && <Ports />}
       {view === 'files' && <Files />}

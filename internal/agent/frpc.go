@@ -119,6 +119,13 @@ var resolveFrpcAsset = shared.FRPAssetURL
 // pullRetryCooldown 拉取失败后等待多久再重试，避免疯狂重下几十 MB。
 const pullRetryCooldown = 60 * time.Second
 
+// frpcKeepaliveSeconds TCP keepalive 间隔（秒），写进 transport.dialServerKeepalive。
+//
+// 只对 frpc 拨出的连接生效（控制连接 + 所有 work 池连接）。控制连接本来就有
+// 30 秒的应用层心跳，所以真正需要它的是**空闲的池连接** —— 那些连接平时没有
+// 任何数据往来，NAT 一回收就变成"两端都以为活着"的黑洞。
+const frpcKeepaliveSeconds = 30
+
 func NewFrpcManager(dataDir string) *FrpcManager {
 	return &FrpcManager{
 		binDir: filepath.Join(dataDir, "bin"),
@@ -459,6 +466,23 @@ func (m *FrpcManager) GenerateConfig(cfg shared.AgentConfig) (string, string, er
 		// 写进配置只会让后来看文件的人以为它在生效。
 		if !*cfg.TCPMux && cfg.PoolCount > 0 {
 			fmt.Fprintf(&b, "transport.poolCount = %d\n", cfg.PoolCount)
+			// 池连接必须显式保活，否则会变成"假在线"的黑洞。
+			//
+			// 实测（2026-10-29，线上 47.74.8.125 + 家用 NAT 后的 Windows 客户端）：
+			// poolCount=32 时 frpc 预建 32 条空闲 work conn，NAT 设备会静默回收
+			// 长时间无流量的表项；但 frpc 与 frps 两端都仍认为它们是 established。
+			// 于是 frps 从池里取到死连接时，数据写进去就消失了 —— 没有 RST、
+			// 没有错误日志，用户在客户端等到超时。
+			//
+			// 当时的现场：frpc 侧 25 条 established、frps 侧只剩 7 条；
+			// 并发 12 个请求，5 个 0.8 秒返回、**7 个卡到 10 秒超时**。
+			// 这就是"隧道时快时极慢、网页一格一格加载"的根因。
+			//
+			// 30 秒的策略：NAT 空闲表项超时通常 5~30 分钟，最短的也有 60~120 秒，
+			// 30 秒能保证表项始终有流量经过。代价是每 30 秒 32 个 40 字节的
+			// keepalive 包（约 1KB/分钟），可以忽略。
+			// 键名以官方文档为准：dialServerKeepalive（小写 a），单位秒。
+			fmt.Fprintf(&b, "transport.dialServerKeepalive = %d\n", frpcKeepaliveSeconds)
 		}
 	}
 	// 压缩是 per-proxy 的，放在下面的 [[proxies]] 里（见下）。
