@@ -29,17 +29,20 @@ jobs:
       - name: 构建前端
         run: cd web && npm ci && npm run build
 
+      # 下面三步都套 tests/ci-run.sh：失败时把关键行打成注解。
+      # 起因是 2026-10-29 一次 CI 变红却查不出原因 —— Actions 的日志下载接口
+      # 要仓库管理员权限，本地又不是 Linux，等于完全瞎了。
       - name: 单元测试
-        run: go test ./... -count=1
+        run: bash tests/ci-run.sh go test ./... -count=1
 
       - name: 文档链接与锚点
-        run: make check-docs
+        run: bash tests/ci-run.sh make check-docs
 
       - name: 构建发布产物 + 清单 + 绿色包
-        run: make dist VERSION=0.0.0-ci NOTES="CI 构建（非发布）"
+        run: bash tests/ci-run.sh make dist VERSION=0.0.0-ci NOTES="CI 构建（非发布）"
 
       - name: 一键部署脚本端到端冒烟
-        run: bash tests/deploy-smoke.sh
+        run: bash tests/ci-run.sh bash tests/deploy-smoke.sh
 
       # it.sh / e2e.sh 暂不进 CI：它们里面有为 Windows 开发机写的进程清理
       # （taskkill 之类），在 ubuntu runner 上虽有 `|| true` 兜底没炸过，
