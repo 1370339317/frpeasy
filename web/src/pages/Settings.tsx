@@ -1125,13 +1125,34 @@ export function SettingsPage({ section = 'global' }: { section?: SettingsSection
                 {tcpMux === '0' && <span className="ml-1.5 text-[11.5px] text-ok-fg">已关闭</span>}
               </b>
               <span className="mt-0.5 block text-xs leading-[1.6] text-dim">
-                frp 默认把所有隧道塞进一条 TCP 连接，而它的单流窗口是 256KB 硬编码，
-                吞吐上限 ≈ 256KB ÷ RTT（跨境 200ms 时只有 ~1.3MB/s）。关掉之后每个隧道
-                独占连接，才能跑满链路。
+                <b className="text-fg">保持开启（默认）。实测关掉会让速度变成两档乱跳。</b>
+                {' '}2026-10-29 做了 18 次对照（同一台机器、同一条跨境隧道）：
+                开启时 3 轮共 18 次<b className="text-ok-fg">全部稳定在 7 MB/s 左右</b>；
+                关闭时会出现两档 —— 快档 3~6 MB/s，<b className="text-bad-fg">慢档只有 20~60 KB/s</b>，
+                而且大约一半的请求会落到慢档，还会夹着 8 秒超时、0 字节。
+                <br />
+                原因：关闭后每个用户连接都要单独新建一条 work 连接，每次重新从
+                TCP 慢启动开始；链路上存在丢包时（你这条实测 10%），新建连接有很高
+                概率在第一轮就把窗口打崩，之后一直起不来。开启时所有流量复用一条
+                长期有流量的连接，窗口与 BBR 估计能一直维持在高位。
+                <br />
+                理论上的确是 yamux 单流窗口 256KB 会限制吞吐（≈256KB ÷ RTT），
+                但在有丢包的跨境链路上这条上限根本达不到，实测结论是相反的
+                —— 这也是为什么 frp 把它设为默认开启。
                 <b className="text-warn-fg">
                   {' '}要求所有客户端 ≥ {muxMinVer || '0.7.34'}；切换时隧道会中断十几秒。
                 </b>
               </span>
+
+              {/* 已经关掉的人给一条明确的回退提示：这是实测里最容易踩、
+                  代价最大的一项配置，不说清楚用户只会以为"隧道就是慢"。 */}
+              {tcpMux === '0' && (
+                <span className="mt-1.5 block rounded-md border border-bad-fg/40 bg-bad-dim px-2 py-1.5 text-[11.5px] leading-[1.6] text-bad-fg">
+                  你现在是<b>关闭</b>状态。除「客户端与服务端在同一内网、延迟 &lt; 5ms」
+                  这种特殊情况外，关闭只会让隧道慢 100~200 倍并随机卡死。
+                  建议取消勾选后保存，等约 15 秒隧道自动恢复，再去「隧道」页测速对比。
+                </span>
+              )}
 
               {/* 护栏前置到界面上。
                   之前这条判断只在保存时由后端返回 409，用户点了保存、看到一句

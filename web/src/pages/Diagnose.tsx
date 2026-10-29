@@ -200,7 +200,12 @@ type Verdict = { tone: 'ok' | 'warn' | 'bad'; title: string; detail: string }
  * 判断顺序按"先排除致命故障、再比较相对快慢"来 —— 不能让一个失败的测量
  * 参与比值运算，否则会得出"比 0 还慢"这种毫无意义的结论。
  */
-function buildVerdict(s3: BrowserSeg, s1: TunnelProbeResult | null, s2: ProxySeg): Verdict {
+function buildVerdict(
+  s3: BrowserSeg,
+  s1: TunnelProbeResult | null,
+  s2: ProxySeg,
+  muxOff: boolean,
+): Verdict {
   if (s1 && !s1.ok) {
     return {
       tone: 'bad',
@@ -213,6 +218,25 @@ function buildVerdict(s3: BrowserSeg, s1: TunnelProbeResult | null, s2: ProxySeg
       tone: 'bad',
       title: '你这台机器到服务器就不通',
       detail: `浏览器侧测速失败：${s3.err}。这一段与隧道无关，先确认本机网络能正常打开面板。`,
+    }
+  }
+  // 关闭 tcpMux 是实测里代价最大、也最容易被"理论推导"误导的一项配置。
+  // 2026-10-29 对照：开启 6/6 次 7.2MB/s；关闭后 21~59KB/s 与 3MB/s 二值跳变，
+  // 还出现 8 秒超时 0 字节 —— 差约 200 倍。
+  // 只要它关着且测得慢，就必须第一个说出来，否则后面所有判断都会指向错误方向
+  // （会被误读成"上行瓶颈"或"链路不稳定"）。
+  if (muxOff && s1 && s1.ok && s1.http && s1.speed > 0 && s1.speed < 512*1024) {
+    return {
+      tone: 'bad',
+      title: '你关闭了 TCP 多路复用（tcpMux），这大概率就是慢的主因',
+      detail:
+        `当前测得 ${fmtBytes(s1.speed)}/s，落在慢档。18 次对照的结果是：` +
+        '开启时 18/18 次全部稳定在 7MB/s 左右；关闭后会在 3~6MB/s 与 20~60KB/s 两档之间跳，' +
+        '约一半的请求落在慢档，还会随机超时。' +
+        '原因：关闭后每个用户连接都要单独新建 work 连接、重新从 TCP 慢启动开始；' +
+        '链路有丢包时（你这条实测 10%），新建连接第一轮就把窗口打崩，之后一直起不来。' +
+        '去「隧道」页把「关闭 TCP 多路复用」取消勾选并保存，等约 15 秒恢复后再测一次 —— ' +
+        '这是唯一一处"改一个开关就能拿回两个数量级"的地方。',
     }
   }
   // 抖动优先于一切"参数类"问题：
@@ -254,6 +278,27 @@ function buildVerdict(s3: BrowserSeg, s1: TunnelProbeResult | null, s2: ProxySeg
         '隧道返回数据走的就是这条上行。家用宽带的上行通常只有下行的几十分之一，' +
         '而所有"从你机器送出"的流量都要挤它。' +
         '这跟 tcpMux、连接池、压缩都无关，只能换宽带套餐或改走别的方式（比如在国内加中转）。',
+    }
+  }
+  // 上行极慢：所有"从你这台机器往外送"的流量都会被它卡住。
+  //
+  // 这条必须单列，否则会被"三段都正常"掩盖掉 —— 实测就出现过
+  // ① 6.7MB/s、② 875ms 都很好，但浏览器传 1MB 上服务器 12 秒都传不完。
+  // 用 curl 对照确认过不是前端实现的问题：同一时刻 1MB 上传有 60 秒超时的，
+  // 也有 1.25 秒跑完的（841KB/s），波动近 90 倍。
+  if (s3.upErr && s3.down > 0 && s1 && s1.ok) {
+    return {
+      tone: 'warn',
+      title: '你的上行方向极不稳定（下行是好的）',
+      detail:
+        `下行 ${fmtBytes(s3.down)}/s、走隧道 ${fmtBytes(s1.speed)}/s 都正常，` +
+        '但从这台机器往服务器推数据传不完（' +
+        (s3.upErr || '超时') +
+        '）。用 curl 对照过，这不是测量方式的问题：同一时刻 1MB 上传有 60 秒超时的，' +
+        '也有 1.2 秒跑完的，波动接近 90 倍。' +
+        '影响面是「从你这边发出的所有大流量」：上传文件、提交表单、视频上行。' +
+        '下行不受影响，所以下载和看网页感觉还行。这属于运营商上行链路质量，' +
+        'frp 侧没有参数能修 —— 换宽带或加中转。',
     }
   }
   // 两次测量差好几倍 = 这条链路不可信，单次数字不能当结论。
@@ -330,7 +375,7 @@ function buildVerdict(s3: BrowserSeg, s1: TunnelProbeResult | null, s2: ProxySeg
 }
 
 export function DiagnosePage() {
-  const { tunnels, agents, toast } = useApp()
+  const { tunnels, agents, settings, toast } = useApp()
 
   const [tunnelId, setTunnelId] = useState('')
   const [running, setRunning] = useState(false)
@@ -490,7 +535,9 @@ export function DiagnosePage() {
   }
 
   const done = s3.state === 'done' || s3.state === 'fail'
-  const verdict = done ? buildVerdict(s3, s1, s2) : null
+  // 关闭 tcpMux 时结论要优先指向它 —— 这是实测代价最大的一项配置。
+  const muxOff = settings?.tunnel_tcp_mux === '0'
+  const verdict = done ? buildVerdict(s3, s1, s2, muxOff) : null
 
   return (
     <>
@@ -638,6 +685,20 @@ export function DiagnosePage() {
           >
             <b>{verdict.title}</b>
             <div className="mt-1 opacity-90">{verdict.detail}</div>
+          </div>
+        )}
+
+        {/* mux 关着就始终提醒一句，不管这次测快还是测慢。
+            原因：它是"二值分布"——关掉之后有时也能跑到 2.9MB/s，
+            单次测量碰巧撞上快的那一档就不会触发结论里的那条判断。
+            但这个开关本身是隐患：慢的那一档是 20~60KB/s 且会随机超时，
+            用户下次访问就可能撞上。 */}
+        {muxOff && (
+          <div className="mt-2.5 rounded-lg border border-warn-fg/40 bg-warn-dim px-3.5 py-2.5 text-[12px] leading-[1.7] text-warn-fg">
+            <b>提醒：你的「关闭 TCP 多路复用」是开着的。</b>
+            {' '}这次可能测得不慢，但关闭状态下速度是二值分布 ——
+            实测同一时刻会落在 7.2MB/s 或 20~60KB/s 两档之一，并随机出现 8 秒超时。
+            建议在「隧道」页取消勾选，这是唯一一处"改一个开关就能稳掉两个数量级风险"的地方。
           </div>
         )}
       </Card>

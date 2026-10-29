@@ -182,13 +182,19 @@ type AgentConfig struct {
 	// 用指针是为了区分"老面板没下发"与"明确要求 false"：
 	// nil = 按客户端自己的历史默认值走（true），不会因为升级客户端而改变行为。
 
-	// TCPMux 是否启用 frp 的 TCP 多路复用（yamux）。
-	// 关掉 = 每个代理独占一条 TCP，绕过 yamux 的单流窗口限制。
-	// yamux 的 stream window 是 256KB 硬编码，吞吐上限 ≈ 256KB / RTT：
-	// 跨境 194ms 时只有 ~1.3MB/s，这正是"链路明明很宽、隧道却跑不满"的主因。
+	// TCPMux 是否启用 frp 的 TCP 多路复用（yamux）。**默认且推荐为 true。**
+	//
+	// ⚠ 2026-10-29 实测纠正：关闭它不是提速手段，而是 200 倍的性能倒退。
+	// 同一时刻同一条跨境隧道（RTT ~100ms、丢包 10%）：
+	//   开启 → 6/6 次全部 7.2MB/s；关闭 → 21~59KB/s 与 3MB/s 二值跳变 + 随机超时。
+	// 原因：关闭后每个用户连接都要新建 work 连接、重新慢启动，丢包时窗口被打崩；
+	// 开启则复用一条长期有流量的连接，窗口与 BBR 估计能维持在高位。
+	// 之前"256KB 单流窗口 ≈ 256KB ÷ RTT"的理论上限在有丢包的链路上根本达不到。
 	TCPMux *bool `json:"tcp_mux,omitempty"`
 	// PoolCount 预建连接池大小，仅在 TCPMux=false 时生效。
-	// 多条连接并行分摊，能把丢包链路上的单连接瓶颈摊薄。
+	//
+	// 注意：开池必须同时下发 transport.dialServerKeepalive，否则空闲连接被
+	// NAT 静默回收 —— 两端都以为 established，数据写进去就消失（实测 25 vs 7 条）。
 	PoolCount int `json:"pool_count,omitempty"`
 	// Compression 是否对隧道流做压缩。跨境小带宽链路上通常收益明显
 	// （HTTP 响应体可压 3~5 倍），对已压缩内容只是多花一点 CPU。

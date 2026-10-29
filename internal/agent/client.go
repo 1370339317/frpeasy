@@ -486,7 +486,13 @@ const (
 	// 保留它只是为了"面板还是老版本"时不要突然改变行为。
 	defaultSpeedInterval = 10 * time.Minute
 	speedTestDelay       = 30 * time.Second
-	speedTestBytes       = 1 << 20
+	// speedTestBytes 单次测量拉多少。
+	//
+	// 从 1MB 提到 4MB：一个样本要够大才能反映带宽，而不是"握手 + 慢启动"。
+	// 1MB 在 10MB/s 的链路上只跑 0.1 秒，测出来的是启动开销。
+	// 4MB 时 1MB/s 的慢链路要 4 秒（可接受），10MB/s 的要 0.4 秒（够采样）。
+	// 注意面板侧 /api/speedtest 必须允许这个大小，两边要一起改。
+	speedTestBytes       = 4 << 20
 	// speedMinInterval 防止面板下发一个荒谬的值（比如 1 秒）把链路打满。
 	speedMinInterval = time.Minute
 )
@@ -583,9 +589,15 @@ func (c *Client) measureDownlink() {
 	}
 	n, _ := io.Copy(io.Discard, resp.Body)
 	elapsed := time.Since(start).Seconds()
-	// 太快（<0.2s）多半是命中了缓存或数据被截断，这个数字没有参考价值，
-	// 宁可不报也不能让面板显示一个虚高的速度。
-	if n <= 0 || elapsed < 0.2 {
+	// 判据是"**确实拿到了完整的数据**"，而不是"耗时够不够长"。
+	//
+	// 早先用的是 `elapsed < 0.2s` 就丢弃，理由是"太快多半是命中缓存或数据被截断"。
+	// 但 2026-10-29 实测发现它是反向的：开启 tcpMux 后链路能到 9.8MB/s，
+	// 1MB 只要约 0.1 秒 —— 于是每次都判无效，**链路越快越测不出来**，
+	// 界面上永远显示几小时前的旧值。这是典型的"防错逻辑惩罚了正确结果"。
+	//
+	// 真正要防的是截断：服务端没把请求的字节数发完。那就直接比字节数。
+	if n < int64(speedTestBytes)*9/10 || elapsed <= 0 {
 		return
 	}
 	c.downKbps.Store(int64(float64(n*8) / elapsed / 1000))

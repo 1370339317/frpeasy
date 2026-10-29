@@ -128,6 +128,25 @@ func NewFrpsManager(db *DB, dataDir string) *FrpsManager {
 	}
 }
 
+// frpsLogMaxBytes 单个日志文件的上限。超过就在下次启动 frps 时轮转。
+//
+// 32MB 的选择：一天约 10MB（面板每 5 秒轮询 dashboard 的访问日志），
+// 32MB ≈ 三天的量，排障时够看；同时保证 4G 小盘上不会失控。
+const frpsLogMaxBytes = 32 << 20
+
+// rotateLogIfNeeded 把超限的 frps.log 挪成 .1（只留一代）。
+//
+// 只保留一代是刻意的：排障需要"当前 + 上一代"，再多只是拿磁盘换历史垃圾。
+// 失败一律忽略 —— 日志轮转失败远不如"frps 起不来"严重。
+func (m *FrpsManager) rotateLogIfNeeded() {
+	st, err := os.Stat(m.logPath)
+	if err != nil || st.Size() < frpsLogMaxBytes {
+		return
+	}
+	_ = os.Remove(m.logPath + ".1")
+	_ = os.Rename(m.logPath, m.logPath+".1")
+}
+
 // binaryPath frps 二进制预期路径。
 func (m *FrpsManager) binaryPath() string {
 	return filepath.Join(m.binDir, "frps"+shared.ExeSuffix())
@@ -394,6 +413,14 @@ func (m *FrpsManager) Start() (err error) {
 		}
 	}
 	cmd := exec.Command(bin, "--config", cfg)
+	// 写日志前先收敛一次大小。
+	//
+	// frps 的 info 日志里绝大部分是**面板自己**每 5 秒轮询 dashboard 产生的
+	// （`http request: [/api/proxy/tcp]`），实测一天约 10MB，且没有任何轮转：
+	// 跑几个月就能把一块 4G 盘的小机器写满，而磁盘写满时 frps 与面板一起挂。
+	// 每次启动时检查一次足够 —— 不需要精确的实时轮转。
+	m.rotateLogIfNeeded()
+
 	f, err := os.OpenFile(m.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err == nil {
 		cmd.Stdout = f

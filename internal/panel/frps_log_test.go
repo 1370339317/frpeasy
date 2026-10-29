@@ -43,3 +43,57 @@ func TestTailLogStartsAtLineBoundary(t *testing.T) {
 		t.Fatalf("截断后首行应当从时间戳开始，实际 %q", got[:min(30, len(got))])
 	}
 }
+
+// 日志超过阈值要轮转，只留一代。
+//
+// 背景：frps 的 info 日志绝大部分是面板自己每 5 秒轮询 dashboard 产生的，
+// 一天约 10MB 且从不轮转 —— 4G 小盘跑几个月会被写满，届时 frps 与面板一起挂。
+func TestRotateLogIfNeeded(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "frps.log")
+	m := &FrpsManager{logPath: logPath}
+
+	// 未超阈值：不动
+	if err := os.WriteFile(logPath, []byte("small"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.rotateLogIfNeeded()
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("未超阈值时不应轮转：%v", err)
+	}
+
+	// 超阈值：挪成 .1，原文件消失
+	f, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(frpsLogMaxBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	m.rotateLogIfNeeded()
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatal("超阈值后原文件应已被移走")
+	}
+	st, err := os.Stat(logPath + ".1")
+	if err != nil {
+		t.Fatalf("应保留一代 .1：%v", err)
+	}
+	if st.Size() != frpsLogMaxBytes+1 {
+		t.Fatalf(".1 应保留原内容，实际 %d 字节", st.Size())
+	}
+
+	// 再超一次：覆盖旧的 .1，不无限堆积
+	f2, _ := os.Create(logPath)
+	_ = f2.Truncate(frpsLogMaxBytes + 100)
+	_ = f2.Close()
+	m.rotateLogIfNeeded()
+	st2, err := os.Stat(logPath + ".1")
+	if err != nil {
+		t.Fatalf(".1 应仍然存在：%v", err)
+	}
+	if st2.Size() != frpsLogMaxBytes+100 {
+		t.Fatalf("应覆盖为最新一代，实际 %d 字节", st2.Size())
+	}
+}
