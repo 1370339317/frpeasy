@@ -643,8 +643,11 @@ export function SettingsPage({ section = 'global' }: { section?: SettingsSection
       // 保存后重新回填：服务端会规范化取值（例如去掉公网地址末尾的斜杠），
       // 让表单显示真正落库的值，避免"看起来没保存成功"。
       hydrated.current = false
-      // 必须重拉隧道：访问地址是按公网地址实时推导的，不刷新表格里还是旧地址
-      await Promise.all([loadSettings(), loadMe(), loadTunnels()])
+      // 必须重拉隧道：访问地址是按公网地址实时推导的，不刷新表格里还是旧地址。
+      // 也要重拉 tuning：卡片顶部「当前生效：多路复用 开/关」取自它，
+      // 不刷新就会一直显示保存前的值 —— 于是刚刚保存成功的改动看起来像"没保存"，
+      // 界面还会挂着"表单已改但还没保存"的黄条。
+      await Promise.all([loadSettings(), loadMe(), loadTunnels(), loadTuning()])
 
       if (r.public_addr_changed && (r.affected_tunnels ?? 0) > 0) {
         toast(
@@ -684,6 +687,7 @@ export function SettingsPage({ section = 'global' }: { section?: SettingsSection
     loadSettings,
     loadMe,
     loadTunnels,
+    loadTuning,
     toast,
   ])
 

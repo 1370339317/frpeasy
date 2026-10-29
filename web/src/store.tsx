@@ -286,6 +286,14 @@ export function AppProvider({
       // loadTunnels 一次带回隧道状态 + 客户端列表 + frps 概要，
       // 比分别调 /api/tunnels 和 /api/agents 省一个请求。
       void loadTunnels().catch(() => {})
+      // 设置也要跟着刷。
+      //
+      // 之前只刷 frps 和 tunnels，`settings` 在整个会话里只有打开页面那一次是新的
+      // —— 于是「当前生效：多路复用 开/关」这类状态会一直是旧值，
+      // 用 API 或另一台设备改过配置后本页永远看不到。
+      // 更糟的是设置页表单会用这份旧值当基线，用户一按保存就把新配置覆盖回去
+      // （实测发生过：API 把 tcpMux 改成开，用户点保存又变回关）。
+      void loadSettings().catch(() => {})
     }
     const h = window.setInterval(tick, 5000)
     // 从后台切回前台立刻补一次：后台标签的定时器会被浏览器节流到分钟级，
