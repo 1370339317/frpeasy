@@ -96,13 +96,31 @@ const emptyProxy: ProxySeg = { state: 'idle', speed: 0, ttfb: 0, ms: 0, bytes: 0
 async function withSegTimeout<T>(
   outer: AbortSignal,
   fn: (signal: AbortSignal) => Promise<T>,
+  what = '这一段',
 ): Promise<T> {
   const ac = new AbortController()
   const onOuter = () => ac.abort()
   outer.addEventListener('abort', onOuter, { once: true })
-  const timer = setTimeout(() => ac.abort(), SEG_TIMEOUT)
+  // timedOut 用来区分「超时」与「用户点了停止」：两者都表现为 AbortError，
+  // 但结论完全不同 —— 前者是链路问题要报出来，后者不该留下任何结论。
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    ac.abort()
+  }, SEG_TIMEOUT)
   try {
     return await fn(ac.signal)
+  } catch (e) {
+    // 浏览器的 AbortError 文案是 "signal is aborted without reason"，
+    // 直接透出去用户完全看不懂，而且会盖住"超时"这个真正的结论。
+    if (timedOut && !outer.aborted) {
+      throw new Error(
+        `${what}在 ${Math.round(SEG_TIMEOUT / 1000)} 秒内没传完` +
+          `（平均不到 ${Math.max(1, Math.round(DOWN_BYTES / 1024 / (SEG_TIMEOUT / 1000)))} KB/s）` +
+          ' —— 这个量级的卡顿通常意味着链路正在大量丢包，而不是某一项配置不对',
+      )
+    }
+    throw e
   } finally {
     clearTimeout(timer)
     outer.removeEventListener('abort', onOuter)
@@ -110,7 +128,17 @@ async function withSegTimeout<T>(
 }
 
 /** 读完整条响应流，边读边记首字节时间。返回吞吐与首字节。 */
-async function downloadAndTime(url: string, signal: AbortSignal) {
+/**
+ * 下载并计时。**按时间窗口采样，不按固定字节数。**
+ *
+ * 原先的做法是"下满 4MB 或 25 秒超时"：链路上只要掉到 160KB/s 以下就必然超时，
+ * 于是一次都测不出来 —— 而这恰恰是最需要诊断的时候（2026-10-29 晚高峰实测
+ * 下行跌到 780KB/s、ICMP 丢包 30%，体检三项全红，用户拿不到任何数字）。
+ *
+ * 现在读到 windowMs 就收工，用已收到的字节算速率：快链路拿满、慢链路也有一
+ * 个真实的低数字。硬超时（withSegTimeout）仍然保留，用来兜住"完全不动"。
+ */
+async function downloadAndTime(url: string, signal: AbortSignal, windowMs = 8000) {
   const t0 = performance.now()
   const res = await fetch(url, { cache: 'no-store', signal })
   if (!res.ok) {
@@ -130,6 +158,11 @@ async function downloadAndTime(url: string, signal: AbortSignal) {
       if (done) break
       if (!ttfb && value && value.byteLength > 0) ttfb = performance.now() - t0
       total += value ? value.byteLength : 0
+      // 到点就停：窗口内拿到的字节已经足够反映速率
+      if (performance.now() - t0 >= windowMs) {
+        incomplete = true
+        break
+      }
     }
   } catch (e) {
     // 读流中途被中断（超时或用户点停止）：**已经收到的字节仍然有意义**。
@@ -206,18 +239,31 @@ function buildVerdict(
   s2: ProxySeg,
   muxOff: boolean,
 ): Verdict {
+  // ③ 失败必须排在①之前判断。
+  //
+  // 2026-10-29 实测踩到的归因错误：③（浏览器→服务器）超时、① 也超时，
+  // 结论却写成「隧道是断的」—— 而真相是**整条跨境链路当时在丢 30% 的包**
+  // （ICMP 20 丢 6，下行从 7.6MB/s 掉到 0.78MB/s）。方向和处置完全不同：
+  // 前者要去查隧道/本地服务，后者只能换线路。
+  if (s3.state === 'fail') {
+    const bothBad = !!s1 && !s1.ok
+    return {
+      tone: 'bad',
+      title: bothBad ? '这一段链路整条都不通：你的网络和服务端都连不顺' : '你这台机器到服务器这一段就不行',
+      detail:
+        `浏览器直连面板就失败了：${s3.err}。` +
+        (bothBad
+          ? ' 而且「服务器 → 客户端」同时也失败 —— 三段一起坏，问题几乎一定在链路上（丢包/拥塞），' +
+            '而不是某条隧道或某个本地服务。先去测一下丢包：同一条命令连发 20 个包，' +
+            '若丢包超过 5%，任何 frp 参数都救不回来，只能换线路（国内节点或中转）。'
+          : ' 这一段与隧道无关，先确认本机能正常打开面板，再测隧道。'),
+    }
+  }
   if (s1 && !s1.ok) {
     return {
       tone: 'bad',
       title: '隧道是断的：服务器到客户端这一整段过不去',
       detail: `${s1.err}${s1.hint ? ' —— ' + s1.hint : ''}`,
-    }
-  }
-  if (s3.state === 'fail') {
-    return {
-      tone: 'bad',
-      title: '你这台机器到服务器就不通',
-      detail: `浏览器侧测速失败：${s3.err}。这一段与隧道无关，先确认本机网络能正常打开面板。`,
     }
   }
   // 关闭 tcpMux 是实测里代价最大、也最容易被"理论推导"误导的一项配置。
@@ -435,13 +481,15 @@ export function DiagnosePage() {
     setS3({ ...emptyBrowser, state: 'running' })
     const next3: BrowserSeg = { ...emptyBrowser, state: 'running' }
     try {
-      await withSegTimeout(ac.signal, async (signal) => {
+      await withSegTimeout(
+        ac.signal,
+        async (signal) => {
         const rtt = await measureRTT(signal)
         next3.rtt = rtt.p50
         next3.rttP95 = rtt.p95
         next3.slowCount = rtt.slow
         next3.sampleCount = rtt.n
-        const down = await downloadAndTime(`/api/linktest/down?bytes=${DOWN_BYTES}`, signal)
+        const down = await downloadAndTime(`/api/linktest/down?bytes=${DOWN_BYTES}`, signal, 8000)
         next3.down = down.speed
         next3.downTtfb = down.ttfb
         next3.bytes = down.total
@@ -465,7 +513,9 @@ export function DiagnosePage() {
           clearTimeout(upTimer)
           signal.removeEventListener('abort', onAbort)
         }
-      })
+        },
+        '你到服务器这一段',
+      )
       next3.state = 'done'
     } catch (e) {
       if (ac.signal.aborted) return
@@ -506,8 +556,10 @@ export function DiagnosePage() {
     setS2({ ...emptyProxy, state: 'running' })
     const next2: ProxySeg = { ...emptyProxy, state: 'running' }
     try {
-      const r = await withSegTimeout(ac.signal, (signal) =>
-        downloadAndTime(`/api/tunnels/${tunnel.id}/proxy-down?bytes=${PROXY_BYTES}`, signal),
+      const r = await withSegTimeout(
+        ac.signal,
+        (signal) => downloadAndTime(`/api/tunnels/${tunnel.id}/proxy-down?bytes=${PROXY_BYTES}`, signal, 6000),
+        '走隧道的完整路径',
       )
       next2.speed = r.speed
       next2.ttfb = r.ttfb
