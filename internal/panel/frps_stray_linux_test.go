@@ -3,6 +3,7 @@
 package panel
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,9 +46,30 @@ func TestKillStrayFrpsReapsSameBinary(t *testing.T) {
 	}()
 	time.Sleep(300 * time.Millisecond) // 等 /proc/<pid>/exe 指向可读
 
+	// 前置条件：必须读得到子进程的 /proc/<pid>/exe，且它确实指向我们复制的文件。
+	// 读不到（hidepid、容器 seccomp 限制）或指向别处（拷贝的二进制被拦截），
+	// 这个测试就无从验证 —— 直接 skip 并说明原因，比给出误导性的「实际 0」好。
+	// 2026-10-30 CI 就是这么挂的：只报 "实际 0"，看不出是环境不允许。
+	link, lerr := os.Readlink(fmt.Sprintf("/proc/%d/exe", stray.Process.Pid))
+	if lerr != nil {
+		t.Skipf("环境不允许读 /proc/<pid>/exe（%v），本测试无从验证", lerr)
+	}
+	got := strings.TrimSuffix(link, " (deleted)")
+	gotReal, binReal := got, bin
+	if r, e := filepath.EvalSymlinks(got); e == nil {
+		gotReal = r
+	}
+	if r, e := filepath.EvalSymlinks(bin); e == nil {
+		binReal = r
+	}
+	if gotReal != binReal {
+		t.Skipf("冒充进程的 exe 是 %q（realpath %q），不是预期 %q —— 环境不允许用拷贝的二进制冒充", got, gotReal, binReal)
+	}
+
 	m := NewFrpsManager(newTestDB(t), dir)
 	if n := m.killStrayFrps(); n != 1 {
-		t.Fatalf("应认领并清理 1 个残留进程，实际 %d", n)
+		t.Fatalf("应认领并清理 1 个残留进程，实际 %d（子进程 exe=%q realpath=%q，期望=%q）",
+			n, got, gotReal, m.binaryPath())
 	}
 
 	done := make(chan struct{})

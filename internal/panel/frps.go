@@ -581,7 +581,14 @@ func (m *FrpsManager) killStrayFrps() int {
 		}
 		// 二进制被替换过时内核会在链接尾部加 " (deleted)"
 		exe = strings.TrimSuffix(exe, " (deleted)")
-		if exe != want && exe != m.binaryPath() {
+		// /proc/<pid>/exe 是**内核解析后**的真实路径，而 m.binaryPath() 可能经过
+		// 符号链接（临时目录、/var/run → /run 之类）。两边都取 realpath 再比，
+		// 否则同一个文件会因为路径写法不同而认不出来。
+		exeReal := exe
+		if r, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+			exeReal = r
+		}
+		if exeReal != want && exe != want && exe != m.binaryPath() {
 			continue
 		}
 		if p, err := os.FindProcess(pid); err == nil {
