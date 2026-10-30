@@ -97,3 +97,38 @@ func TestRotateLogIfNeeded(t *testing.T) {
 		t.Fatalf("应覆盖为最新一代，实际 %d 字节", st2.Size())
 	}
 }
+
+// 全新安装时 <data>/bin 还不存在，取 frps 前必须自己建出来。
+//
+// 这是线上真实故障：新装机第一次启动直接报
+//   「frps 拉取失败（依次尝试 GitHub 直连）：GitHub 直连：创建临时目录失败：
+//     stat /opt/frpeasy/data/bin: no such file or directory」
+// 原因是 os.MkdirTemp **要求父目录已存在**，而 <data>/bin 以前只在
+// "第一次写文件时"才被创建。frpc 那条路径一直有 MkdirAll，只有 frps 漏了。
+func TestEnsureBinDirCreatesMissingDir(t *testing.T) {
+	dataDir := t.TempDir()
+	m := NewFrpsManager(nil, dataDir)
+	binDir := filepath.Join(dataDir, "bin")
+
+	if _, err := os.Stat(binDir); !os.IsNotExist(err) {
+		t.Fatalf("前提不成立：%s 不该预先存在（err=%v）", binDir, err)
+	}
+	if err := m.ensureBinDir(); err != nil {
+		t.Fatalf("应当建出目录，实际 %v", err)
+	}
+	st, err := os.Stat(binDir)
+	if err != nil || !st.IsDir() {
+		t.Fatalf("%s 应已存在且是目录：%v", binDir, err)
+	}
+	// 建完之后 MkdirTemp 必须能用（这才是真正要保证的事）
+	tmp, err := os.MkdirTemp(binDir, ".frpsext-*")
+	if err != nil {
+		t.Fatalf("目录建好后 MkdirTemp 仍失败：%v", err)
+	}
+	_ = os.RemoveAll(tmp)
+
+	// 幂等：再调一次不能报错
+	if err := m.ensureBinDir(); err != nil {
+		t.Fatalf("重复调用应无副作用，实际 %v", err)
+	}
+}

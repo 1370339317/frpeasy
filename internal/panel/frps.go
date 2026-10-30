@@ -148,6 +148,18 @@ func (m *FrpsManager) rotateLogIfNeeded() {
 }
 
 // binaryPath frps 二进制预期路径。
+// ensureBinDir 确保 <data>/bin 存在，失败时给出带路径的错误。
+//
+// 单独抽出来是因为它同时被"首次启动"和"每次取二进制"调用，而且这个目录
+// 缺失会让全新安装直接起不来（MkdirTemp 要求父目录已存在）。
+// 幂等：已存在时什么都不做。
+func (m *FrpsManager) ensureBinDir() error {
+	if err := os.MkdirAll(m.binDir, 0o755); err != nil {
+		return fmt.Errorf("创建 frps 缓存目录 %s 失败：%w", m.binDir, err)
+	}
+	return nil
+}
+
 func (m *FrpsManager) binaryPath() string {
 	return filepath.Join(m.binDir, "frps"+shared.ExeSuffix())
 }
@@ -258,9 +270,19 @@ func (m *FrpsManager) EnsureBinary() (string, error) {
 			// "text file busy"（ETXTBSY）—— 换版本必然失败，而且是在
 			// 「下载 20MB 都成功了」之后才失败，报错看着像文件被占用，很难联想到
 			// 是"自己正在跑"。rename 是原子替换，允许目标正在运行。
+			//
+			// 但 MkdirTemp 要求**父目录已存在**（Go 不会替你创建），所以这里
+			// 必须先 MkdirAll —— 否则全新安装第一次启动就必然失败：
+			//   「frps 拉取失败：创建临时目录失败：stat /opt/frpeasy/data/bin:
+			//     no such file or directory」
+			// 首次安装时 <data>/bin 还没被任何东西写过，就是不存在。
+			// （frpc 那条路径一直有 MkdirAll，所以只有 frps 会踩。）
+			if merr := m.ensureBinDir(); merr != nil {
+				return "", merr
+			}
 			tmpDir, terr := os.MkdirTemp(m.binDir, ".frpsext-*")
 			if terr != nil {
-				return "", fmt.Errorf("创建临时目录失败：%w", terr)
+				return "", fmt.Errorf("在 %s 下创建临时目录失败：%w", m.binDir, terr)
 			}
 			defer os.RemoveAll(tmpDir)
 			extracted, derr := shared.DownloadAndExtract(src.Apply(url), tmpDir, "frps")

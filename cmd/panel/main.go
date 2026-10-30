@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"syscall"
@@ -73,6 +74,17 @@ func main() {
 	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
 		fmt.Println("创建数据目录失败:", err)
 		os.Exit(1)
+	}
+	// 子目录也在启动时建好，不要留到"第一次写东西时"再创建。
+	// 教训：<data>/bin 以前就是按需创建的，而取 frps 用的是 os.MkdirTemp，
+	// 它**要求父目录已存在** —— 于是全新安装第一次启动必然报
+	// 「frps 拉取失败：创建临时目录失败：stat <data>/bin: no such file or directory」。
+	for _, sub := range []string{"bin", "frps"} {
+		dir := filepath.Join(*dataDir, sub)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			fmt.Printf("创建子目录 %s 失败: %v\n", dir, err)
+			os.Exit(1)
+		}
 	}
 
 	// 前端改动默认需要重新编译（go:embed 在编译期把文件打进二进制）。
