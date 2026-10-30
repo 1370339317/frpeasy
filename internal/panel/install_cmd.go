@@ -26,14 +26,49 @@ func (p *Panel) buildInstallCommand(r *http.Request) string {
 	return "curl -sSL " + panelHTTP + "/install | sh -s -- --server " + panelHTTP + " --token " + token
 }
 
+// winFetchPS1 返回「把 /install.ps1 落到 %TEMP% 并确认它真的落地」的一行片段。
+//
+// 三个约束必须同时满足，每一个都是踩出来的：
+//
+//  1. 不能依赖系统代理。.NET 的默认代理来自 WinINET（Internet 选项里的
+//     LAN 设置）。只放行少数域名的代理对裸公网 IP 一律回 502 —— 用户看到的是
+//     「面板明明活着，下载什么都是 502」，而面板侧完全正常（实测同一 URL
+//     直连 200 / 0.5 秒，走代理 502）。所以先清空默认代理直连，失败再用
+//     系统代理兜一次（真只能走代理的网络）。
+//  2. 不能用 `;` 串联。实测 PS 5.1：`iwr ... -ErrorAction Stop; & x.ps1` 前半段
+//     失败后，**后半段照样执行** —— 于是 %TEMP% 里上一次留下的旧脚本被当成
+//     新脚本跑起来，报的还是旧脚本的错，排查方向被彻底带偏（用户看到
+//     "downloading ... 502" 其实那个 502 来自上一次的命令）。必须 try/catch+exit。
+//  3. 不能引入自定义变量（$p = ...）。这条命令既可能粘进 cmd，也可能粘进
+//     PowerShell；在后者里外层会先把 $p 展开成空串，命令直接废掉。只允许
+//     $env:XXX 这种「外层展开后仍然是合法路径」的写法。
+func winFetchPS1(panelHTTP string) string {
+	url := panelHTTP + "/install.ps1"
+	out := `$env:TEMP\frpeasy-install.ps1`
+	return "Remove-Item " + out + " -Force -ErrorAction SilentlyContinue;" +
+		"try{" +
+		"[System.Net.WebRequest]::DefaultWebProxy=New-Object System.Net.WebProxy;" +
+		"Invoke-WebRequest -Uri '" + url + "' -OutFile " + out + " -UseBasicParsing -ErrorAction Stop" +
+		"}catch{" +
+		"try{" +
+		"[System.Net.WebRequest]::DefaultWebProxy=[System.Net.WebRequest]::GetSystemWebProxy();" +
+		"Invoke-WebRequest -Uri '" + url + "' -OutFile " + out + " -UseBasicParsing -ErrorAction Stop" +
+		"}catch{" +
+		"Write-Host '[frpeasy] cannot download install.ps1 - see the error above. If a local proxy answers 502, add the panel host to the proxy bypass list and retry.';" +
+		"exit 1" +
+		"}};" +
+		"if(-not (Test-Path " + out + ")){Write-Host '[frpeasy] install.ps1 did not land - not running it';exit 1};" +
+		"if((Get-Item " + out + ").Length -lt 2000){Write-Host '[frpeasy] install.ps1 looks truncated - not running it';exit 1};"
+}
+
 // buildInstallCommandWindows 生成 Windows（PowerShell）一键安装命令。
 //
-// 用 iwr 而非 irm：两者都能落地，但 iwr 的 -OutFile 语义更明确、老版本 5.1 行为一致。
 // 脚本正文是纯 ASCII，所以不存在「落地文件被按 ANSI 代码页解码」的乱码问题。
 func (p *Panel) buildInstallCommandWindows(r *http.Request) string {
 	panelHTTP := p.resolvePanelBase(r)
 	token := p.db.GetSetting("install_token")
-	return "powershell -ExecutionPolicy Bypass -Command \"iwr " + panelHTTP + "/install.ps1 -OutFile $env:TEMP\\frpeasy-install.ps1 -UseBasicParsing; & $env:TEMP\\frpeasy-install.ps1 -Server " + panelHTTP + " -Token " + token + "\""
+	return "powershell -ExecutionPolicy Bypass -Command \"" + winFetchPS1(panelHTTP) +
+		"& $env:TEMP\\frpeasy-install.ps1 -Server " + panelHTTP + " -Token " + token + "\""
 }
 
 // buildInstallCommandAndroid 生成 Android（adb shell）一键安装命令。
@@ -92,9 +127,13 @@ func (p *Panel) buildUninstallCommand(r *http.Request) string {
 }
 
 // buildUninstallCommandWindows 生成 Windows 卸载命令（计划任务 + 目录一并清理）。
+//
+// 与安装共用同一段下载逻辑：卸载同样会栽在「系统代理对裸 IP 回 502」上，
+// 而且卸载失败更难受 —— 用户以为已经清了，其实计划任务还在跑。
 func (p *Panel) buildUninstallCommandWindows(r *http.Request) string {
 	panelHTTP := p.resolvePanelBase(r)
-	return "powershell -ExecutionPolicy Bypass -Command \"iwr " + panelHTTP + "/install.ps1 -OutFile $env:TEMP\\frpeasy-install.ps1 -UseBasicParsing; & $env:TEMP\\frpeasy-install.ps1 -Uninstall\""
+	return "powershell -ExecutionPolicy Bypass -Command \"" + winFetchPS1(panelHTTP) +
+		"& $env:TEMP\\frpeasy-install.ps1 -Uninstall\""
 }
 
 // buildUninstallCommandAndroid 生成 Android（adb shell）卸载命令。

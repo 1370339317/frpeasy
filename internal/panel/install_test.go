@@ -214,6 +214,51 @@ func TestInstallScriptPS1UpgradeAndRollback(t *testing.T) {
 	}
 }
 
+// Windows 一键命令必须能在「本机系统代理对裸 IP 一律 502」的机器上跑通。
+//
+// 真机故障：WinINET 代理 127.0.0.1:10809 只放行白名单域名，对
+// http://47.80.4.36:28080 回 502；同一 URL 直连是 200 / 0.5s。旧命令直接用
+// iwr，于是「面板活着，装什么都是 502」，用户完全无从判断。
+//
+// 同一处还有第二个坑：旧命令用 `;` 串联下载与执行，而 PS 5.1 在
+// `-ErrorAction Stop` 失败后**仍会执行后面的语句**（已实测：探针脚本照样跑）。
+// 于是 %TEMP% 里上一次残留的旧脚本被当成新的执行，报的错与本次无关。
+func TestWindowsInstallCommandIsProxySafe(t *testing.T) {
+	p := newTestPanel(t)
+	_ = p.db.SetSetting("install_token", "tok123")
+	_ = p.db.SetSetting("public_addr", "1.2.3.4:8080")
+
+	for name, cmd := range map[string]string{
+		"install":   p.buildInstallCommandWindows(nil),
+		"uninstall": p.buildUninstallCommandWindows(nil),
+	} {
+		if !strings.Contains(cmd, "DefaultWebProxy=New-Object System.Net.WebProxy") {
+			t.Fatalf("%s: 必须先清空默认代理直连（系统代理对裸 IP 会回 502）: %s", name, cmd)
+		}
+		if !strings.Contains(cmd, "GetSystemWebProxy") {
+			t.Fatalf("%s: 直连失败要回落到系统代理（确实只能走代理的网络）: %s", name, cmd)
+		}
+		if strings.Contains(cmd, "UseBasicParsing; & $env:TEMP") {
+			t.Fatalf("%s: 不能用 ; 串联下载与执行 —— PS 5.1 下载失败后仍会执行 %%TEMP%% 里的旧脚本: %s", name, cmd)
+		}
+		if !strings.Contains(cmd, "exit 1") {
+			t.Fatalf("%s: 下载失败必须终止，不能继续往下执行: %s", name, cmd)
+		}
+		// 命令既可能粘进 cmd 也可能粘进 PowerShell；后者的外层会先把 $p 展开成空串
+		if strings.Contains(cmd, "$p=") || strings.Contains(cmd, "$d=") || strings.Contains(cmd, "$f=") {
+			t.Fatalf("%s: 不能引入自定义变量（粘进 PowerShell 会被外层展开）: %s", name, cmd)
+		}
+	}
+
+	install := p.buildInstallCommandWindows(nil)
+	if !strings.Contains(install, "-Server http://1.2.3.4:8080") || !strings.Contains(install, "-Token tok123") {
+		t.Fatalf("安装命令应带上服务器地址与安装令牌: %s", install)
+	}
+	if !strings.Contains(p.buildUninstallCommandWindows(nil), "-Uninstall") {
+		t.Fatalf("卸载命令应带 -Uninstall: %s", p.buildUninstallCommandWindows(nil))
+	}
+}
+
 // Android 的安装命令要能在设备上落地并执行，且带着服务器与令牌。
 func TestBuildInstallCommands(t *testing.T) {
 	p := newTestPanel(t)

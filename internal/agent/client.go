@@ -387,6 +387,25 @@ func (c *Client) Shutdown() {
 	}
 }
 
+// authBackoff 返回第 n 次凭据失败后的等待时间：10s、20s、40s…封顶 5 分钟。
+//
+// 凭据被拒不是网络抖动，重试再快也不会成功，只会把面板和日志刷满；
+// 但也不能退到太慢，因为用户重装后这一代进程往往还活着（要等下一次心跳）。
+func authBackoff(n int) time.Duration {
+	const cap = 5 * time.Minute
+	if n < 1 {
+		n = 1
+	}
+	d := 10 * time.Second
+	for i := 1; i < n && d < cap; i++ {
+		d *= 2
+	}
+	if d > cap {
+		d = cap
+	}
+	return d
+}
+
 func (c *Client) Run() error {
 	// 先收掉上一代可能残留的 frpc（上次被强杀时留下的孤儿）。
 	// 必须在起新 frpc 之前：否则两个 frpc 会抢同一个 proxy 名，
@@ -412,22 +431,40 @@ func (c *Client) Run() error {
 	// 一次 1MB 的下载在慢链路上要好几秒，放主循环里就是又一次心跳停摆。
 	go c.speedTestLoop()
 
+	// 凭据被面板拒绝的连续次数（见下面 unauthorized 分支的说明）。
+	authFails := 0
+
 	for {
 		cfg, err := c.fetchConfig()
 		if err != nil {
 			if err.Error() == "unauthorized" {
-				log.Println("[agent] 凭据失效，重新注册…")
+				// 面板拒绝了这个客户端的 agent_token。本机**无法自愈**：
+				// 重新注册要的是安装令牌，agent 手里只有 agent_token。
+				// 典型成因是面板重装/恢复了数据库、或安装令牌被重置 ——
+				// 这时唯一出路是人拿面板上的新安装命令重装一次。
+				//
+				// 以前这里每 10 秒刷一行「重新注册失败」，既打面板又淹没日志，
+				// 而且从头到尾没告诉用户该做什么。现在：首轮把话说清楚，
+				// 之后指数退避（10s→…→5min 封顶），日志不再重复。
+				authFails++
+				if authFails == 1 {
+					log.Println("[agent] 面板拒绝本机凭据（agent_token 无效）。常见成因：面板重装/恢复过数据库，或安装令牌被重置。")
+					log.Println("[agent] 处理办法：在面板客户端页复制本平台的安装命令，在本机重新执行一次；期间会退避重试。")
+				}
 				if rerr := c.register(); rerr != nil {
-					log.Println("[agent] 重新注册失败:", rerr)
-					time.Sleep(10 * time.Second)
+					d := authBackoff(authFails)
+					log.Printf("[agent] 重新注册失败（第 %d 次，%s 后重试）: %v", authFails, d, rerr)
+					time.Sleep(d)
 					continue
 				}
+				authFails = 0
 				continue
 			}
 			log.Println("[agent] 拉取配置失败:", err)
 			time.Sleep(10 * time.Second)
 			continue
 		}
+		authFails = 0
 
 		// 面板请求日志（用户在面板点了「查看日志」）：只在请求 ID 变化时回传一次。
 		// 失败不记 lastLogReq —— 下一轮会重试；成功后面板会清掉请求，
@@ -497,7 +534,7 @@ const (
 	// 1MB 在 10MB/s 的链路上只跑 0.1 秒，测出来的是启动开销。
 	// 4MB 时 1MB/s 的慢链路要 4 秒（可接受），10MB/s 的要 0.4 秒（够采样）。
 	// 注意面板侧 /api/speedtest 必须允许这个大小，两边要一起改。
-	speedTestBytes       = 4 << 20
+	speedTestBytes = 4 << 20
 	// 上行测量分块：每块 512KB、最多 4 块（2MB 上限）、单块 15 秒超时。
 	//
 	// 分块是为了不让慢链路把测速 worker 堵死（用户上行会掉到 4KB/s，

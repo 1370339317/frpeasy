@@ -32,7 +32,21 @@ if ($Source -or $GitBase) {
 }
 $srcArgs = @()
 $TaskName = "frpeasy-agent"
-$dir = Join-Path $env:ProgramData "frpeasy-agent"
+# $env:ProgramData is normally always present, but when it is missing Join-Path
+# dies with "Cannot bind argument to parameter 'Path' because it is null" -
+# before the admin check, before any download, with no hint about the cause.
+# Derive a fallback so the script can still say something useful.
+$pd = $env:ProgramData
+if (-not $pd) {
+  $sd = $env:SystemDrive
+  if (-not $sd) { $sd = "C:" }
+  $pd = Join-Path $sd "ProgramData"
+}
+if (-not (Test-Path $pd)) {
+  Write-Host "[frpeasy] ERROR: cannot find ProgramData (env:ProgramData is empty and $pd does not exist)." -ForegroundColor Red
+  exit 1
+}
+$dir = Join-Path $pd "frpeasy-agent"
 $exe = Join-Path $dir "frpeasy-agent.exe"
 $bak = Join-Path $dir "frpeasy-agent.exe.bak"
 
@@ -101,6 +115,35 @@ if (-not (Test-Admin)) {
   Fail "administrator rights required. Right-click PowerShell and choose 'Run as Administrator'."
 }
 
+# Downloads one file from the panel, surviving a hostile system proxy.
+#
+# .NET's default proxy comes from WinINET (the "LAN settings" in Internet
+# Options). Proxies that only whitelist a few hosts answer 502 Bad Gateway for
+# everything else - a bare public IP like http://1.2.3.4:8080 included. The
+# user then sees a wall of "502" for an address that is perfectly reachable,
+# and every download in this script fails for a reason that has nothing to do
+# with us.
+#
+# So: try direct first (right for the common case, and for any box whose proxy
+# is broken or stale), then retry through the system proxy so a genuinely
+# proxy-only network still works. Both failing is a hard error and the caller
+# reports it.
+function Get-AgentFile {
+  param([string]$Url, [string]$Out)
+  $saved = [System.Net.WebRequest]::DefaultWebProxy
+  try {
+    [System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy
+    Invoke-WebRequest -Uri $Url -OutFile $Out -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
+    return
+  } catch {
+    Write-Host "[frpeasy]   direct attempt failed: $($_.Exception.Message)" -ForegroundColor Yellow
+  } finally {
+    [System.Net.WebRequest]::DefaultWebProxy = $saved
+  }
+  Write-Host "[frpeasy]   retrying through the system proxy ..."
+  Invoke-WebRequest -Uri $Url -OutFile $Out -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
+}
+
 if ($Uninstall) {
   Remove-AgentTask
   # Tell the panel "this machine is being uninstalled" before the state file goes
@@ -150,7 +193,7 @@ foreach ($a in $tryArch) {
   $url = "$Server/api/agent/bin/windows/$a"
   Write-Host "[frpeasy] downloading $url ..."
   try {
-    Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -TimeoutSec 300
+    Get-AgentFile -Url $url -Out $tmp
     $sz = (Get-Item $tmp).Length
     if ($sz -lt 1000000) { throw "downloaded file is too small ($sz bytes)" }
     $newVer = Get-ExeVersion $tmp
@@ -164,7 +207,7 @@ foreach ($a in $tryArch) {
   }
 }
 if (-not $newVer) {
-  Fail "could not download a working agent binary (see the HTTP error above). Nothing was changed on this machine. Check: 1) the panel URL is reachable from here; 2) the panel has an update source configured (panel -> Settings -> version & update) - the panel fetches the agent binary from there on first request; 3) that the panel itself can reach the internet or its configured mirror."
+  Fail "could not download a working agent binary (see the HTTP error above). Nothing was changed on this machine. Check: 1) the panel URL is reachable from here; 2) the panel has an update source configured (panel -> Settings -> version & update) - the panel fetches the agent binary from there on first request; 3) that the panel itself can reach the internet or its configured mirror; 4) a system proxy answering 502 - add the panel host to the proxy bypass list and retry."
 }
 
 $oldVer = $null
