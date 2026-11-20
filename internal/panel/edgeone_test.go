@@ -71,12 +71,12 @@ func TestEdgeOneCallShape(t *testing.T) {
 	defer srv.Close()
 	edgeOneBase = srv.URL
 
-	c := newEdgeOne("AKIDxxx", "SECRETxxx", "ap-guangzhou")
+	c := newEdgeOne("AKIDxxx", "SECRETxxx", "ap-guangzhou", edgeOneBase)
 	zones, err := c.ListZones()
 	if err != nil {
 		t.Fatalf("ListZones 失败: %v", err)
 	}
-	if len(zones) != 1 || zones[0].ZoneID != "zone-1" {
+	if len(zones.Zones) != 1 || zones.Zones[0].ZoneID != "zone-1" {
 		t.Fatalf("解析站点失败: %+v", zones)
 	}
 	if gotAction != "DescribeZones" || gotVersion != edgeOneVersion {
@@ -99,7 +99,7 @@ func TestEdgeOneSurfacesTencentError(t *testing.T) {
 	defer srv.Close()
 	edgeOneBase = srv.URL
 
-	_, err := newEdgeOne("AKIDxxx", "SECRETxxx", "").ListZones()
+	_, err := newEdgeOne("AKIDxxx", "SECRETxxx", "", edgeOneBase).ListZones()
 	if err == nil {
 		t.Fatal("应返回错误")
 	}

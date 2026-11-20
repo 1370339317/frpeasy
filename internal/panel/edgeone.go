@@ -13,8 +13,17 @@ import (
 	"time"
 )
 
-// edgeOneBase 可被测试替换为 httptest 地址。
-var edgeOneBase = "https://teo.tencentcloudapi.com"
+// EdgeOne 有两个互相独立的账号体系：腾讯云国内站（cloud.tencent.com）和国际站
+// （edgeone.ai / intl.cloud.tencent.com）。两边的站点数据不互通，API 域名也不同。
+// 用国内站域名去查国际站账号，最常见的结果就是"签名通过、站点列表为空" ——
+// 看起来像"账号下没有站点"，实际是连错了端点。
+const (
+	edgeOneEndpointCN   = "https://teo.tencentcloudapi.com"
+	edgeOneEndpointIntl = "https://teo.intl.tencentcloudapi.com"
+)
+
+// edgeOneBase 是默认端点，测试用它替换成 httptest 地址。
+var edgeOneBase = edgeOneEndpointCN
 
 // edgeOneVersion 是 EdgeOne（teo）的 API 版本。写死在这里而不是做成配置项：
 // 腾讯云各产品的版本号是按接口族固定的，跟套餐/站点无关，暴露给用户只会让人填错。
@@ -29,17 +38,19 @@ type edgeOne struct {
 	secretID  string
 	secretKey string
 	region    string
+	base      string
 	client    *http.Client
 }
 
-func newEdgeOne(secretID, secretKey, region string) *edgeOne {
-	if strings.TrimSpace(region) == "" {
-		region = "ap-guangzhou" // teo 的 Region 可选，官方示例用的是这个
+func newEdgeOne(secretID, secretKey, region, base string) *edgeOne {
+	if strings.TrimSpace(base) == "" {
+		base = edgeOneBase
 	}
 	return &edgeOne{
 		secretID:  secretID,
 		secretKey: secretKey,
-		region:    region,
+		region:    strings.TrimSpace(region),
+		base:      base,
 		client:    &http.Client{Timeout: 20 * time.Second},
 	}
 }
@@ -102,10 +113,10 @@ func (e *edgeOne) call(action string, payload any) (json.RawMessage, error) {
 		return nil, err
 	}
 	ts := time.Now().Unix()
-	host := strings.TrimPrefix(strings.TrimPrefix(edgeOneBase, "https://"), "http://")
+	host := strings.TrimPrefix(strings.TrimPrefix(e.base, "https://"), "http://")
 	host = strings.TrimSuffix(host, "/")
 
-	req, err := http.NewRequest(http.MethodPost, edgeOneBase, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, e.base, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +125,11 @@ func (e *edgeOne) call(action string, payload any) (json.RawMessage, error) {
 	req.Header.Set("X-TC-Action", action)
 	req.Header.Set("X-TC-Version", edgeOneVersion)
 	req.Header.Set("X-TC-Timestamp", fmt.Sprintf("%d", ts))
-	req.Header.Set("X-TC-Region", e.region)
+	// Region 为空就不发：teo 的 Region 是可选参数，硬填一个值可能在部分账号上
+	// 被当作资源过滤条件，表现为"站点列表为空"而签名完全正常。
+	if e.region != "" {
+		req.Header.Set("X-TC-Region", e.region)
+	}
 	req.Header.Set("Authorization", tc3Signature(ts, body, e.secretID, e.secretKey, host))
 
 	resp, err := e.client.Do(req)
@@ -175,18 +190,35 @@ type Zone struct {
 
 // ListZones 取站点列表。这是「验签」用的最小只读接口：
 // 只要密钥错了、Region 错了、时钟偏了，这里立刻会给出明确错误。
-func (e *edgeOne) ListZones() ([]Zone, error) {
-	raw, err := e.call("DescribeZones", map[string]any{"Offset": 0, "Limit": 20})
+// ZoneList 带诊断信息的站点列表。
+//
+// 空列表必须能自解释：调用方要能区分「账号下确实没有站点」和「连错了端点 /
+// 分页参数被忽略 / 返回字段变了」。否则用户只会看到一句"没有站点"，然后去
+// 控制台反复确认自己明明有站点。
+type ZoneList struct {
+	Zones    []Zone `json:"zones"`
+	Total    int    `json:"total"`
+	Endpoint string `json:"endpoint"`
+	Raw      string `json:"raw,omitempty"`
+}
+
+func (e *edgeOne) ListZones() (*ZoneList, error) {
+	raw, err := e.call("DescribeZones", map[string]any{"Offset": 0, "Limit": 100})
 	if err != nil {
 		return nil, err
 	}
 	var out struct {
-		Zones []Zone `json:"Zones"`
+		Zones      []Zone `json:"Zones"`
+		TotalCount int    `json:"TotalCount"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("解析站点列表失败：%w", err)
 	}
-	return out.Zones, nil
+	zl := &ZoneList{Zones: out.Zones, Total: out.TotalCount, Endpoint: e.base}
+	if len(out.Zones) == 0 {
+		zl.Raw = snippet(raw)
+	}
+	return zl, nil
 }
 
 // AccelDomain 一条加速域名的状态。

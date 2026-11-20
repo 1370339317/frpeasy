@@ -23,6 +23,7 @@ const (
 	settingCDNTencentKey   = "cdn_tencent_secret_key"
 	settingCDNTencentZone  = "cdn_tencent_zone_id"
 	settingCDNTencentReg   = "cdn_tencent_region"
+	settingCDNTencentEP    = "cdn_tencent_endpoint" // cn | intl
 	settingCDNDomain       = "cdn_domain"
 	settingCDNConnectPort  = "cdn_connect_port"
 	settingCDNOriginScheme = "cdn_origin_scheme"
@@ -84,6 +85,7 @@ func (p *Panel) cdnConfigView() map[string]string {
 		settingCDNTencentKey:   mask(settingCDNTencentKey),
 		settingCDNTencentZone:  p.db.GetSetting(settingCDNTencentZone),
 		settingCDNTencentReg:   p.db.GetSetting(settingCDNTencentReg),
+		settingCDNTencentEP:    p.db.GetSetting(settingCDNTencentEP),
 		settingCDNDomain:       p.db.GetSetting(settingCDNDomain),
 		settingCDNConnectPort:  p.db.GetSetting(settingCDNConnectPort),
 		settingCDNOriginScheme: p.db.GetSetting(settingCDNOriginScheme),
@@ -92,6 +94,9 @@ func (p *Panel) cdnConfigView() map[string]string {
 		settingCDNAliyunKey:    mask(settingCDNAliyunKey),
 		settingCDNAliyunRoot:   p.db.GetSetting(settingCDNAliyunRoot),
 		settingCDNDNSRR:        p.db.GetSetting(settingCDNDNSRR),
+	}
+	if view[settingCDNTencentEP] == "" {
+		view[settingCDNTencentEP] = "cn"
 	}
 	if view[settingCDNConnectPort] == "" {
 		view[settingCDNConnectPort] = "443"
@@ -120,7 +125,7 @@ func (p *Panel) cdnConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	allowed := map[string]bool{
 		settingCDNEnabled: true, settingCDNTencentID: true, settingCDNTencentKey: true,
-		settingCDNTencentZone: true, settingCDNTencentReg: true, settingCDNDomain: true,
+		settingCDNTencentZone: true, settingCDNTencentReg: true, settingCDNTencentEP: true, settingCDNDomain: true,
 		settingCDNConnectPort: true, settingCDNOriginScheme: true, settingCDNWSTimeout: true,
 		settingCDNAliyunID: true, settingCDNAliyunKey: true, settingCDNAliyunRoot: true,
 		settingCDNDNSRR: true,
@@ -150,7 +155,11 @@ func (p *Panel) cdnClient() (*edgeOne, error) {
 	if id == "" || key == "" {
 		return nil, fmt.Errorf("还没有填腾讯云 SecretId / SecretKey")
 	}
-	return newEdgeOne(id, key, strings.TrimSpace(p.db.GetSetting(settingCDNTencentReg))), nil
+	base := edgeOneEndpointCN
+	if strings.TrimSpace(p.db.GetSetting(settingCDNTencentEP)) == "intl" {
+		base = edgeOneEndpointIntl
+	}
+	return newEdgeOne(id, key, strings.TrimSpace(p.db.GetSetting(settingCDNTencentReg)), base), nil
 }
 
 // cdnVerifyHandler POST /api/cdn/verify —— 只做只读调用，确认密钥/区域/时钟都正常。
@@ -160,12 +169,20 @@ func (p *Panel) cdnVerifyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	zones, err := c.ListZones()
+	zl, err := p.listZonesAuto(c)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "zones": zones})
+	writeJSON(w, map[string]any{
+		"ok":       true,
+		"zones":    zl.Zones,
+		"total":    zl.Total,
+		"endpoint": zl.Endpoint,
+		"raw":      zl.Raw,
+		// 空列表不是错误，但要给出下一步该查什么。这三种原因占了绝大多数。
+		"hint": emptyZoneHint(p, zl),
+	})
 }
 
 // cdnStep 一次编排里的一步结果。失败时不抛异常，而是把每一步都记下来，
@@ -204,10 +221,21 @@ func (p *Panel) cdnProvisionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := c.ListZones(); !add("校验腾讯云密钥", err, "签名与调用正常") {
+	zl, err := p.listZonesAuto(c)
+	if err != nil {
+		add("校验腾讯云密钥", err, "")
 		writeJSON(w, map[string]any{"ok": false, "steps": steps})
 		return
 	}
+	if len(zl.Zones) == 0 {
+		// 签名没问题的前提下拿到空列表：几乎都是端点/区域/authz 的问题，
+		// 不能笼统说"没有站点"就继续往下走（后面必然失败）。
+		add("校验腾讯云密钥", fmt.Errorf("密钥可用但站点列表为空：%s", emptyZoneHint(p, zl)),
+			"端点 "+zl.Endpoint)
+		writeJSON(w, map[string]any{"ok": false, "steps": steps})
+		return
+	}
+	add("校验腾讯云密钥", nil, fmt.Sprintf("签名正常，可见 %d 个站点（端点 %s）", zl.Total, zl.Endpoint))
 
 	existing, err := c.GetAccelDomain(zoneID, domain)
 	if !add("查询加速域名", err, "已完成") {
@@ -293,4 +321,54 @@ func (p *Panel) cdnOriginPort() int {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// emptyZoneHint 在"签名通过但站点列表为空"时给出可执行的排查方向。
+//
+// 这个组合最容易误判成"账号下没有站点"：用户明明在控制台看得到站点。
+// 实际最常见的是连错端点（国内站 / 国际站两套账号体系）或子账号被按站点隔离。
+func emptyZoneHint(p *Panel, zl *ZoneList) string {
+	ep := zl.Endpoint
+	if strings.Contains(ep, "intl") {
+		ep = "国际站（teo.intl.tencentcloudapi.com）"
+	} else {
+		ep = "国内站（teo.tencentcloudapi.com）"
+	}
+	region := strings.TrimSpace(p.db.GetSetting(settingCDNTencentReg))
+	regionTip := "未发送 Region 头"
+	if region != "" {
+		regionTip = "当前 Region=" + region + "，可尝试清空（teo 的 Region 是可选参数）"
+	}
+	return fmt.Sprintf("当前连的是%s，%s。请依次确认："+
+		"① 站点是在哪个控制台创建的（cloud.tencent.com 还是 edgeone.ai），不一致就切换端点；"+
+		"② 子账号的 CAM 策略是否被限定到某个站点（按站点隔离时列表为空）；"+
+		"③ 原始返回：%s", ep, regionTip, zl.Raw)
+}
+
+// listZonesAuto 先用配置的端点查，空列表就自动换另一套账号体系的端点再查一次。
+//
+// EdgeOne 国内站与国际站是两个互不相通的账号体系，站点数据不共享，但 TC3 签名
+// 规则完全一样 —— 用错端点时不会报鉴权失败，只会"安静地返回空列表"。让用户自己
+// 去判断该连哪个域名既没必要也容易出错，这里直接两边都试。
+func (p *Panel) listZonesAuto(c *edgeOne) (*ZoneList, error) {
+	first, err := c.ListZones()
+	if err != nil {
+		return nil, err
+	}
+	if len(first.Zones) > 0 {
+		return first, nil
+	}
+	alt := edgeOneEndpointIntl
+	if strings.Contains(c.base, "intl") {
+		alt = edgeOneEndpointCN
+	}
+	id := strings.TrimSpace(p.db.GetSetting(settingCDNTencentID))
+	key := strings.TrimSpace(p.db.GetSetting(settingCDNTencentKey))
+	second, err2 := newEdgeOne(id, key, c.region, alt).ListZones()
+	if err2 == nil && len(second.Zones) > 0 {
+		return second, nil
+	}
+	// 两边都空（或另一端点报错）时返回第一次的结果：它带着原始响应片段，
+	// 足以判断是"确实没有站点"还是"两套账号都没有"。
+	return first, nil
 }
