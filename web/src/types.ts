@@ -728,6 +728,8 @@ export interface CdnConfig {
   cdn_tencent_secret_key: string
   cdn_tencent_zone_id: string
   cdn_tencent_region: string
+  /** cn | intl —— EdgeOne 两套互不相通的账号体系，空值由后端补 'cn' */
+  cdn_tencent_endpoint: string
   cdn_domain: string
   cdn_connect_port: string
   /** HTTP / HTTPS */
@@ -796,4 +798,30 @@ export interface CdnProvisionResult {
   /** 成功后客户端应连接的「域名:端口」 */
   connect_addr?: string
   steps: CdnProvisionStep[] | null
+}
+
+/** 站点下的一条加速域名（字段名跟腾讯云 JSON 一致）。 */
+export interface CdnDomain {
+  DomainName: string
+  /** EdgeOne 分配的 CNAME，需要（手工或自动）指到 DNS */
+  Cname: string
+  DomainStatus: string
+  IdentificationStatus: string
+  /** 回源端口：应该是 frps 的 bindPort，否则这条域名连不上 */
+  HttpOriginPort: number
+  HttpsOriginPort: number
+}
+
+/** POST /api/cdn/domains */
+export interface CdnDomainsResult {
+  ok: boolean
+  domains: CdnDomain[] | null
+}
+
+/** POST /api/cdn/domain-create：existed=true 表示复用已有域名，没有新建。 */
+export interface CdnDomainCreateResult {
+  ok: boolean
+  existed: boolean
+  cname: string
+  domain: string
 }

@@ -336,3 +336,26 @@ func (e *edgeOne) probePermissions() []ZoneProbe {
 	}
 	return out
 }
+
+// ListAccelDomains 列出站点下所有加速域名。
+//
+// 向导第三步要"点选已有域名"，而不是让用户手打全名 —— 手打既容易拼错，
+// 也容易把一个尚未添加到该站点的域名填进来（后面创建必然失败）。
+func (e *edgeOne) ListAccelDomains(zoneID string) ([]AccelDomain, error) {
+	raw, err := e.call("DescribeAccelerationDomains", map[string]any{
+		"ZoneId": zoneID,
+		"Offset": 0,
+		"Limit":  100,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		AccelerationDomains []AccelDomain `json:"AccelerationDomains"`
+		TotalCount          int           `json:"TotalCount"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("解析加速域名列表失败：%w", err)
+	}
+	return out.AccelerationDomains, nil
+}

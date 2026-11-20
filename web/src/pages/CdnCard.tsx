@@ -1,250 +1,522 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useApp } from '../store'
 import { api } from '../lib/api'
-import { Badge, Button, Card, Field, Hint, Input, Table, Td, cx } from '../components/ui'
+import { Badge, Button, Card, Field, Hint, Input, cx } from '../components/ui'
 import type {
   CdnConfig,
-  CdnConfigKey,
   CdnConfigPatch,
+  CdnDomain,
+  CdnDomainCreateResult,
+  CdnDomainsResult,
   CdnProvisionResult,
   CdnVerifyResult,
   CdnZone,
+  CdnZoneProbe,
+  LinkQualityApplied,
+  LinkQualityResponse,
 } from '../types'
 
 /**
- * CDN 加速接入（腾讯云 EdgeOne）。
+ * CDN 加速接入（腾讯云 EdgeOne）—— 四步向导。
  *
  * 解决的问题：frpc → frps 这段跨境裸 TCP 一旦丢包，吞吐会塌到 KB/s 量级；
  * 把这段换成 CDN 边缘回源之后，客户端只需要一条到就近节点的 wss 长连接。
- * 代价是加速层只认 HTTP / WebSocket，所以客户端必须从 TCP 改成 wss
- * —— 这也是为什么「启用 CDN」不是纯服务器侧开关，它会改变所有客户端的连接方式。
  *
- * 三个按钮对应三种完全不同的语义，界面上必须区分清楚：
- *   保存配置  — 只写库，不发任何云厂商请求；
- *   验证密钥  — 只读调用（列站点），验证的是**已保存**的密钥；
- *   一键接入  — 建加速域名 / 开 WebSocket / 加 CNAME，幂等但会真的动云端资源。
- * 所以前两个按钮旁必须提示「先保存再验证」，否则用户改完密钥直接点验证，
- * 验的是旧密钥，会得到一条莫名其妙的报错。
+ * 为什么是向导而不是一张表单：这条链路的四件事是有严格顺序的（验密钥 →
+ * 选站点 → 选域名 → 建加速域名并开 WS），而且前一步的输出就是后一步的输入
+ * （ZoneId、ZoneName、CNAME）。平铺表单逼用户自己记顺序、手工从表格里抄
+ * ZoneId、手工打全域名，错一步就得到一条看不懂的云端报错。
+ *
+ * 状态机只有两个变量：
+ *   step     —— 当前显示哪一步；
+ *   unlocked —— 已经解锁到第几步（最多到哪）。
+ * 第 1..unlocked-1 步视为「已完成」，可以点回去重做；> unlocked 的置灰；
+ * 每一步的完成动作只做两件事：把结果 POST 到 /api/cdn/config，然后
+ * unlock(下一步) + setStep(下一步)。配置本身只写库，所以任何一步都可以
+ * 安全地重复进入 —— 回读的 cfg 才是唯一事实来源。
  */
 
-type Busy = 'save' | 'verify' | 'provision' | null
+type Step = 1 | 2 | 3 | 4
 
-/** 四个密钥字段：掩码回传 = 未修改，绝不能原样 POST 回去。 */
-type SecretKey =
-  | 'cdn_tencent_secret_id'
-  | 'cdn_tencent_secret_key'
-  | 'cdn_aliyun_ak_id'
-  | 'cdn_aliyun_ak_secret'
+const ALL_STEPS: Step[] = [1, 2, 3, 4]
 
-const SECRET_KEYS: SecretKey[] = [
-  'cdn_tencent_secret_id',
-  'cdn_tencent_secret_key',
-  'cdn_aliyun_ak_id',
-  'cdn_aliyun_ak_secret',
-]
-
-/** 表单是「全部 13 个可写键」的字符串映射（后端就是这么存的）。 */
-type CdnForm = Record<CdnConfigKey, string>
-
-const EMPTY_FORM: CdnForm = {
-  cdn_enabled: '0',
-  cdn_tencent_secret_id: '',
-  cdn_tencent_secret_key: '',
-  cdn_tencent_zone_id: '',
-  cdn_tencent_region: 'ap-guangzhou',
-  cdn_domain: '',
-  cdn_connect_port: '443',
-  cdn_origin_scheme: 'HTTP',
-  cdn_ws_timeout: '300',
-  cdn_aliyun_ak_id: '',
-  cdn_aliyun_ak_secret: '',
-  cdn_aliyun_root_domain: '',
-  cdn_dns_rr: '',
+const STEP_TITLE: Record<Step, string> = {
+  1: '连接腾讯云',
+  2: '选站点',
+  3: '选域名',
+  4: '接入',
 }
 
-/** 接口视图 → 表单值。回填与新填都走这一处，避免两条路径慢慢漂移。 */
-function formOf(c: CdnConfig): CdnForm {
-  return {
-    cdn_enabled: c.cdn_enabled === '1' ? '1' : '0',
-    cdn_tencent_secret_id: c.cdn_tencent_secret_id ?? '',
-    cdn_tencent_secret_key: c.cdn_tencent_secret_key ?? '',
-    cdn_tencent_zone_id: c.cdn_tencent_zone_id ?? '',
-    cdn_tencent_region: c.cdn_tencent_region ?? '',
-    cdn_domain: c.cdn_domain ?? '',
-    cdn_connect_port: c.cdn_connect_port ?? '',
-    cdn_origin_scheme: c.cdn_origin_scheme ?? 'HTTP',
-    cdn_ws_timeout: c.cdn_ws_timeout ?? '',
-    cdn_aliyun_ak_id: c.cdn_aliyun_ak_id ?? '',
-    cdn_aliyun_ak_secret: c.cdn_aliyun_ak_secret ?? '',
-    cdn_aliyun_root_domain: c.cdn_aliyun_root_domain ?? '',
-    cdn_dns_rr: c.cdn_dns_rr ?? '',
-  }
+const STEP_NO: Record<Step, string> = { 1: '①', 2: '②', 3: '③', 4: '④' }
+
+/** 与 internal/shared.DefaultFRPSBindPort 保持一致；settings 没加载完时兜底。 */
+const DEFAULT_FRPS_PORT = 27900
+
+const POLL_INTERVAL_MS = 2000
+const POLL_TIMEOUT_MS = 60_000
+
+type Busy = 'connect' | 'zone' | 'domain' | 'create' | 'provision' | 'toggle' | null
+
+type LoadState = 'idle' | 'loading' | 'ready' | 'error'
+
+/** 后端错误原始文本 + 可能夹在里面的诊断字段（4xx 时只给纯文本）。 */
+interface BackendErr {
+  text: string
+  hint: string
+  probes: CdnZoneProbe[]
 }
 
-function secretOf(f: CdnForm): Record<SecretKey, string> {
-  return {
-    cdn_tencent_secret_id: f.cdn_tencent_secret_id,
-    cdn_tencent_secret_key: f.cdn_tencent_secret_key,
-    cdn_aliyun_ak_id: f.cdn_aliyun_ak_id,
-    cdn_aliyun_ak_secret: f.cdn_aliyun_ak_secret,
-  }
+interface PollState {
+  running: boolean
+  verdict: '' | 'ok' | 'timeout'
+  applied: LinkQualityApplied[]
+  err: string
+}
+
+const IDLE_POLL: PollState = { running: false, verdict: '', applied: [], err: '' }
+
+function errText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
 }
 
 /**
- * 组装 POST 体。
+ * 把接口错误拆成「原文 + 可选诊断」。
  *
- * 非密钥字段一律提交（空串 = 清空，语义明确）；密钥字段只在「用户真的输入了
- * 新值」时提交 —— 留空是「不改」，而等于回填掩码则说明用户压根没动过，
- * 回传它会把库里的明文覆盖成掩码字符串本身。
+ * api() 对非 JSON 响应体会把纯文本塞进 message，所以多数情况直接用 text；
+ * 个别路径回的是 JSON，顺手取走 hint / probes，别让它们埋在原文里。
  */
-function buildPatch(form: CdnForm, masked: Record<SecretKey, string>): CdnConfigPatch {
-  const patch: CdnConfigPatch = {
-    cdn_enabled: form.cdn_enabled === '1' ? '1' : '0',
-    cdn_tencent_zone_id: form.cdn_tencent_zone_id.trim(),
-    cdn_tencent_region: form.cdn_tencent_region.trim() || 'ap-guangzhou',
-    cdn_domain: form.cdn_domain.trim(),
-    cdn_connect_port: form.cdn_connect_port.trim() || '443',
-    cdn_origin_scheme: form.cdn_origin_scheme === 'HTTPS' ? 'HTTPS' : 'HTTP',
-    cdn_ws_timeout: form.cdn_ws_timeout.trim() || '300',
-    cdn_aliyun_root_domain: form.cdn_aliyun_root_domain.trim(),
-    cdn_dns_rr: form.cdn_dns_rr.trim(),
+function readErr(e: unknown): BackendErr {
+  const text = errText(e)
+  const out: BackendErr = { text, hint: '', probes: [] }
+  const s = text.trim()
+  if (!s.startsWith('{')) return out
+  try {
+    const v: unknown = JSON.parse(s)
+    if (typeof v !== 'object' || v === null) return out
+    const rec = v as Record<string, unknown>
+    if (typeof rec.error === 'string' && rec.error !== '') out.text = rec.error
+    if (typeof rec.hint === 'string') out.hint = rec.hint
+    if (Array.isArray(rec.probes)) {
+      out.probes = rec.probes.flatMap((p): CdnZoneProbe[] => {
+        if (typeof p !== 'object' || p === null) return []
+        const r = p as Record<string, unknown>
+        return [{ action: String(r.action ?? ''), ok: r.ok === true, detail: String(r.detail ?? '') }]
+      })
+    }
+  } catch {
+    // 不是 JSON：message 本身就是后端纯文本
   }
-  for (const k of SECRET_KEYS) {
-    const v = form[k].trim()
-    if (v !== '' && v !== masked[k]) patch[k] = v
-  }
-  return patch
+  return out
+}
+
+function ProbeList({ probes }: { probes: CdnZoneProbe[] }) {
+  return (
+    <div className="mt-2">
+      <div className="mb-1 text-[11.5px] font-[650]">权限探针</div>
+      <div className="grid gap-1">
+        {probes.map((pr, i) => (
+          <div key={`${pr.action}-${i}`} className="flex min-w-0 items-baseline gap-1.5">
+            <span className={pr.ok ? 'text-ok-fg' : 'text-bad-fg'}>{pr.ok ? '✓' : '✗'}</span>
+            <span className="shrink-0 font-mono text-[11.5px]">{pr.action}</span>
+            <span className="min-w-0 break-all text-[11px] opacity-80" title={pr.detail}>
+              {pr.ok ? '允许' : pr.detail || '被拒'}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ErrBlock({ title, err }: { title: string; err: BackendErr }) {
+  return (
+    <div className="mt-3 rounded-lg border border-bad-fg/40 bg-bad-dim px-3.5 py-2.5 text-[12px] leading-[1.65] text-bad-fg">
+      <div className="mb-0.5 font-[650]">{title}</div>
+      <div className="break-all" title={err.text}>
+        {err.text}
+      </div>
+      {err.hint && (
+        <div className="mt-1.5 break-all opacity-90" title={err.hint}>
+          {err.hint}
+        </div>
+      )}
+      {err.probes.length > 0 && <ProbeList probes={err.probes} />}
+    </div>
+  )
 }
 
 export function CdnCard() {
-  const { toast } = useApp()
-  const [form, setForm] = useState<CdnForm>(EMPTY_FORM)
-  const [masked, setMasked] = useState<Record<SecretKey, string>>({
-    cdn_tencent_secret_id: '',
-    cdn_tencent_secret_key: '',
-    cdn_aliyun_ak_id: '',
-    cdn_aliyun_ak_secret: '',
-  })
-  // 当前生效值（desired_protocol / connect_addr）只看接口，不看表单：
-  // 表单是「想改成的样子」，这两项是「客户端真正在用的样子」。
-  const [cfg, setCfg] = useState<CdnConfig | null>(null)
-  const [busy, setBusy] = useState<Busy>(null)
-  const [loadErr, setLoadErr] = useState('')
-  const [saveErr, setSaveErr] = useState('')
-  const [verifyErr, setVerifyErr] = useState('')
-  const [zones, setZones] = useState<CdnZone[] | null>(null)
-  // 空列表时腾讯云给不出"为什么"，这两项是后端补的诊断信息。
-  const [verifyMeta, setVerifyMeta] = useState<CdnVerifyResult | null>(null)
-  const [provErr, setProvErr] = useState('')
-  const [prov, setProv] = useState<CdnProvisionResult | null>(null)
+  const { toast, settings } = useApp()
 
-  const applyConfig = useCallback((c: CdnConfig) => {
-    const f = formOf(c)
-    setCfg(c)
-    setForm(f)
-    setMasked(secretOf(f))
+  // 回源端口跟着 frps 的实际 bindPort 走，别让提示里的数字和真实配置脱节。
+  const parsedBind = Number.parseInt(settings?.frps_bind_port ?? '', 10)
+  const originPort = Number.isFinite(parsedBind) && parsedBind > 0 ? parsedBind : DEFAULT_FRPS_PORT
+
+  const [cfg, setCfg] = useState<CdnConfig | null>(null)
+  const [loadErr, setLoadErr] = useState('')
+  const [step, setStep] = useState<Step>(1)
+  const [unlocked, setUnlocked] = useState<Step>(1)
+  const [busy, setBusy] = useState<Busy>(null)
+
+  // 第 1 步
+  const [secretId, setSecretId] = useState('')
+  const [secretKey, setSecretKey] = useState('')
+  const [connectErr, setConnectErr] = useState<BackendErr | null>(null)
+  const [connectedCount, setConnectedCount] = useState<number | null>(null)
+
+  // 第 2 步
+  const [verify, setVerify] = useState<CdnVerifyResult | null>(null)
+  const [zones, setZones] = useState<CdnZone[]>([])
+  const [zonesState, setZonesState] = useState<LoadState>('idle')
+  const [zonesErr, setZonesErr] = useState<BackendErr | null>(null)
+  const [zone, setZone] = useState<CdnZone | null>(null)
+  const [zoneErr, setZoneErr] = useState('')
+
+  // 第 3 步
+  const [domains, setDomains] = useState<CdnDomain[]>([])
+  const [domainsState, setDomainsState] = useState<LoadState>('idle')
+  const [domainsErr, setDomainsErr] = useState<BackendErr | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [prefix, setPrefix] = useState('')
+  const [domainErr, setDomainErr] = useState<BackendErr | null>(null)
+
+  // 第 4 步
+  const [prov, setProv] = useState<CdnProvisionResult | null>(null)
+  const [provErr, setProvErr] = useState<BackendErr | null>(null)
+  const [toggleErr, setToggleErr] = useState('')
+  const [poll, setPoll] = useState<PollState>(IDLE_POLL)
+
+  const booted = useRef(false)
+  const pollGen = useRef(0)
+  const pollTimer = useRef<number | null>(null)
+
+  const clearPoll = useCallback(() => {
+    if (pollTimer.current !== null) {
+      window.clearTimeout(pollTimer.current)
+      pollTimer.current = null
+    }
   }, [])
 
-  const load = useCallback(async () => {
+  const stopPolling = useCallback(() => {
+    pollGen.current += 1
+    clearPoll()
+  }, [clearPoll])
+
+  /**
+   * 轮询 /api/linkquality，直到所有客户端都上报 match=true 或超时。
+   *
+   * 用「代号 + setTimeout 递归」而不是 setInterval：每次请求返回后再排下一次，
+   * 慢请求不会堆叠；任何一次 start/stop 都会让旧代号失效，卸载时清定时器即可，
+   * 不会有回调落到已卸载的组件上。
+   */
+  const startPolling = useCallback(() => {
+    pollGen.current += 1
+    const gen = pollGen.current
+    clearPoll()
+    const deadline = Date.now() + POLL_TIMEOUT_MS
+    setPoll({ running: true, verdict: '', applied: [], err: '' })
+
+    const tick = async () => {
+      if (pollGen.current !== gen) return
+      try {
+        const r = await api<LinkQualityResponse>('GET', '/api/linkquality')
+        if (pollGen.current !== gen) return
+        const applied = r.applied ?? []
+        // applied 为空（没有客户端）不能算「已切换」——宁可等到超时后说清楚。
+        if (applied.length > 0 && applied.every((a) => a.match)) {
+          setPoll({ running: false, verdict: 'ok', applied, err: '' })
+          return
+        }
+        if (Date.now() >= deadline) {
+          setPoll({ running: false, verdict: 'timeout', applied, err: '' })
+          return
+        }
+        setPoll({ running: true, verdict: '', applied, err: '' })
+      } catch (e) {
+        if (pollGen.current !== gen) return
+        if (Date.now() >= deadline) {
+          setPoll({ running: false, verdict: 'timeout', applied: [], err: errText(e) })
+          return
+        }
+      }
+      pollTimer.current = window.setTimeout(() => void tick(), POLL_INTERVAL_MS)
+    }
+    void tick()
+  }, [clearPoll])
+
+  const reload = useCallback(async (): Promise<CdnConfig | null> => {
     try {
       const c = await api<CdnConfig>('GET', '/api/cdn/config')
-      applyConfig(c)
+      setCfg(c)
       setLoadErr('')
+      // 只在首次读配置时决定落在哪一步：之后的回读（每一步保存后）不能把
+      // 用户从当前步骤硬拽走。
+      if (!booted.current) {
+        booted.current = true
+        const hasCred = c.cdn_tencent_secret_id !== '' || c.cdn_tencent_secret_key !== ''
+        const entry: Step = hasCred ? (c.cdn_domain ? 4 : 2) : 1
+        setStep(entry)
+        setUnlocked(entry)
+        // 之前已经开过加速：直接开始确认客户端到底切没切，省得用户再点一遍。
+        if (entry === 4 && c.desired_protocol === 'wss') startPolling()
+      }
+      return c
     } catch (e) {
-      setLoadErr((e as Error).message)
+      setLoadErr(errText(e))
+      return null
     }
-  }, [applyConfig])
+  }, [startPolling])
+
+  const loadZones = useCallback(async () => {
+    setZonesState('loading')
+    setZonesErr(null)
+    try {
+      const r = await api<CdnVerifyResult>('POST', '/api/cdn/verify')
+      setVerify(r)
+      setZones(r.zones ?? [])
+      setZonesState('ready')
+    } catch (e) {
+      setVerify(null)
+      setZones([])
+      setZonesErr(readErr(e))
+      setZonesState('error')
+    }
+  }, [])
+
+  const loadDomains = useCallback(async (zoneID: string) => {
+    if (!zoneID) return
+    setDomainsState('loading')
+    setDomainsErr(null)
+    try {
+      const r = await api<CdnDomainsResult>('POST', '/api/cdn/domains', { zone_id: zoneID })
+      const list = r.domains ?? []
+      setDomains(list)
+      setDomainsState('ready')
+      // 站点下一条域名都没有时不摆空列表，直接给「填前缀」的表单。
+      if (list.length === 0) setCreating(true)
+    } catch (e) {
+      setDomains([])
+      setDomainsErr(readErr(e))
+      setDomainsState('error')
+    }
+  }, [])
 
   useEffect(() => {
-    void load()
-  }, [load])
+    void reload()
+  }, [reload])
 
-  const set = <K extends CdnConfigKey>(k: K, v: string) =>
-    setForm((prev) => ({ ...prev, [k]: v }))
+  // 卸载清理：让在飞的轮询代号失效并清掉待触发的定时器。
+  useEffect(() => () => stopPolling(), [stopPolling])
 
-  const isWss = (cfg?.desired_protocol ?? '') === 'wss'
+  useEffect(() => {
+    if (step !== 2 || zonesState !== 'idle') return
+    void loadZones()
+  }, [step, zonesState, loadZones])
+
+  useEffect(() => {
+    if (step !== 3 || domainsState !== 'idle') return
+    const id = zone?.ZoneId || cfg?.cdn_tencent_zone_id || ''
+    if (!id) return
+    void loadDomains(id)
+  }, [step, domainsState, zone, cfg, loadDomains])
+
+  const unlock = (s: Step) => setUnlocked((u) => (u < s ? s : u))
+
+  /** 第 1 步：先保存密钥，再验证。验证的是「已保存」的密钥，顺序不能反。 */
+  const connect = async () => {
+    if (busy !== null) return
+    setBusy('connect')
+    setConnectErr(null)
+    setConnectedCount(null)
+    // 重新连接可能换了账号/密钥：上一条密钥看到的站点列表不再可信。
+    setZones([])
+    setVerify(null)
+    setZonesErr(null)
+    setZonesState('idle')
+    try {
+      const patch: CdnConfigPatch = {}
+      const id = secretId.trim()
+      const key = secretKey.trim()
+      // 留空 = 不改；恰好等于掩码也视为没改 —— 回传掩码会把库里的明文覆盖掉。
+      if (id !== '' && id !== cfg?.cdn_tencent_secret_id) patch.cdn_tencent_secret_id = id
+      if (key !== '' && key !== cfg?.cdn_tencent_secret_key) patch.cdn_tencent_secret_key = key
+      if (Object.keys(patch).length > 0) {
+        await api<CdnConfig>('POST', '/api/cdn/config', patch)
+        await reload()
+      }
+      const r = await api<CdnVerifyResult>('POST', '/api/cdn/verify')
+      const list = r.zones ?? []
+      setVerify(r)
+      setZones(list)
+      setZonesState('ready')
+      setZonesErr(null)
+      setConnectedCount(list.length)
+      setSecretId('')
+      setSecretKey('')
+      unlock(2)
+      setStep(2)
+      toast(`已连接腾讯云，可见 ${list.length} 个站点`, 'ok')
+    } catch (e) {
+      setConnectErr(readErr(e))
+      toast('连接腾讯云失败', 'bad')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const chooseZone = async (z: CdnZone) => {
+    if (busy !== null) return
+    setBusy('zone')
+    setZoneErr('')
+    try {
+      // 换了站点意味着旧域名属于另一个站点：不清掉的话，后面接入会拿着
+      // A 站点的域名去 B 站点建加速域名。域名清空后后端不会切 wss，安全。
+      const changed = z.ZoneId !== (cfg?.cdn_tencent_zone_id ?? '')
+      await api<CdnConfig>('POST', '/api/cdn/config', {
+        cdn_tencent_zone_id: z.ZoneId,
+        ...(changed ? { cdn_domain: '' } : {}),
+      })
+      await reload()
+      setZone(z)
+      // 换了站点，域名列表必须重来：旧列表属于另一个站点。
+      setDomains([])
+      setDomainsErr(null)
+      setDomainsState('idle')
+      setCreating(false)
+      setPrefix('')
+      setDomainErr(null)
+      if (changed) {
+        setProv(null)
+        setProvErr(null)
+        setPoll(IDLE_POLL)
+        stopPolling()
+        setUnlocked(3)
+      } else {
+        unlock(3)
+      }
+      setStep(3)
+    } catch (e) {
+      const msg = errText(e)
+      setZoneErr(msg)
+      toast(msg, 'bad')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const saveDomain = async (domain: string) => {
+    await api<CdnConfig>('POST', '/api/cdn/config', { cdn_domain: domain })
+    await reload()
+    setProv(null)
+    setProvErr(null)
+    unlock(4)
+    setStep(4)
+  }
+
+  const chooseDomain = async (d: CdnDomain) => {
+    if (busy !== null) return
+    setBusy('domain')
+    setDomainErr(null)
+    try {
+      await saveDomain(d.DomainName)
+      toast(`已选 ${d.DomainName}`, 'ok')
+    } catch (e) {
+      const be = readErr(e)
+      setDomainErr(be)
+      toast(be.text, 'bad')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const prefixClean = prefix.trim().replace(/^\.+|\.+$/g, '')
+  const zoneName = zone?.ZoneName ?? ''
+  const fullDomain = prefixClean !== '' && zoneName !== '' ? `${prefixClean}.${zoneName}` : ''
+  const zoneID = zone?.ZoneId || cfg?.cdn_tencent_zone_id || ''
+
+  const createDomain = async () => {
+    if (busy !== null) return
+    if (!zone || fullDomain === '') return
+    setBusy('create')
+    setDomainErr(null)
+    try {
+      // 只提交前缀拼出来的完整域名：主域名取自步骤 2 的 ZoneName，避免手打全名打错。
+      const r = await api<CdnDomainCreateResult>('POST', '/api/cdn/domain-create', {
+        zone_id: zone.ZoneId,
+        domain: fullDomain,
+      })
+      const chosen = r.domain || fullDomain
+      await saveDomain(chosen)
+      toast(r.existed ? `${chosen} 已存在，直接复用` : `已创建 ${chosen}`, 'ok')
+    } catch (e) {
+      setDomainErr(readErr(e))
+      toast('创建加速域名失败', 'bad')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const runProvision = async () => {
+    if (busy !== null) return
+    setBusy('provision')
+    setProvErr(null)
+    setProv(null)
+    try {
+      // 业务失败仍是 HTTP 200：结果先落 state，再按 ok 决定提示语气。
+      const r = await api<CdnProvisionResult>('POST', '/api/cdn/provision')
+      setProv(r)
+      await reload()
+      toast(r.ok ? '接入完成' : '接入没有走完，看下面的步骤', r.ok ? 'ok' : 'bad')
+    } catch (e) {
+      setProvErr(readErr(e))
+      toast('接入请求失败', 'bad')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const toggleCdn = async (on: boolean) => {
+    if (busy !== null) return
+    setBusy('toggle')
+    setToggleErr('')
+    try {
+      await api<CdnConfig>('POST', '/api/cdn/config', { cdn_enabled: on ? '1' : '0' })
+      await reload()
+      if (on) {
+        startPolling()
+        toast('已启用 CDN 加速，等客户端切到 wss', 'ok')
+      } else {
+        stopPolling()
+        setPoll(IDLE_POLL)
+        toast('已关闭 CDN 加速，客户端会退回直连 TCP', 'ok')
+      }
+    } catch (e) {
+      const msg = errText(e)
+      setToggleErr(msg)
+      toast(msg, 'bad')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const isWss = cfg?.desired_protocol === 'wss'
   const protocolLabel = !cfg?.desired_protocol
     ? '直连 TCP'
     : cfg.desired_protocol === 'wss'
       ? '经 CDN（wss）'
       : cfg.desired_protocol
-
-  const save = async () => {
-    if (busy) return
-    setBusy('save')
-    setSaveErr('')
-    try {
-      await api<CdnConfig>('POST', '/api/cdn/config', buildPatch(form, masked))
-      // 保存后重新 GET 一次：库里可能对空值做了补默认（端口/区域/超时），
-      // 只有回读才能保证界面上显示的就是「现在真正生效的配置」。
-      await load()
-      toast('CDN 配置已保存', 'ok')
-    } catch (e) {
-      const msg = (e as Error).message
-      setSaveErr(msg)
-      toast(msg, 'bad')
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const verify = async () => {
-    if (busy) return
-    setBusy('verify')
-    setVerifyErr('')
-    setZones(null)
-    try {
-      const r = await api<CdnVerifyResult>('POST', '/api/cdn/verify')
-      setZones(r.zones ?? [])
-      setVerifyMeta(r)
-    } catch (e) {
-      // 后端把腾讯云原文（纯文本）透传出来，整段保留才能定位是签名、区域还是时钟问题。
-      const msg = (e as Error).message
-      setVerifyErr(msg)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const provision = async () => {
-    if (busy) return
-    setBusy('provision')
-    setProvErr('')
-    setProv(null)
-    try {
-      // 业务失败仍是 200：结果永远先落在 state 里，再按 ok 决定提示语气。
-      const r = await api<CdnProvisionResult>('POST', '/api/cdn/provision')
-      setProv(r)
-      toast(r.ok ? '一键接入完成' : '接入没有走完，看下面的步骤', r.ok ? 'ok' : 'bad')
-      try {
-        await load()
-      } catch {
-        // 回读失败不影响上面的步骤结果，load 自己会记 loadErr
-      }
-    } catch (e) {
-      const msg = (e as Error).message
-      setProvErr(msg)
-      toast(msg, 'bad')
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  /** 密钥框的 placeholder：已配置的不能提示「粘贴密钥」，而要提示留空不改。 */
-  const secretPlaceholder = (k: SecretKey, fallback: string) =>
-    masked[k] ? '已配置，留空不修改' : fallback
-
-  const steps = prov?.steps ?? []
+  const provisionSteps = prov?.steps ?? []
+  // 已经接好（本次跑通）或早已启用过：才把按钮换成开关。
+  const showToggle = prov?.ok === true || cfg?.cdn_enabled === '1'
 
   return (
     <Card title="CDN 加速接入" desc="腾讯云 EdgeOne · 换掉 frpc → frps 这段跨境链路">
       <div className="mb-3.5 text-[12.5px] leading-[1.7] text-muted">
-        用腾讯云 EdgeOne 把 frpc → frps 这段跨境链路换成 CDN
-        加速；需要已备案域名，且加速层只认 HTTP / WebSocket，所以客户端会改用
-        <b className="text-fg"> wss </b>连接。
+        四步走完就能用：连接腾讯云 → 选站点 → 选域名 → 接入。站点 ID、域名全名、
+        CNAME 都由面板从云上取，不用手工复制。
       </div>
 
-      {/* 常驻的生效状态：保存只是写库，真正改客户端行为的是这里的两个派生值。 */}
+      {/* 常驻的生效状态：这是「客户端真正在用」的值，不是表单里想改成的样子。 */}
       <div className="mb-3.5 rounded-lg border border-border2 bg-chip px-3.5 py-2.5 text-[12px] leading-[1.7]">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
           <span className="text-dim">客户端传输</span>
@@ -254,15 +526,9 @@ export function CdnCard() {
             className="min-w-0 font-mono break-all text-fg"
             title={cfg?.connect_addr || undefined}
           >
-            {cfg?.connect_addr || '—（用原 frps 地址）'}
+            {cfg?.connect_addr || '—'}
           </span>
         </div>
-        {isWss && (
-          <div className="mt-1.5 text-[11.5px] leading-[1.6] text-warn-fg">
-            客户端最多 15 秒内切换，切换期间隧道会短暂中断；wss 走 CDN
-            边缘节点，切完请到「隧道」页测一次速确认。
-          </div>
-        )}
         {loadErr && (
           <div className="mt-1.5 text-[11.5px] leading-[1.6] text-bad-fg">
             读取配置失败：
@@ -273,270 +539,513 @@ export function CdnCard() {
         )}
       </div>
 
-      {/* 启用开关 */}
-      <label className="mb-3.5 flex cursor-pointer items-start gap-2.5">
-        <input
-          type="checkbox"
-          className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]"
-          checked={form.cdn_enabled === '1'}
-          onChange={(e) => set('cdn_enabled', e.target.checked ? '1' : '0')}
-        />
-        <span className="min-w-0">
-          <b className="block text-[13.5px]">启用 CDN 加速</b>
-          <span className="mt-0.5 block text-xs leading-[1.6] text-dim">
-            开关打开且加速域名填好后才会真正切到 wss；
-            只开开关不填域名时，客户端仍按原样直连 TCP —— 避免改个设置把隧道全断掉。
-          </span>
-        </span>
-      </label>
-
-      <div className="mb-2 text-[12.5px] font-[650] text-fg">腾讯云 EdgeOne</div>
-      <div className="grid grid-cols-2 gap-x-3.5 max-[820px]:grid-cols-1">
-        <Field label="SecretId">
-          <Input
-            type="password"
-            autoComplete="off"
-            value={form.cdn_tencent_secret_id}
-            placeholder={secretPlaceholder('cdn_tencent_secret_id', 'AKID 开头')}
-            onChange={(e) => set('cdn_tencent_secret_id', e.target.value)}
-          />
-        </Field>
-        <Field label="SecretKey">
-          <Input
-            type="password"
-            autoComplete="new-password"
-            value={form.cdn_tencent_secret_key}
-            placeholder={secretPlaceholder('cdn_tencent_secret_key', '腾讯云 API 密钥')}
-            onChange={(e) => set('cdn_tencent_secret_key', e.target.value)}
-          />
-        </Field>
-        <Field label="ZoneId" hint="「验证密钥」成功后从下面的站点列表里挑一个填进来">
-          <Input
-            value={form.cdn_tencent_zone_id}
-            placeholder="zone-xxxx"
-            onChange={(e) => set('cdn_tencent_zone_id', e.target.value)}
-          />
-        </Field>
-        <Field label="加速域名" hint="已备案、且准备用 CNAME 指到 EdgeOne 的域名">
-          <Input
-            value={form.cdn_domain}
-            placeholder="frp.example.com"
-            onChange={(e) => set('cdn_domain', e.target.value)}
-          />
-        </Field>
-      </div>
-
-      <div className="mt-1 mb-2 text-[12.5px] font-[650] text-fg">
-        阿里云 DNS<span className="ml-2 text-[11.5px] font-normal text-dim">可选，用于自动加 CNAME</span>
-      </div>
-      <div className="grid grid-cols-2 gap-x-3.5 max-[820px]:grid-cols-1">
-        <Field label="AccessKey ID">
-          <Input
-            type="password"
-            autoComplete="off"
-            value={form.cdn_aliyun_ak_id}
-            placeholder={secretPlaceholder('cdn_aliyun_ak_id', 'LTAI 开头')}
-            onChange={(e) => set('cdn_aliyun_ak_id', e.target.value)}
-          />
-        </Field>
-        <Field label="AccessKey Secret">
-          <Input
-            type="password"
-            autoComplete="new-password"
-            value={form.cdn_aliyun_ak_secret}
-            placeholder={secretPlaceholder('cdn_aliyun_ak_secret', '阿里云 AccessKey Secret')}
-            onChange={(e) => set('cdn_aliyun_ak_secret', e.target.value)}
-          />
-        </Field>
-        <Field label="主域名">
-          <Input
-            value={form.cdn_aliyun_root_domain}
-            placeholder="example.com"
-            onChange={(e) => set('cdn_aliyun_root_domain', e.target.value)}
-          />
-        </Field>
-        <Field label="记录前缀">
-          <Input
-            value={form.cdn_dns_rr}
-            placeholder="frp（留空则从加速域名推导）"
-            onChange={(e) => set('cdn_dns_rr', e.target.value)}
-          />
-        </Field>
-      </div>
-
-      <div className="mt-1 flex flex-wrap items-center gap-2.5">
-        <Button disabled={busy !== null} onClick={() => void save()}>
-          {busy === 'save' ? '保存中…' : '保存配置'}
-        </Button>
-        <Button variant="ghost" disabled={busy !== null} onClick={() => void verify()}>
-          {busy === 'verify' ? '验证中…' : '验证密钥'}
-        </Button>
-        <Button variant="ghost" disabled={busy !== null} onClick={() => void provision()}>
-          {busy === 'provision' ? '接入中…' : '一键接入'}
-        </Button>
-      </div>
-      <Hint>
-        验证与接入用的都是<b className="text-fg">已保存</b>的密钥和域名 —— 改完先点「保存配置」。
-        一键接入依次做：校验密钥 → 查/建加速域名 → 开 WebSocket → 加 CNAME 解析，每一步幂等，可重复点。
-      </Hint>
-
-      {saveErr && (
-        <div className="mt-3 rounded-lg border border-bad-fg/40 bg-bad-dim px-3.5 py-2.5 text-[12px] leading-[1.65] text-bad-fg">
-          保存失败：
-          <span className="break-all" title={saveErr}>
-            {saveErr}
-          </span>
-        </div>
-      )}
-
-      {/* ---- 验证密钥结果 ---- */}
-      {verifyErr && (
-        <div className="mt-3 rounded-lg border border-bad-fg/40 bg-bad-dim px-3.5 py-2.5 text-[12px] leading-[1.65] text-bad-fg">
-          <div className="mb-0.5 font-[650]">验证失败（下面是腾讯云原文）</div>
-          <div className="break-all" title={verifyErr}>
-            {verifyErr}
-          </div>
-        </div>
-      )}
-
-      {zones !== null && !verifyErr && (
-        <div className="mt-3">
-          <div className="mb-1.5 flex flex-wrap items-baseline gap-2">
-            <b className="text-[12.5px] text-ok-fg">密钥可用</b>
-            <span className="text-[11.5px] text-dim">
-              {zones.length > 0
-                ? `共 ${zones.length} 个站点：把上面的 ZoneId 填进表单再保存`
-                : '密钥可用，但没有拿到站点列表'}
-            </span>
-          </div>
-          {zones.length === 0 && (
-            <div className="rounded-lg border border-warn-fg/40 bg-warn-dim px-3.5 py-2.5 text-[12px] leading-[1.7] text-warn-fg">
-              <div className="mb-1 font-[650]">为什么列表是空的</div>
-              <div className="break-all" title={verifyMeta?.hint || undefined}>
-                {verifyMeta?.hint || '腾讯云返回了空列表，但没有给出更多诊断信息。'}
-              </div>
-              {verifyMeta?.endpoint && (
-                <div className="mt-1.5 text-[11.5px] opacity-80 break-all">
-                  实际端点：{verifyMeta.endpoint}；返回 TotalCount={verifyMeta.total ?? 0}
-                </div>
+      {/* 步骤指示：已完成（< unlocked）可点回退，未解锁置灰。 */}
+      <div className="mb-3.5 flex flex-wrap items-center gap-1.5">
+        {ALL_STEPS.map((s) => {
+          const done = s < unlocked
+          const active = s === step
+          const locked = s > unlocked
+          return (
+            <button
+              key={s}
+              type="button"
+              disabled={locked || busy !== null}
+              title={locked ? '先完成上一步' : STEP_TITLE[s]}
+              onClick={() => setStep(s)}
+              className={cx(
+                'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] transition disabled:cursor-not-allowed',
+                active && 'border-accent bg-accent-dim font-[650] text-accent-fg',
+                !active && done && 'cursor-pointer border-ok-fg/40 bg-ok-dim text-ok-fg',
+                !active && locked && 'border-border2 bg-chip text-dim opacity-60',
+                !active &&
+                  !done &&
+                  !locked &&
+                  'cursor-pointer border-border2 bg-chip text-muted hover:border-accent',
               )}
-              {verifyMeta?.probes && verifyMeta.probes.length > 0 && (
-                <div className="mt-2">
-                  <div className="mb-1 text-[11.5px] font-[650]">权限探针</div>
-                  <div className="grid gap-1">
-                    {verifyMeta.probes.map((pr) => (
-                      <div key={pr.action} className="flex min-w-0 items-baseline gap-1.5">
-                        <span className={pr.ok ? 'text-ok-fg' : 'text-bad-fg'}>
-                          {pr.ok ? '✓' : '✗'}
-                        </span>
-                        <span className="font-mono text-[11.5px] shrink-0">{pr.action}</span>
-                        <span
-                          className="min-w-0 truncate text-[11px] opacity-80"
-                          title={pr.detail}
-                        >
-                          {pr.ok ? '允许' : '被拒'}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-          {zones.length > 0 && (
-            <Table head={['ZoneId', '站点名称', '状态', '区域']}>
-              {zones.map((z) => (
-                <tr key={z.ZoneId}>
-                  <Td className="max-w-[220px]">
-                    <span className="font-mono text-[11.5px] break-all" title={z.ZoneId}>
-                      {z.ZoneId}
-                    </span>
-                  </Td>
-                  <Td>
-                    <div className="max-w-[200px] truncate" title={z.ZoneName}>
-                      {z.ZoneName || '—'}
-                    </div>
-                  </Td>
-                  <Td>
-                    <Badge tone={z.Status === 'online' ? 'ok' : 'gray'}>{z.Status || '—'}</Badge>
-                  </Td>
-                  <Td className="text-[11.5px] text-dim">{z.Area || '—'}</Td>
-                </tr>
-              ))}
-            </Table>
-          )}
-        </div>
-      )}
+            >
+              <span>{done ? '✓' : STEP_NO[s]}</span>
+              <span>{STEP_TITLE[s]}</span>
+            </button>
+          )
+        })}
+      </div>
 
-      {/* ---- 一键接入结果 ---- */}
-      {provErr && (
-        <div className="mt-3 rounded-lg border border-bad-fg/40 bg-bad-dim px-3.5 py-2.5 text-[12px] leading-[1.65] text-bad-fg">
-          <div className="mb-0.5 font-[650]">一键接入请求失败</div>
-          <div className="break-all" title={provErr}>
-            {provErr}
+      {/* ---------------- 第 1 步：连接腾讯云 ---------------- */}
+      {step === 1 && (
+        <div>
+          <div className="grid grid-cols-2 gap-x-3.5 max-[820px]:grid-cols-1">
+            <Field label="SecretId">
+              <Input
+                type="password"
+                autoComplete="off"
+                value={secretId}
+                placeholder={cfg?.cdn_tencent_secret_id ? '已配置，留空不修改' : 'AKID 开头'}
+                onChange={(e) => setSecretId(e.target.value)}
+              />
+            </Field>
+            <Field label="SecretKey">
+              <Input
+                type="password"
+                autoComplete="new-password"
+                value={secretKey}
+                placeholder={cfg?.cdn_tencent_secret_key ? '已配置，留空不修改' : '腾讯云 API 密钥'}
+                onChange={(e) => setSecretKey(e.target.value)}
+              />
+            </Field>
           </div>
-        </div>
-      )}
-
-      {prov && (
-        <div className="mt-3">
-          {/* 总结果 + 每一步全部保留：失败时把前面成功的步骤也留着，
-              才能看出「卡在哪一步」，只留最后一条错误反而看不出上下文。 */}
-          <div
-            className={cx(
-              'mb-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[12.5px]',
-              prov.ok ? 'text-ok-fg' : 'text-bad-fg',
-            )}
-          >
-            <b>{prov.ok ? '✓ 一键接入完成' : '✗ 一键接入没有走完'}</b>
-            {prov.connect_addr && (
-              <span
-                className="min-w-0 font-mono text-[11.5px] text-muted break-all"
-                title={prov.connect_addr}
-              >
-                客户端应连接 {prov.connect_addr}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <Button disabled={busy !== null} onClick={() => void connect()}>
+              {busy === 'connect' ? '连接中…' : '连接腾讯云'}
+            </Button>
+            {connectedCount !== null && (
+              <span className="text-[12px] font-[650] text-ok-fg">
+                ✓ 已连接，可见 {connectedCount} 个站点
               </span>
             )}
           </div>
-          <div className="grid gap-1.5">
-            {steps.map((s, i) => (
+          <Hint>
+            密钥只用来调腾讯云 EdgeOne 接口，保存在面板本地；已配置过就留空。 建议给这个
+            CAM 子账号绑 QcloudTEOFullAccess（资源范围选「全部资源」）。
+          </Hint>
+          {connectErr && <ErrBlock title="连接失败（下面是腾讯云原文）" err={connectErr} />}
+        </div>
+      )}
+
+      {/* ---------------- 第 2 步：选站点 ---------------- */}
+      {step === 2 && (
+        <div>
+          {zonesState === 'loading' && (
+            <div className="py-2 text-[12.5px] text-dim">正在读取站点列表…</div>
+          )}
+
+          {zonesErr && (
+            <ErrBlock title="读取站点列表失败（下面是腾讯云原文）" err={zonesErr} />
+          )}
+          {zonesErr && (
+            <div className="mt-2 flex flex-wrap gap-2.5">
+              <Button variant="ghost" size="sm" onClick={() => void loadZones()} disabled={busy !== null}>
+                重新检测
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setStep(1)} disabled={busy !== null}>
+                回第 1 步改密钥
+              </Button>
+            </div>
+          )}
+
+          {zonesState === 'ready' && zones.length === 0 && (
+            <div className="rounded-lg border border-warn-fg/40 bg-warn-dim px-3.5 py-2.5 text-[12px] leading-[1.7] text-warn-fg">
+              <div className="mb-1 font-[650]">密钥可用，但没有拿到站点列表</div>
+              <div className="break-all" title={verify?.hint || undefined}>
+                {verify?.hint || '腾讯云返回了空列表，但没有给出更多诊断信息。'}
+              </div>
+              {verify?.endpoint && (
+                <div className="mt-1.5 break-all text-[11.5px] opacity-80">
+                  端点 {verify.endpoint} · TotalCount={verify.total ?? 0}
+                </div>
+              )}
+              {verify?.probes && verify.probes.length > 0 && <ProbeList probes={verify.probes} />}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="mt-2"
+                onClick={() => void loadZones()}
+                disabled={busy !== null}
+              >
+                重新检测
+              </Button>
+            </div>
+          )}
+
+          {zonesState === 'ready' && zones.length > 0 && (
+            <>
+              <div className="mb-2 flex flex-wrap items-baseline gap-2 text-[12px]">
+                <span className="font-[650] text-ok-fg">
+                  ✓ 已连接，可见 {zones.length} 个站点
+                </span>
+                <span className="text-dim">点一行选中，会自动保存并进入下一步</span>
+              </div>
+              <div className="grid gap-1.5">
+                {zones.map((z) => {
+                  const picked = z.ZoneId === cfg?.cdn_tencent_zone_id
+                  return (
+                    <button
+                      key={z.ZoneId}
+                      type="button"
+                      disabled={busy !== null}
+                      onClick={() => void chooseZone(z)}
+                      className={cx(
+                        'flex w-full items-center gap-2.5 rounded-[10px] border px-3 py-2.5 text-left transition disabled:cursor-wait',
+                        picked
+                          ? 'border-accent bg-accent-dim'
+                          : 'border-border2 bg-chip hover:border-accent',
+                      )}
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="flex flex-wrap items-center gap-2">
+                          <b className="min-w-0 truncate text-[13px] text-fg">
+                            {z.ZoneName || '（未命名站点）'}
+                          </b>
+                          <Badge tone={z.Status === 'online' ? 'ok' : 'gray'}>
+                            {z.Status || '—'}
+                          </Badge>
+                          {picked && <span className="text-[11px] text-accent-fg">当前选中</span>}
+                        </span>
+                        <span
+                          className="mt-0.5 block truncate font-mono text-[11.5px] text-dim"
+                          title={z.ZoneId}
+                        >
+                          {z.ZoneId} · {z.Area || '—'}
+                        </span>
+                      </span>
+                      <span className="shrink-0 text-dim">›</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </>
+          )}
+
+          {zoneErr && (
+            <div className="mt-3 rounded-lg border border-bad-fg/40 bg-bad-dim px-3.5 py-2.5 text-[12px] leading-[1.65] text-bad-fg">
+              保存站点失败：
+              <span className="break-all" title={zoneErr}>
+                {zoneErr}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ---------------- 第 3 步：选域名 ---------------- */}
+      {step === 3 && (
+        <div>
+          <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[12px]">
+            <span className="text-dim">站点</span>
+            <span className="min-w-0 break-all font-mono text-fg" title={zoneID}>
+              {zoneName || zoneID || '—'}
+            </span>
+          </div>
+
+          {domainsState === 'loading' && (
+            <div className="py-2 text-[12.5px] text-dim">正在读取这个站点下的加速域名…</div>
+          )}
+
+          {domainsErr && (
+            <ErrBlock title="读取加速域名失败（下面是腾讯云原文）" err={domainsErr} />
+          )}
+          {domainsErr && (
+            <div className="mt-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void loadDomains(zoneID)}
+                disabled={busy !== null || zoneID === ''}
+              >
+                重新检测
+              </Button>
+            </div>
+          )}
+
+          {domainsState === 'ready' && !creating && domains.length > 0 && (
+            <>
+              <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                <span className="text-[12px] text-dim">点一行选中；回源端口不对时会有提示</span>
+                <span className="flex-1" />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setCreating(true)}
+                  disabled={busy !== null}
+                >
+                  新建域名
+                </Button>
+              </div>
+              <div className="grid gap-1.5">
+                {domains.map((d) => {
+                  // HTTP / HTTPS 回源只会填其中一个，另一个是 0；0 视为「不知道」，
+                  // 不要拿它出来吓人。
+                  const domPort = d.HttpOriginPort || d.HttpsOriginPort || 0
+                  const portMismatch =
+                    domPort !== 0 && domPort !== originPort && domPort !== 443
+                  return (
+                    <button
+                      key={d.DomainName}
+                      type="button"
+                      disabled={busy !== null}
+                      onClick={() => void chooseDomain(d)}
+                      className={cx(
+                        'w-full rounded-[10px] border px-3 py-2.5 text-left transition disabled:cursor-wait',
+                        d.DomainName === cfg?.cdn_domain
+                          ? 'border-accent bg-accent-dim'
+                          : 'border-border2 bg-chip hover:border-accent',
+                      )}
+                    >
+                      <span className="flex flex-wrap items-center gap-2">
+                        <b className="min-w-0 break-all text-[13px] text-fg">{d.DomainName}</b>
+                        <Badge tone={d.DomainStatus === 'online' ? 'ok' : 'gray'}>
+                          {d.DomainStatus || '—'}
+                        </Badge>
+                        {d.IdentificationStatus && (
+                          <Badge tone="gray">{d.IdentificationStatus}</Badge>
+                        )}
+                      </span>
+                      <span
+                        className="mt-0.5 block break-all font-mono text-[11.5px] text-dim"
+                        title={d.Cname}
+                      >
+                        CNAME {d.Cname || '—'}
+                      </span>
+                      {portMismatch && (
+                        <span
+                          className="mt-1 block break-all text-[11.5px] leading-[1.6] text-warn-fg"
+                          title={`回源端口=${domPort}，frps bindPort=${originPort}`}
+                        >
+                          回源端口是 {domPort}，不是 frps 的 {originPort}
+                          （也不是 443），这条域名接进来可能连不上 frps。
+                        </span>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </>
+          )}
+
+          {domainsState === 'ready' && creating && (
+            <div className="rounded-lg border border-border2 bg-chip px-3.5 py-3">
+              {zoneName === '' ? (
+                <div className="text-[12px] leading-[1.7] text-warn-fg">
+                  还没选中站点，无法确定主域名。
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="ml-2"
+                    onClick={() => setStep(2)}
+                    disabled={busy !== null}
+                  >
+                    回第 2 步选站点
+                  </Button>
+                </div>
+              ) : (
+                <>
+                  <Field
+                    label="域名前缀"
+                    hint="主域名取自步骤 2 选中的站点，只填前缀就行"
+                    className="mb-2.5"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Input
+                        className="max-w-[200px]"
+                        value={prefix}
+                        placeholder="frp"
+                        autoComplete="off"
+                        onChange={(e) => setPrefix(e.target.value)}
+                      />
+                      <span className="shrink-0 break-all font-mono text-[12.5px] text-muted">
+                        .{zoneName}
+                      </span>
+                    </div>
+                  </Field>
+                  <div className="mb-2.5 rounded-lg border border-border2 bg-card px-3 py-2 text-[12.5px]">
+                    <span className="text-dim">将创建</span>
+                    <b className="ml-2 break-all font-mono text-fg">{fullDomain || '—'}</b>
+                  </div>
+                  <Hint>
+                    回源会自动指向本机 frps（端口 {originPort}），不用你填。
+                  </Hint>
+                  <div className="mt-2.5 flex flex-wrap gap-2.5">
+                    <Button
+                      disabled={busy !== null || fullDomain === ''}
+                      onClick={() => void createDomain()}
+                    >
+                      {busy === 'create' ? '创建中…' : '创建并继续'}
+                    </Button>
+                    {domains.length > 0 && (
+                      <Button
+                        variant="ghost"
+                        disabled={busy !== null}
+                        onClick={() => {
+                          setCreating(false)
+                          setDomainErr(null)
+                        }}
+                      >
+                        取消
+                      </Button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {domainErr && <ErrBlock title="域名这一步失败了（下面是云厂商原文）" err={domainErr} />}
+
+          {domainsState === 'ready' && domains.length > 0 && (
+            <Hint>
+              站点的 DNS 在腾讯 DNSPod 时，EdgeOne 添加域名会自动建好解析； 列表里的 CNAME
+              只是给你核对用的，不需要再手工去别处加一遍。
+            </Hint>
+          )}
+        </div>
+      )}
+
+      {/* ---------------- 第 4 步：接入 ---------------- */}
+      {step === 4 && (
+        <div>
+          <div className="mb-2.5 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[12px]">
+            <span className="text-dim">加速域名</span>
+            <span className="min-w-0 break-all font-mono text-fg" title={cfg?.cdn_domain || undefined}>
+              {cfg?.cdn_domain || '—'}
+            </span>
+          </div>
+
+          {!showToggle && (
+            <div className="flex flex-wrap items-center gap-2.5">
+              <Button disabled={busy !== null} onClick={() => void runProvision()}>
+                {busy === 'provision' ? '接入中…' : '开始接入'}
+              </Button>
+              <span className="text-[11.5px] text-dim">
+                幂等：重复点不会产生重复的域名或解析
+              </span>
+            </div>
+          )}
+
+          {provErr && <ErrBlock title="接入请求失败（下面是后端原文）" err={provErr} />}
+
+          {prov && (
+            <div className="mt-2.5">
               <div
-                key={`${s.step}-${i}`}
                 className={cx(
-                  'rounded-lg border px-3 py-2 text-[12px] leading-[1.65]',
-                  s.ok
-                    ? 'border-ok-fg/30 bg-ok-dim text-muted'
-                    : 'border-bad-fg/40 bg-bad-dim text-bad-fg',
+                  'mb-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[12.5px]',
+                  prov.ok ? 'text-ok-fg' : 'text-bad-fg',
                 )}
               >
-                <div className="flex items-start gap-2">
+                <b>{prov.ok ? '✓ 接入完成' : '✗ 接入没有走完'}</b>
+                {prov.connect_addr && (
                   <span
-                    className={cx(
-                      'shrink-0 font-mono font-bold',
-                      s.ok ? 'text-ok-fg' : 'text-bad-fg',
-                    )}
+                    className="min-w-0 break-all font-mono text-[11.5px] text-muted"
+                    title={prov.connect_addr}
                   >
-                    {s.ok ? '✓' : '✗'}
+                    客户端应连接 {prov.connect_addr}
                   </span>
-                  <b className="min-w-0 text-fg break-all">{s.step}</b>
-                </div>
-                {s.detail && (
-                  <div
-                    className={cx(
-                      'mt-0.5 pl-[18px] break-all',
-                      s.ok ? 'text-dim' : 'text-bad-fg',
-                    )}
-                    title={s.detail}
-                  >
-                    {s.detail}
-                  </div>
                 )}
               </div>
-            ))}
-          </div>
-          {!prov.ok && (
-            <div className="mt-1.5 text-[11.5px] leading-[1.6] text-dim">
-              修好失败那一步之后可以直接重试：已建好的域名与解析会被复用，不会产生重复资源。
+              {provisionSteps.length > 0 && (
+                <div className="grid gap-1.5">
+                  {provisionSteps.map((s, i) => (
+                    <div
+                      key={`${s.step}-${i}`}
+                      className={cx(
+                        'rounded-lg border px-3 py-2 text-[12px] leading-[1.65]',
+                        s.ok
+                          ? 'border-ok-fg/30 bg-ok-dim text-muted'
+                          : 'border-bad-fg/40 bg-bad-dim text-bad-fg',
+                      )}
+                    >
+                      <div className="flex items-start gap-2">
+                        <span
+                          className={cx(
+                            'shrink-0 font-mono font-bold',
+                            s.ok ? 'text-ok-fg' : 'text-bad-fg',
+                          )}
+                        >
+                          {s.ok ? '✓' : '✗'}
+                        </span>
+                        <b className="min-w-0 break-all text-fg">{s.step}</b>
+                      </div>
+                      {s.detail && (
+                        <div
+                          className={cx(
+                            'mt-0.5 pl-[18px] break-all',
+                            s.ok ? 'text-dim' : 'text-bad-fg',
+                          )}
+                          title={s.detail}
+                        >
+                          {s.detail}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!prov.ok && (
+                <Hint>
+                  修好失败那一步后可以直接重试：已建好的域名与配置会被复用。
+                </Hint>
+              )}
+            </div>
+          )}
+
+          {/* 成功后才出现的开关：打开它就是真的让所有客户端切 wss。 */}
+          {showToggle && (
+            <div className="mt-3 rounded-lg border border-border2 bg-chip px-3.5 py-3">
+              <label className="flex cursor-pointer items-start gap-2.5">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)] disabled:cursor-not-allowed"
+                  checked={cfg?.cdn_enabled === '1'}
+                  disabled={busy === 'toggle'}
+                  onChange={(e) => void toggleCdn(e.target.checked)}
+                />
+                <span className="min-w-0">
+                  <b className="block text-[13px]">启用 CDN 加速</b>
+                  <span className="mt-0.5 block text-[11.5px] leading-[1.6] text-dim">
+                    打开后客户端最多 15 秒切到 wss，切换期间隧道会短暂中断。
+                    关掉则退回直连 frps 的 TCP。
+                  </span>
+                </span>
+              </label>
+              {toggleErr && (
+                <div className="mt-2 break-all text-[11.5px] text-bad-fg" title={toggleErr}>
+                  {toggleErr}
+                </div>
+              )}
+
+              {poll.running && (
+                <div className="mt-2 text-[11.5px] leading-[1.6] text-muted">
+                  正在等客户端确认切换（每 2 秒查一次，最多 60 秒）…
+                </div>
+              )}
+              {poll.verdict === 'ok' && (
+                <div className="mt-2 text-[12px] font-[650] text-ok-fg">✓ 客户端已切到 wss</div>
+              )}
+              {poll.verdict === 'timeout' && (
+                <div className="mt-2 rounded-lg border border-warn-fg/40 bg-warn-dim px-3 py-2 text-[11.5px] leading-[1.7] text-warn-fg">
+                  <div className="font-[650]">已下发，客户端未确认</div>
+                  {poll.err && (
+                    <div className="mt-1 break-all" title={poll.err}>
+                      {poll.err}
+                    </div>
+                  )}
+                  {poll.applied.length === 0 ? (
+                    <div className="mt-1">
+                      还没有客户端上报传输配置（旧版本 agent，或还没到下一个心跳）。
+                    </div>
+                  ) : (
+                    <div className="mt-1 grid gap-1">
+                      {poll.applied.map((a, i) => (
+                        <div
+                          key={`${a.agent_id || a.name}-${i}`}
+                          className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5"
+                        >
+                          <span className="break-all font-[650] text-fg">
+                            {a.name || a.agent_id || '未命名客户端'}
+                          </span>
+                          <span className="break-all font-mono">
+                            {a.match ? '✓ ' : '✗ '}
+                            {a.transport || '未上报'}
+                          </span>
+                          {a.note && (
+                            <span className="break-all opacity-90" title={a.note}>
+                              {a.note}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

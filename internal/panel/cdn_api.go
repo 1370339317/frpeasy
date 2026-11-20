@@ -399,3 +399,64 @@ func permissionHint(probes []ZoneProbe, p *Panel, zl *ZoneList) string {
 	}
 	return emptyZoneHint(p, zl)
 }
+
+// cdnDomainsHandler POST /api/cdn/domains —— 向导第三步：列出站点下已有域名。
+func (p *Panel) cdnDomainsHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ZoneID string `json:"zone_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	zoneID := strings.TrimSpace(body.ZoneID)
+	if zoneID == "" {
+		zoneID = strings.TrimSpace(p.db.GetSetting(settingCDNTencentZone))
+	}
+	if zoneID == "" {
+		http.Error(w, "缺少 zone_id", http.StatusBadRequest)
+		return
+	}
+	c, err := p.cdnClient()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	list, err := c.ListAccelDomains(zoneID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "domains": list})
+}
+
+// cdnDomainCreateHandler POST /api/cdn/domain-create
+//
+// 向导第三步的另一条路：站点下还没有域名时，用户只填前缀（和他平时在 EdgeOne
+// 控制台的习惯一致），后端拼成完整域名并带上回源地址。
+func (p *Panel) cdnDomainCreateHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ZoneID string `json:"zone_id"`
+		Prefix string `json:"prefix"`
+		Domain string `json:"domain"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	domain := strings.TrimSpace(body.Domain)
+	if domain == "" {
+		http.Error(w, "缺少域名", http.StatusBadRequest)
+		return
+	}
+	c, err := p.cdnClient()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if existing, _ := c.GetAccelDomain(body.ZoneID, domain); existing != nil {
+		writeJSON(w, map[string]any{"ok": true, "existed": true, "cname": existing.Cname, "domain": domain})
+		return
+	}
+	scheme := strings.TrimSpace(p.db.GetSetting(settingCDNOriginScheme))
+	cname, err := c.CreateAccelDomain(body.ZoneID, domain, p.cdnOriginHost(r), p.cdnOriginPort(), scheme)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "existed": false, "cname": cname, "domain": domain})
+}

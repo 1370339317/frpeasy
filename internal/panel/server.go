@@ -244,6 +244,8 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("POST /api/cdn/config", p.requireAuth(p.cdnConfigHandler))
 	mux.HandleFunc("POST /api/cdn/verify", p.requireAuth(p.cdnVerifyHandler))
 	mux.HandleFunc("POST /api/cdn/provision", p.requireAuth(p.cdnProvisionHandler))
+	mux.HandleFunc("POST /api/cdn/domains", p.requireAuth(p.cdnDomainsHandler))
+	mux.HandleFunc("POST /api/cdn/domain-create", p.requireAuth(p.cdnDomainCreateHandler))
 	mux.HandleFunc("GET /api/frps", p.requireAuth(p.frpsControlHandler))
 	mux.HandleFunc("POST /api/frps", p.requireAuth(p.frpsControlHandler))
 	mux.HandleFunc("GET /api/system/network", p.requireAuth(p.systemNetworkHandler))
