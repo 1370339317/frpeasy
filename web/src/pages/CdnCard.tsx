@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useApp } from '../store'
 import { api } from '../lib/api'
-import { Badge, Button, Card, Field, Hint, Input, Select, Table, Td, cx } from '../components/ui'
+import { Badge, Button, Card, Field, Hint, Input, Table, Td, cx } from '../components/ui'
 import type {
   CdnConfig,
   CdnConfigKey,
@@ -317,46 +317,11 @@ export function CdnCard() {
             onChange={(e) => set('cdn_tencent_zone_id', e.target.value)}
           />
         </Field>
-        <Field label="Region">
-          <Input
-            value={form.cdn_tencent_region}
-            placeholder="ap-guangzhou"
-            onChange={(e) => set('cdn_tencent_region', e.target.value)}
-          />
-        </Field>
         <Field label="加速域名" hint="已备案、且准备用 CNAME 指到 EdgeOne 的域名">
           <Input
             value={form.cdn_domain}
             placeholder="frp.example.com"
             onChange={(e) => set('cdn_domain', e.target.value)}
-          />
-        </Field>
-        <Field label="连接端口">
-          <Input
-            type="number"
-            min={1}
-            max={65535}
-            value={form.cdn_connect_port}
-            placeholder="443"
-            onChange={(e) => set('cdn_connect_port', e.target.value)}
-          />
-        </Field>
-        <Field label="回源协议" hint="CDN 回源到 frps 时用 HTTP 还是 HTTPS">
-          <Select
-            value={form.cdn_origin_scheme === 'HTTPS' ? 'HTTPS' : 'HTTP'}
-            onChange={(e) => set('cdn_origin_scheme', e.target.value)}
-          >
-            <option value="HTTP">HTTP</option>
-            <option value="HTTPS">HTTPS</option>
-          </Select>
-        </Field>
-        <Field label="WebSocket 空闲超时（秒）">
-          <Input
-            type="number"
-            min={1}
-            value={form.cdn_ws_timeout}
-            placeholder="300"
-            onChange={(e) => set('cdn_ws_timeout', e.target.value)}
           />
         </Field>
       </div>
