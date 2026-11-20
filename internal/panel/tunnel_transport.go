@@ -45,6 +45,11 @@ type TunnelTransport struct {
 	TCPMux      bool `json:"tcp_mux"`
 	PoolCount   int  `json:"pool_count"`
 	Compression bool `json:"compression"`
+	// Protocol 空 / "tcp" = 直连；"websocket" / "wss" = 穿过 CDN 加速层。
+	Protocol string `json:"protocol,omitempty"`
+	// ConnectAddr 非空时覆盖下发客户的 frps 地址（加速域名:端口）。
+	// 与 Protocol 成对出现：协议改成 ws 就必须连加速域名，否则 CDN 认不出 Host。
+	ConnectAddr string `json:"connect_addr,omitempty"`
 }
 
 // effective 把设置收敛成实际生效值，顺带做边界处理。
@@ -67,6 +72,8 @@ func (p *Panel) tunnelTransport() TunnelTransport {
 		TCPMux:      mux,
 		PoolCount:   pool,
 		Compression: p.db.GetSetting(settingTunnelCompression) != "0",
+		Protocol:    cdnTransportProtocol(p),
+		ConnectAddr: cdnConnectAddr(p),
 	}
 }
 

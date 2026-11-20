@@ -24,6 +24,7 @@ import type {
   TuningCongestion,
   TuningResponse,
 } from '../types'
+import { CdnCard } from './CdnCard'
 
 // 内置候选源。用户也可以自己填前缀 —— 镜像会挂、会改名，写死清单不现实。
 const SOURCE_PRESETS: { token: string; label: string; note: string }[] = [
@@ -832,7 +833,7 @@ export function SettingsPage({ section = 'global' }: { section?: SettingsSection
         <Card title="其他设置在哪" desc="按「在哪用就在哪配」重新分过了，这里是索引">
           <div className="grid gap-1 text-[12.5px] leading-[1.9]">
             {[
-              ['隧道', 'tunnels', '压缩 / 关闭 tcpMux / 连接池'],
+              ['隧道', 'tunnels', '压缩 / 关闭 tcpMux / 连接池 / CDN 加速接入'],
               ['frps 服务端', 'server', '系统调优（BBR）、链路自检、frps 端口与令牌'],
               ['客户端', 'clients', '测速的间隔与开关、立即测全部'],
               ['端口与防火墙', 'ports', '端口池（自动分配的公网端口范围）'],
@@ -1277,6 +1278,10 @@ export function SettingsPage({ section = 'global' }: { section?: SettingsSection
           tcpMux 变化时面板会重启 frps 以重写它的配置。
         </Hint>
       </Card>
+
+      {/* CDN 加速也是「换掉这条跨境链路」的一种手段，和 tcpMux / 压缩 / 连接池
+          是同一个问题的不同解法，所以并排放，放在传输参数之后。 */}
+      <CdnCard />
       </>)}
 
       {/* 拥塞控制是服务器内核的事，放在 frps 服务端页 */}

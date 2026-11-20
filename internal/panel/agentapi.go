@@ -90,6 +90,12 @@ func (p *Panel) agentConfigHandler(w http.ResponseWriter, r *http.Request) {
 	cfg.TCPMux = &tt.TCPMux
 	cfg.Compression = &tt.Compression
 	cfg.PoolCount = tt.PoolCount
+	// 走 CDN 加速时，协议与连接地址必须成对下发：只改协议不改地址，frpc 会拿
+	// 服务器 IP 做 Host 去连 CDN，CDN 认不出该回源到哪个站点，握手直接被拒。
+	cfg.TransportProtocol = tt.Protocol
+	if tt.ConnectAddr != "" {
+		cfg.FRPSAddr = tt.ConnectAddr
+	}
 	// 测速调度同理每轮下发：改间隔/开关，下一轮心跳就生效，不用重装客户端。
 	st := p.speedTestConfig()
 	cfg.SpeedTestEnabled = &st.Enabled
@@ -146,6 +152,11 @@ func (p *Panel) agentHeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	// 否则界面上那个"测速中"会一直转。
 	if req.SpeedReq != "" {
 		_ = p.db.ClearSpeedRequest(req.AgentID, req.SpeedReq)
+	}
+	// 客户端实际生效的传输配置：链路体检页靠它回答"一键优化到底落地了没有"。
+	// 只放内存，重启后由下一轮心跳补回；空串 = 旧客户端，不当成错误。
+	if req.Transport != "" {
+		p.transport.Store(req.AgentID, req.Transport)
 	}
 	if err := p.db.ApplyHeartbeat(req.Status); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

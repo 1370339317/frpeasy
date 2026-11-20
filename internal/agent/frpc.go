@@ -25,6 +25,13 @@ type FrpcManager struct {
 	cmd     *exec.Cmd
 	hash    string // 当前生效配置哈希，用于判断是否需要重启
 	running bool
+	// applied 最近一次真正写进 frpc.toml 的传输配置摘要（shared.TransportSummary）。
+	//
+	// 面板要回答"设置改了，客户端生效了没有"，唯一的可信来源是客户端自己
+	// 报告它实际写了什么 —— 面板只看自己的设置项是自欺欺人：配置要经心跳
+	// 下发、由 agent 重写文件并重启 frpc 才真的生效，中间任何一步失败，
+	// 界面上都看不出来。这里记录的是"已落盘并启动"的那一刻的值。
+	applied string
 
 	pullCooldownUntil time.Time // 拉取失败后的冷却截止时间
 	lastPullErr       error
@@ -437,6 +444,35 @@ func (m *FrpcManager) downloadFromPanel(base string) (string, error) {
 	return dst, nil
 }
 
+// AppliedTransport 返回最近一次真正落盘并启动的传输配置摘要（空 = 还没起过 frpc）。
+func (m *FrpcManager) AppliedTransport() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.applied
+}
+
+// transportSummary 把下发的传输参数折算成「实际会出现在 frpc.toml 里的值」。
+//
+// nil 的语义必须折算成具体值，不能报 -1：面板没下发（老面板）时我们**不写**
+// 这些键，而 frp 对 tcpMux 的默认是 true、压缩按我们自己的历史默认开启，
+// 所以报 1 才与事实一致；否则面板会永远显示"客户端未生效"的假告警。
+// poolCount 只在 mux 关闭时才会写进配置，开着 mux 时必然是 0。
+func transportSummary(cfg shared.AgentConfig) string {
+	mux := 1
+	if cfg.TCPMux != nil && !*cfg.TCPMux {
+		mux = 0
+	}
+	pool := 0
+	if mux == 0 && cfg.PoolCount > 0 {
+		pool = cfg.PoolCount
+	}
+	comp := 1
+	if cfg.Compression != nil && !*cfg.Compression {
+		comp = 0
+	}
+	return shared.TransportSummary(mux, pool, comp, cfg.TransportProtocol)
+}
+
 // GenerateConfig 依据面板下发的配置生成 frpc.toml，返回路径与配置哈希。
 // 必须是 frp >= 0.52 的 toml 语法：顶层驼峰键 + [[proxies]] 数组，
 // 旧版 INI 的 [common]/[xxx] 段在 .toml 中会被解析失败。
@@ -460,6 +496,12 @@ func (m *FrpcManager) GenerateConfig(cfg shared.AgentConfig) (string, string, er
 	// 否则握手后被服务端直接断开，客户端只看到 `connect to server error: EOF`。
 	// nil 表示面板没下发（老面板），此时保持 frp 的历史默认（开），
 	// 这样"面板升级"本身不会让任何现有隧道掉线。
+	// 底层传输协议：空 / "tcp" 就是不写（走 frp 默认直连）。
+	// 只有面板明确要求穿过 CDN 时才写 websocket/wss —— 一旦写错，客户端会
+	// 去拿 HTTP Upgrade 连一个纯 TCP 端口，报错是 "EOF"，很难反查。
+	if p := strings.TrimSpace(cfg.TransportProtocol); p != "" && p != "tcp" {
+		fmt.Fprintf(&b, "transport.protocol = %q\n", p)
+	}
 	if cfg.TCPMux != nil {
 		fmt.Fprintf(&b, "transport.tcpMux = %t\n", *cfg.TCPMux)
 		// poolCount 只在 mux 关闭时有意义：开着 mux 时 frp 会忽略它，
@@ -586,6 +628,7 @@ func (m *FrpcManager) Reconcile(cfg shared.AgentConfig, force bool) error {
 	m.cmd = cmd
 	m.hash = hash
 	m.running = true
+	m.applied = transportSummary(cfg)
 	// 回调必须认领自己的进程：配置变更时 Reconcile 会先 Kill 旧进程再起新进程，
 	// 旧进程的 Wait 稍后才返回。如果不判断 m.cmd 是否还是自己，旧回调会把
 	// 新进程的 running 误置为 false —— 于是下一轮 Reconcile 又重启一次 frpc，

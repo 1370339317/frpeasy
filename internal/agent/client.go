@@ -257,6 +257,8 @@ func (c *Client) heartbeat(statuses []shared.TunnelStatus) (*shared.HeartbeatRes
 		DownKbps:     c.downKbps.Load(),
 		UpKbps:       c.upKbps.Load(),
 		SpeedReq:     c.speedReqDoneValue(),
+		// 报告"实际生效"而非"面板期望"：面板靠它确认一键优化有没有真正落地。
+		Transport: c.frpc.AppliedTransport(),
 	}
 	var resp shared.HeartbeatResponse
 	if err := c.postJSON("/api/agent/heartbeat", req, &resp); err != nil {

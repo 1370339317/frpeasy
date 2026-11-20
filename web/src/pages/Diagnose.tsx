@@ -3,6 +3,7 @@ import { useApp } from '../store'
 import { api } from '../lib/api'
 import { fmtAgo, fmtBytes } from '../lib/format'
 import { Button, Card, Field, Hint, Select, cx } from '../components/ui'
+import { LinkQualityCard } from './LinkQualityCard'
 import type { TunnelProbeResult } from '../types'
 
 /**
@@ -850,6 +851,9 @@ export function DiagnosePage() {
           体检结果不落库：它只是"此刻这条链路的状态"。存下来反而会让人分不清这是刚测的还是上周的。
         </Hint>
       </Card>
+
+      {/* 上面两张卡是"打流量测多快"；这张读内核记账（rtt/重传/cwnd）解释"为什么慢"。 */}
+      <LinkQualityCard />
     </>
   )
 }

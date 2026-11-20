@@ -60,8 +60,12 @@ type Panel struct {
 
 	httpSrv    *http.Server
 	shutdownMu sync.Mutex
-	shutdown   bool // 已在退出流程中，用于让健康检查/更新接口给出确定答复
-	updating   bool // 正在执行面板自更新，防重入（用户连点两次会同时拉两个交接进程）
+	// transport 记录每个客户端最近一次上报的「实际生效传输配置」。
+	// 只放内存、不落库：它的唯一用途是回答"改了设置，客户端到底生效了没有"，
+	// 面板重启后由下一轮心跳（≤15s）自动补回，不值得为它加一次迁移。
+	transport sync.Map
+	shutdown  bool // 已在退出流程中，用于让健康检查/更新接口给出确定答复
+	updating  bool // 正在执行面板自更新，防重入（用户连点两次会同时拉两个交接进程）
 
 	// agentBin 面板自带 agent 二进制的版本与哈希缓存（key: 绝对路径）。
 	//
@@ -231,6 +235,15 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("DELETE /api/agents/{id}", p.requireAuth(p.handleDeleteAgent))
 	mux.HandleFunc("GET /api/settings", p.requireAuth(p.settingsHandler))
 	mux.HandleFunc("POST /api/settings", p.requireAuth(p.settingsHandler))
+	// 链路体检：采样内核 TCP 指标 + 按检查点给建议（只读，随时可点）
+	mux.HandleFunc("GET /api/linkquality", p.requireAuth(p.linkQualityHandler))
+	// 一键应用建议：白名单内的传输参数，改完由客户端心跳回报实际生效值
+	mux.HandleFunc("POST /api/linkquality/apply", p.requireAuth(p.linkQualityApplyHandler))
+	// CDN 加速接入（腾讯云 EdgeOne + 阿里云 DNS）
+	mux.HandleFunc("GET /api/cdn/config", p.requireAuth(p.cdnConfigHandler))
+	mux.HandleFunc("POST /api/cdn/config", p.requireAuth(p.cdnConfigHandler))
+	mux.HandleFunc("POST /api/cdn/verify", p.requireAuth(p.cdnVerifyHandler))
+	mux.HandleFunc("POST /api/cdn/provision", p.requireAuth(p.cdnProvisionHandler))
 	mux.HandleFunc("GET /api/frps", p.requireAuth(p.frpsControlHandler))
 	mux.HandleFunc("POST /api/frps", p.requireAuth(p.frpsControlHandler))
 	mux.HandleFunc("GET /api/system/network", p.requireAuth(p.systemNetworkHandler))

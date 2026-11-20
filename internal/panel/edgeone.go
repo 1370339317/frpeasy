@@ -1,0 +1,281 @@
+package panel
+
+import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// edgeOneBase 可被测试替换为 httptest 地址。
+var edgeOneBase = "https://teo.tencentcloudapi.com"
+
+// edgeOneVersion 是 EdgeOne（teo）的 API 版本。写死在这里而不是做成配置项：
+// 腾讯云各产品的版本号是按接口族固定的，跟套餐/站点无关，暴露给用户只会让人填错。
+const edgeOneVersion = "2022-09-01"
+
+// edgeOne 是腾讯云 EdgeOne 的最小客户端。
+//
+// 只用标准库自己实现签名，不引官方 SDK：tencentcloud-sdk-go 是一个包含全部产品的
+// 单体仓库，为一个 teo 客户端拉进来会让模块缓存和编译时间成倍增长，而 TC3 签名
+// 本身的算法是固定的（HMAC-SHA256 四段派生），自己写反而更可控。
+type edgeOne struct {
+	secretID  string
+	secretKey string
+	region    string
+	client    *http.Client
+}
+
+func newEdgeOne(secretID, secretKey, region string) *edgeOne {
+	if strings.TrimSpace(region) == "" {
+		region = "ap-guangzhou" // teo 的 Region 可选，官方示例用的是这个
+	}
+	return &edgeOne{
+		secretID:  secretID,
+		secretKey: secretKey,
+		region:    region,
+		client:    &http.Client{Timeout: 20 * time.Second},
+	}
+}
+
+// tc3Signature 计算 TC3-HMAC-SHA256 的 Authorization 头。
+//
+// 只签 content-type 与 host 两个头：EdgeOne 的所有接口都用 POST + JSON，签名覆盖
+// 的字段越少越好核对。ts 单独传入是为了让测试能构造确定性输入。
+//
+// 派生链（腾讯云文档固定写法，不能改顺序）：
+//
+//	SecretDate    = HMAC-SHA256("TC3"+SecretKey, Date)
+//	SecretService = HMAC-SHA256(SecretDate, Service)      // service = "teo"
+//	SecretSigning = HMAC-SHA256(SecretService, "tc3_request")
+//	Signature     = HEX(HMAC-SHA256(SecretSigning, StringToSign))
+func tc3Signature(ts int64, body []byte, secretID, secretKey, host string) string {
+	const (
+		service     = "teo"
+		contentType = "application/json; charset=utf-8"
+		signedKeys  = "content-type;host"
+	)
+	date := time.Unix(ts, 0).UTC().Format("2006-01-02")
+	hashedPayload := sha256Hex(body)
+
+	// 注意 CanonicalHeaders 每行自带 "\n"，随后还要再补一个空行才接 SignedHeaders ——
+	// 少这一个空行是 TC3 最常见的手写错误，表现是入参全对但一直 SignatureFailure。
+	canonicalHeaders := "content-type:" + contentType + "\nhost:" + host + "\n"
+	canonicalRequest := "POST\n/\n\n" + canonicalHeaders + "\n" + signedKeys + "\n" + hashedPayload
+
+	scope := date + "/" + service + "/tc3_request"
+	stringToSign := "TC3-HMAC-SHA256\n" + fmt.Sprintf("%d", ts) + "\n" + scope + "\n" + sha256Hex([]byte(canonicalRequest))
+
+	kDate := hmacSHA256([]byte("TC3"+secretKey), date)
+	kService := hmacSHA256(kDate, service)
+	kSigning := hmacSHA256(kService, "tc3_request")
+	signature := hex.EncodeToString(hmacSHA256(kSigning, stringToSign))
+
+	return "TC3-HMAC-SHA256 Credential=" + secretID + "/" + scope +
+		", SignedHeaders=" + signedKeys + ", Signature=" + signature
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+func hmacSHA256(key []byte, msg string) []byte {
+	h := hmac.New(sha256.New, key)
+	h.Write([]byte(msg))
+	return h.Sum(nil)
+}
+
+// call 调一个 EdgeOne 接口，返回 Response 对象内部的原始 JSON。
+//
+// 失败时把腾讯云的 Code/Message 原样带回上层：一套没有联调过的云 API 客户端，
+// 报错原文比任何自定义文案都有用（InvalidParameter.XXX 能直接指向出错字段）。
+func (e *edgeOne) call(action string, payload any) (json.RawMessage, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	ts := time.Now().Unix()
+	host := strings.TrimPrefix(strings.TrimPrefix(edgeOneBase, "https://"), "http://")
+	host = strings.TrimSuffix(host, "/")
+
+	req, err := http.NewRequest(http.MethodPost, edgeOneBase, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Host", host)
+	req.Header.Set("X-TC-Action", action)
+	req.Header.Set("X-TC-Version", edgeOneVersion)
+	req.Header.Set("X-TC-Timestamp", fmt.Sprintf("%d", ts))
+	req.Header.Set("X-TC-Region", e.region)
+	req.Header.Set("Authorization", tc3Signature(ts, body, e.secretID, e.secretKey, host))
+
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求 EdgeOne 失败：%w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, err
+	}
+
+	var wrap struct {
+		Response json.RawMessage `json:"Response"`
+	}
+	if err := json.Unmarshal(raw, &wrap); err != nil {
+		return nil, fmt.Errorf("EdgeOne 返回的不是 JSON（HTTP %d）：%s", resp.StatusCode, snippet(raw))
+	}
+	if len(wrap.Response) == 0 {
+		return nil, fmt.Errorf("EdgeOne 返回缺少 Response 字段（HTTP %d）：%s", resp.StatusCode, snippet(raw))
+	}
+	var meta struct {
+		Error *struct {
+			Code    string `json:"Code"`
+			Message string `json:"Message"`
+		} `json:"Error"`
+		RequestID string `json:"RequestId"`
+	}
+	_ = json.Unmarshal(wrap.Response, &meta)
+	if meta.Error != nil {
+		return nil, fmt.Errorf("EdgeOne 错误 %s：%s（RequestId %s）",
+			meta.Error.Code, meta.Error.Message, meta.RequestID)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("EdgeOne HTTP %d：%s", resp.StatusCode, snippet(raw))
+	}
+	// 只返回 Response 内部的对象：上层各接口直接按业务字段解，
+	// 不需要每处都再拆一层外壳（拆漏一处就是一个静默的空结果）。
+	return wrap.Response, nil
+}
+
+func snippet(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if len(s) > 300 {
+		return s[:300] + "…"
+	}
+	return s
+}
+
+// Zone 一个 EdgeOne 站点。
+type Zone struct {
+	ZoneID   string `json:"ZoneId"`
+	ZoneName string `json:"ZoneName"`
+	Area     string `json:"Area"`
+	Status   string `json:"Status"`
+	Type     string `json:"Type"`
+}
+
+// ListZones 取站点列表。这是「验签」用的最小只读接口：
+// 只要密钥错了、Region 错了、时钟偏了，这里立刻会给出明确错误。
+func (e *edgeOne) ListZones() ([]Zone, error) {
+	raw, err := e.call("DescribeZones", map[string]any{"Offset": 0, "Limit": 20})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Zones []Zone `json:"Zones"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("解析站点列表失败：%w", err)
+	}
+	return out.Zones, nil
+}
+
+// AccelDomain 一条加速域名的状态。
+type AccelDomain struct {
+	Name         string `json:"DomainName"`
+	Cname        string `json:"Cname"`
+	Status       string `json:"DomainStatus"`
+	IdentifyStat string `json:"IdentificationStatus"`
+	HttpOrigin   int    `json:"HttpOriginPort"`
+	HttpsOrigin  int    `json:"HttpsOriginPort"`
+}
+
+// GetAccelDomain 查单个加速域名。未找到时返回 (nil, nil)，不当作错误。
+func (e *edgeOne) GetAccelDomain(zoneID, domain string) (*AccelDomain, error) {
+	raw, err := e.call("DescribeAccelerationDomains", map[string]any{
+		"ZoneId": zoneID,
+		"Filters": []map[string]any{
+			{"Name": "domain-name", "Values": []string{domain}},
+		},
+		"Offset": 0,
+		"Limit":  20,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var probe struct {
+		AccelerationDomains []AccelDomain `json:"AccelerationDomains"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, err
+	}
+	for i := range probe.AccelerationDomains {
+		if strings.EqualFold(probe.AccelerationDomains[i].Name, domain) {
+			return &probe.AccelerationDomains[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// CreateAccelDomain 创建一条加速域名，回源指向 originHost:originPort。
+//
+// originScheme 取 "HTTP" 或 "HTTPS"：frps 的 websocket 入口默认是明文 HTTP，
+// 所以默认走 HTTP 回源；CDN 到用户那一段仍是 HTTPS，由边缘节点终结 TLS。
+// 返回 CDN 分配的 CNAME（要加到 DNS 里）。
+func (e *edgeOne) CreateAccelDomain(zoneID, domain, originHost string, originPort int, originScheme string) (string, error) {
+	if originScheme == "" {
+		originScheme = "HTTP"
+	}
+	payload := map[string]any{
+		"ZoneId":     zoneID,
+		"DomainName": domain,
+		"OriginInfo": map[string]any{
+			"OriginType": "IP_DOMAIN",
+			"Origin":     originHost,
+		},
+		"OriginProtocol": originScheme,
+	}
+	if originScheme == "HTTPS" {
+		payload["HttpsOriginPort"] = originPort
+	} else {
+		payload["HttpOriginPort"] = originPort
+	}
+	raw, err := e.call("CreateAccelerationDomain", payload)
+	if err != nil {
+		return "", err
+	}
+	var probe struct {
+		Cname string `json:"Cname"`
+	}
+	_ = json.Unmarshal(raw, &probe)
+	return probe.Cname, nil
+}
+
+// EnableWebSocket 打开站点级 WebSocket 并把空闲超时设成 timeoutSec。
+//
+// 这是 frp 走 CDN 的前提：EdgeOne 默认关闭 WebSocket，客户端会直接收到
+// 非 101 的响应，frpc 只会报 "connection refused/EOF"，看不出是 CDN 关的。
+func (e *edgeOne) EnableWebSocket(zoneID string, timeoutSec int) error {
+	if timeoutSec <= 0 {
+		timeoutSec = 300
+	}
+	_, err := e.call("ModifyL7AccSetting", map[string]any{
+		"ZoneId": zoneID,
+		"ZoneConfig": map[string]any{
+			"WebSocket": map[string]any{
+				"Switch":  "on",
+				"Timeout": timeoutSec,
+			},
+		},
+	})
+	return err
+}

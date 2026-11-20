@@ -7,6 +7,8 @@
  *   internal/panel/ports.go      PortNeed / PortCheck / FirewallInfo / FWCommand
  *   internal/panel/probe.go      DialOutcome / ExtProbeResult
  *   internal/panel/tunnels.go    listTunnelsHandler / settingsHandler
+ *   internal/panel/linkquality.go  LinkQuality / LinkConn（ss -tin 采样）
+ *   internal/panel/advice.go     Advice（检查点 → 建议）
  *
  * 注意：Go 的零值 time.Time 序列化成 "0001-01-01T00:00:00Z"，所以时间字段
  * 一律按字符串处理，由 format.fmtAgo 判断有效性。
@@ -619,4 +621,163 @@ export interface AgentLogResponse {
   agent: string
   version: string
   last_see: string
+}
+
+/* ---------- 链路体检（内核 TCP 指标） ---------- */
+
+/** 一条 frpc↔frps 连接的 TCP 内核指标快照。 */
+export interface LinkQualityConn {
+  local: string
+  peer: string
+  /** 拥塞控制算法：bbr / cubic / reno */
+  cc: string
+  /** 内核当前平滑 RTT（毫秒） */
+  rtt_ms: number
+  rtt_var_ms: number
+  /** 只有 BBR 会报；0 表示这项拿不到 */
+  min_rtt_ms: number
+  cwnd: number
+  sent: number
+  retrans: number
+  lost: number
+  retrans_pct: number
+  delivery_bps: number
+}
+
+export type LinkQualityVerdict = 'healthy' | 'jittery' | 'lossy' | 'idle'
+
+/** 一次采样 + 聚合的结果。supported=false 时 reason 说明为什么拿不到。 */
+export interface LinkQuality {
+  supported: boolean
+  reason: string
+  /** RFC3339；Go 零值由 fmtAgo 显示为「从未」 */
+  sampled_at: string
+  bind_port: number
+  /** Go 空切片序列化成 null */
+  conns: LinkQualityConn[] | null
+  rtt_p50: number
+  rtt_p95: number
+  rtt_max: number
+  rtt_min: number
+  min_rtt: number
+  retrans_pct: number
+  total_sent: number
+  total_retrans: number
+  verdict: LinkQualityVerdict
+}
+
+export type LinkQualitySeverity = 'critical' | 'warn' | 'info'
+
+/**
+ * 一条「检查点 → 建议」。
+ *
+ * patch 为空（后端 omitempty）表示只提示、不可一键应用；
+ * 非空时键只可能是 tunnel_tcp_mux / tunnel_pool_count / tunnel_compression。
+ */
+export interface LinkQualityAdvice {
+  id: string
+  severity: LinkQualitySeverity
+  title: string
+  detail: string
+  evidence: string[] | null
+  patch?: Record<string, string> | null
+}
+
+/** 一个客户端「期望值 vs 实际生效值」的比对结果。 */
+export interface LinkQualityApplied {
+  agent_id: string
+  name: string
+  /** 客户端上报的传输配置摘要；空 = 旧版本或还没心跳 */
+  transport: string
+  match: boolean
+  note?: string
+}
+
+export interface LinkQualityResponse {
+  quality: LinkQuality | null
+  advice: LinkQualityAdvice[] | null
+  /** 面板设置算出的期望摘要，如 mux=1,pool=0,comp=1 */
+  desired: string
+  applied: LinkQualityApplied[] | null
+}
+
+export interface LinkQualityApplyResult {
+  ok: boolean
+  desired: string
+  /** 本次真正写入的键值 */
+  applied: Record<string, string> | null
+  /** 客户端最快多久拉取新配置（秒） */
+  confirm_within_sec: number
+  warnings: string[] | null
+}
+
+/* ---------- CDN 加速接入（腾讯云 EdgeOne） ---------- */
+
+/**
+ * GET /api/cdn/config 的扁平键值视图。
+ *
+ * 四个密钥字段只回传掩码（shared.NewTokenMask），永远拿不到明文；
+ * POST 时留空表示「不修改」，所以前端也不能把掩码原样回传 —— 那会把库里的
+ * 明文覆盖成一串星号。
+ */
+export interface CdnConfig {
+  /** '1' 启用 / '0' 关闭 */
+  cdn_enabled: string
+  /** 掩码；'' = 未配置 */
+  cdn_tencent_secret_id: string
+  cdn_tencent_secret_key: string
+  cdn_tencent_zone_id: string
+  cdn_tencent_region: string
+  cdn_domain: string
+  cdn_connect_port: string
+  /** HTTP / HTTPS */
+  cdn_origin_scheme: string
+  cdn_ws_timeout: string
+  cdn_aliyun_ak_id: string
+  cdn_aliyun_ak_secret: string
+  cdn_aliyun_root_domain: string
+  /** 留空则由后端从加速域名推导 */
+  cdn_dns_rr: string
+  /** '' = 直连 TCP；'wss' = 经 CDN */
+  desired_protocol: string
+  /** '' = 用原 frps 地址；否则是「域名:端口」 */
+  connect_addr: string
+}
+
+/** POST /api/cdn/config 允许的键（desired_protocol / connect_addr 是只读派生值）。 */
+export type CdnConfigKey = Exclude<keyof CdnConfig, 'desired_protocol' | 'connect_addr'>
+
+/** POST 请求体：只带用户真正改过的字段。 */
+export type CdnConfigPatch = Partial<Record<CdnConfigKey, string>>
+
+/** EdgeOne 站点。字段名跟腾讯云返回的 JSON 一致（大写开头）。 */
+export interface CdnZone {
+  ZoneId: string
+  ZoneName: string
+  Status: string
+  Area: string
+}
+
+/** POST /api/cdn/verify：失败时后端返回 4xx/5xx + 纯文本，不会走到这里。 */
+export interface CdnVerifyResult {
+  ok: boolean
+  zones: CdnZone[] | null
+}
+
+/** 一键接入里的一步。失败时 ok=false，detail 是云厂商原文。 */
+export interface CdnProvisionStep {
+  step: string
+  ok: boolean
+  detail: string
+}
+
+/**
+ * POST /api/cdn/provision：业务失败仍是 HTTP 200，靠 ok / steps[].ok 判断，
+ * 所以调用方必须按 steps 逐条展示，不能只看顶层 ok。
+ */
+export interface CdnProvisionResult {
+  ok: boolean
+  /** 成功后客户端应连接的「域名:端口」 */
+  connect_addr?: string
+  steps: CdnProvisionStep[] | null
 }

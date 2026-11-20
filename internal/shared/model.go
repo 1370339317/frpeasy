@@ -4,6 +4,7 @@ package shared
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"strings"
 	"time"
 )
 
@@ -84,7 +85,7 @@ type Agent struct {
 	// 这一段 —— 而那一段恰恰是隧道真实吞吐所在。让客户端自己测、自己报，
 	// 面板就能直接显示"这台机器到面板只有 40KB/s"，不用再猜。
 	// 0 表示还没测过（老客户端不会填）。
-	DownKbps int64     `json:"down_kbps"`
+	DownKbps int64 `json:"down_kbps"`
 	// UpKbps 客户端自测的「本机 → 面板」**上行**速率（kbps）。
 	//
 	// 必须与下行分开：客户端绝大多数在家庭宽带上，上下行严重不对等
@@ -205,6 +206,13 @@ type AgentConfig struct {
 	// Compression 是否对隧道流做压缩。跨境小带宽链路上通常收益明显
 	// （HTTP 响应体可压 3~5 倍），对已压缩内容只是多花一点 CPU。
 	Compression *bool `json:"compression,omitempty"`
+	// TransportProtocol frpc→frps 的底层通信协议，空或 "tcp" = 直连 TCP（默认）。
+	//
+	// 只有一种场景需要改：隧道要穿过只认 HTTP 的加速层（CDN）。此时置为
+	// "websocket"（明文回源）或 "wss"（TLS 回源），配合把 frps 地址换成
+	// 加速域名，frpc 就会用 HTTP Upgrade 出站，从而被 CDN 接住。
+	// 老面板不下发该字段 → 保持默认 TCP，不会影响任何现存隧道。
+	TransportProtocol string `json:"transport_protocol,omitempty"`
 
 	// ---- 客户端自测速率的调度（都由面板决定）----
 	//
@@ -270,6 +278,50 @@ type HeartbeatRequest struct {
 	// SpeedReq 本次心跳对应的"一次**测速请求 ID**（回执）。
 	// 面板据此确认这次主动测速已经完成，并清掉待办，避免按钮一直转圈。
 	SpeedReq string `json:"speed_req"`
+	// Transport 客户端**实际生效**的传输配置摘要，形如 "mux=1,pool=0,comp=1"。
+	//
+	// 面板拿它和自己的期望值比对，才能回答"设置改了，客户端到底生效了没有"。
+	// 只看面板自己的设置是不够的：配置要经心跳下发、由 agent 重写 frpc.toml
+	// 并重启 frpc 才真正生效，中间任何一步失败，用户在界面上都看不出来。
+	// 旧 agent 不填 → 空串，面板显示"未上报"，不当作错误。
+	Transport string `json:"transport"`
+}
+
+// TransportSummary 把传输参数格式化成客户端与面板都能直接比对的短串。
+//
+// 两端必须用同一个函数生成，否则会退化成"永远不匹配"的假告警。
+//
+// proto 也要进摘要：走 CDN 加速时协议会从 tcp 变成 wss，如果摘要里没有它，
+// 面板就会在"客户端其实还连着旧地址"的时候显示「已生效」—— 这正是我们要
+// 消灭的那种静默失败。空串按 tcp 归一，避免老调用点产生两种写法。
+func TransportSummary(mux, pool, comp int, proto string) string {
+	proto = strings.ToLower(strings.TrimSpace(proto))
+	if proto == "" || proto == "tcp" {
+		proto = "tcp"
+	}
+	return "mux=" + itoa(mux) + ",pool=" + itoa(pool) + ",comp=" + itoa(comp) + ",proto=" + proto
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var b [12]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		b[i] = '-'
+	}
+	return string(b[i:])
 }
 
 // AgentUpdate 面板通过心跳下发给客户端的升级指令。
