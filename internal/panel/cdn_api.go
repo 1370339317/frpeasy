@@ -1,11 +1,14 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"frpeasy/internal/shared"
 )
@@ -130,6 +133,28 @@ func (p *Panel) cdnConfigHandler(w http.ResponseWriter, r *http.Request) {
 		settingCDNAliyunID: true, settingCDNAliyunKey: true, settingCDNAliyunRoot: true,
 		settingCDNDNSRR: true,
 	}
+	// 启用前必须确认域名真的能解析。这一步是必须的：客户端拿到 wss 配置后会立刻
+	// 去连加速域名，域名不存在时 frpc 只会打 "no such host" 并无限重试，表现是
+	// **全部隧道同时掉线**——2026-11-21 凌晨真实发生过一次，代价是整站中断。
+	// 宁可拒绝保存，也不要把一个注定连不上的配置推给所有客户端。
+	prospectiveEnabled := strings.TrimSpace(body[settingCDNEnabled])
+	if prospectiveEnabled == "" {
+		prospectiveEnabled = p.db.GetSetting(settingCDNEnabled)
+	}
+	prospectiveDomain := strings.TrimSpace(body[settingCDNDomain])
+	if prospectiveDomain == "" {
+		prospectiveDomain = p.db.GetSetting(settingCDNDomain)
+	}
+	if prospectiveEnabled == "1" && prospectiveDomain != "" {
+		if err := hostResolves(prospectiveDomain); err != nil {
+			http.Error(w, fmt.Sprintf(
+				"域名 %s 现在解析不到（%v），启用后会立刻导致全部隧道掉线，已拒绝保存。"+
+					"请先在 EdgeOne 完成域名接入并等 CNAME 生效，再打开开关。", prospectiveDomain, err),
+				http.StatusBadRequest)
+			return
+		}
+	}
+
 	for k, v := range body {
 		if !allowed[k] {
 			http.Error(w, "不支持的配置项："+k, http.StatusBadRequest)
@@ -274,6 +299,13 @@ func (p *Panel) cdnProvisionHandler(w http.ResponseWriter, r *http.Request) {
 	if !add("开启 WebSocket", c.EnableWebSocket(zoneID, timeout), fmt.Sprintf("空闲超时 %d 秒", timeout)) {
 		writeJSON(w, map[string]any{"ok": false, "steps": steps})
 		return
+	}
+
+	// DNS 解析检查：接入做完了但解析没生效，仍然不能开开关。
+	if err := hostResolves(domain); err != nil {
+		add("检查 DNS 解析", fmt.Errorf("域名 %s 目前解析不到：%v。请等 EdgeOne 的 CNAME 生效后再启用加速", domain, err), "")
+	} else {
+		add("检查 DNS 解析", nil, domain+" 已可解析")
 	}
 
 	// 阿里云 DNS：可选。没配就打一行提示并返回成功，不阻断整体流程。
@@ -459,4 +491,15 @@ func (p *Panel) cdnDomainCreateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "existed": false, "cname": cname, "domain": domain})
+}
+
+// hostResolves 判断主机名当前能否解析。
+//
+// 只做 A/AAAA 查询，3 秒超时：面板的保存动作不能被一个慢 DNS 拖住，
+// 而"能不能解析"这个判断本身不需要多精确。
+func hostResolves(host string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := net.DefaultResolver.LookupHost(ctx, host)
+	return err
 }
