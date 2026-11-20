@@ -759,9 +759,25 @@ export interface CdnZone {
 }
 
 /** POST /api/cdn/verify：失败时后端返回 4xx/5xx + 纯文本，不会走到这里。 */
+export interface CdnZoneProbe {
+  action: string
+  ok: boolean
+  detail: string
+}
+
 export interface CdnVerifyResult {
   ok: boolean
   zones: CdnZone[] | null
+  /** 腾讯云返回的总条数；与 zones.length 不一致说明分页/字段有问题 */
+  total?: number
+  /** 实际调用的 API 端点（国内站 / 国际站） */
+  endpoint?: string
+  /** 站点为空时返回的原始响应片段，用于判断"真没站点"还是"权限被收窄" */
+  raw?: string
+  /** 空列表时的排查指引：优先指向缺失的 CAM 权限 */
+  hint?: string
+  /** 只读权限探针：被拒的动作说明子账号策略被收窄 */
+  probes?: CdnZoneProbe[] | null
 }
 
 /** 一键接入里的一步。失败时 ok=false，detail 是云厂商原文。 */

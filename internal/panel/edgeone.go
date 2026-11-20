@@ -311,3 +311,28 @@ func (e *edgeOne) EnableWebSocket(zoneID string, timeoutSec int) error {
 	})
 	return err
 }
+
+// ZoneProbe 一条权限探针结果：用只读动作判断子账号被授到什么程度。
+type ZoneProbe struct {
+	Action string `json:"action"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+}
+
+// probePermissions 在"站点列表为空"时判断到底是没站点还是权限被收窄。
+//
+// 只用只读动作：DescribePacks（套餐）、DescribeAccountInfo（账号）、DescribeUserStatus（开通状态）。
+// 这三个都是 QcloudTEOFullAccess 必然允许的；被拒就说明子账号策略被收窄了 ——
+// 这正是"控制台明明有站点、API 却返回空列表"的典型成因。
+func (e *edgeOne) probePermissions() []ZoneProbe {
+	var out []ZoneProbe
+	for _, act := range []string{"DescribePacks", "DescribeAccountInfo", "DescribeUserStatus"} {
+		raw, err := e.call(act, map[string]any{})
+		if err != nil {
+			out = append(out, ZoneProbe{Action: act, OK: false, Detail: err.Error()})
+			continue
+		}
+		out = append(out, ZoneProbe{Action: act, OK: true, Detail: snippet(raw)})
+	}
+	return out
+}

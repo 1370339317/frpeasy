@@ -174,15 +174,21 @@ func (p *Panel) cdnVerifyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, map[string]any{
+	resp := map[string]any{
 		"ok":       true,
 		"zones":    zl.Zones,
 		"total":    zl.Total,
 		"endpoint": zl.Endpoint,
 		"raw":      zl.Raw,
-		// 空列表不是错误，但要给出下一步该查什么。这三种原因占了绝大多数。
-		"hint": emptyZoneHint(p, zl),
-	})
+	}
+	if len(zl.Zones) == 0 {
+		// 空列表时再探一次权限：用户最需要知道的是"我该去授哪个权限"，
+		// 而不是"你账号下没有站点"——后者会把人引向完全错误的方向。
+		probes := c.probePermissions()
+		resp["probes"] = probes
+		resp["hint"] = permissionHint(probes, p, zl)
+	}
+	writeJSON(w, resp)
 }
 
 // cdnStep 一次编排里的一步结果。失败时不抛异常，而是把每一步都记下来，
@@ -371,4 +377,25 @@ func (p *Panel) listZonesAuto(c *edgeOne) (*ZoneList, error) {
 	// 两边都空（或另一端点报错）时返回第一次的结果：它带着原始响应片段，
 	// 足以判断是"确实没有站点"还是"两套账号都没有"。
 	return first, nil
+}
+
+// permissionHint 把探针结果翻译成"该授什么权限"。
+//
+// 优先判权限：只要任何一个 teo 只读动作被拒，就几乎可以断定是子账号策略被收窄
+// （QcloudTEOFullAccess 不可能出现这种情况）。这时再说"端点/站点"只会误导。
+func permissionHint(probes []ZoneProbe, p *Panel, zl *ZoneList) string {
+	var denied []string
+	for _, pr := range probes {
+		if !pr.OK {
+			denied = append(denied, pr.Action)
+		}
+	}
+	if len(denied) > 0 {
+		return "子账号权限不足：以下动作被拒 → " + strings.Join(denied, "、") +
+			"。请给这个 CAM 子账号绑定 QcloudTEOFullAccess（资源范围选「全部资源」）；" +
+			"若必须最小权限，自定义策略至少需要 teo:DescribeZones / teo:DescribeAccelerationDomains / " +
+			"teo:CreateAccelerationDomain / teo:ModifyL7AccSetting，资源填 *。" +
+			"按站点隔离授权会让列表为空，这是最常见的原因。"
+	}
+	return emptyZoneHint(p, zl)
 }

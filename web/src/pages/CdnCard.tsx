@@ -133,6 +133,8 @@ export function CdnCard() {
   const [saveErr, setSaveErr] = useState('')
   const [verifyErr, setVerifyErr] = useState('')
   const [zones, setZones] = useState<CdnZone[] | null>(null)
+  // 空列表时腾讯云给不出"为什么"，这两项是后端补的诊断信息。
+  const [verifyMeta, setVerifyMeta] = useState<CdnVerifyResult | null>(null)
   const [provErr, setProvErr] = useState('')
   const [prov, setProv] = useState<CdnProvisionResult | null>(null)
 
@@ -194,6 +196,7 @@ export function CdnCard() {
     try {
       const r = await api<CdnVerifyResult>('POST', '/api/cdn/verify')
       setZones(r.zones ?? [])
+      setVerifyMeta(r)
     } catch (e) {
       // 后端把腾讯云原文（纯文本）透传出来，整段保留才能定位是签名、区域还是时钟问题。
       const msg = (e as Error).message
@@ -438,9 +441,43 @@ export function CdnCard() {
             <span className="text-[11.5px] text-dim">
               {zones.length > 0
                 ? `共 ${zones.length} 个站点：把上面的 ZoneId 填进表单再保存`
-                : '这个账号下还没有 EdgeOne 站点，先去控制台添加站点'}
+                : '密钥可用，但没有拿到站点列表'}
             </span>
           </div>
+          {zones.length === 0 && (
+            <div className="rounded-lg border border-warn-fg/40 bg-warn-dim px-3.5 py-2.5 text-[12px] leading-[1.7] text-warn-fg">
+              <div className="mb-1 font-[650]">为什么列表是空的</div>
+              <div className="break-all" title={verifyMeta?.hint || undefined}>
+                {verifyMeta?.hint || '腾讯云返回了空列表，但没有给出更多诊断信息。'}
+              </div>
+              {verifyMeta?.endpoint && (
+                <div className="mt-1.5 text-[11.5px] opacity-80 break-all">
+                  实际端点：{verifyMeta.endpoint}；返回 TotalCount={verifyMeta.total ?? 0}
+                </div>
+              )}
+              {verifyMeta?.probes && verifyMeta.probes.length > 0 && (
+                <div className="mt-2">
+                  <div className="mb-1 text-[11.5px] font-[650]">权限探针</div>
+                  <div className="grid gap-1">
+                    {verifyMeta.probes.map((pr) => (
+                      <div key={pr.action} className="flex min-w-0 items-baseline gap-1.5">
+                        <span className={pr.ok ? 'text-ok-fg' : 'text-bad-fg'}>
+                          {pr.ok ? '✓' : '✗'}
+                        </span>
+                        <span className="font-mono text-[11.5px] shrink-0">{pr.action}</span>
+                        <span
+                          className="min-w-0 truncate text-[11px] opacity-80"
+                          title={pr.detail}
+                        >
+                          {pr.ok ? '允许' : '被拒'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           {zones.length > 0 && (
             <Table head={['ZoneId', '站点名称', '状态', '区域']}>
               {zones.map((z) => (
