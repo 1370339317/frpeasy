@@ -296,9 +296,24 @@ func (p *Panel) cdnProvisionHandler(w http.ResponseWriter, r *http.Request) {
 	if n, e := strconv.Atoi(strings.TrimSpace(p.db.GetSetting(settingCDNWSTimeout))); e == nil && n > 0 {
 		timeout = n
 	}
-	if !add("开启 WebSocket", c.EnableWebSocket(zoneID, timeout), fmt.Sprintf("空闲超时 %d 秒", timeout)) {
-		writeJSON(w, map[string]any{"ok": false, "steps": steps})
-		return
+	// WebSocket 是**站点级**配置：一旦调用 ModifyL7AccSetting，该站点下所有加速域名
+	// 都会被重新部署。所以先读后写，已经开着就绝不再碰 —— 否则用户每点一次"接入"，
+	// 站内其他正在服务的域名就要跟着抖一次。
+	wsOn, wsTimeout, werr := c.WebSocketState(zoneID)
+	switch {
+	case werr != nil:
+		// 读不到就当没开，继续走写入；读失败不该阻断接入。
+		if !add("开启 WebSocket", c.EnableWebSocket(zoneID, timeout), fmt.Sprintf("空闲超时 %d 秒（站点级配置）", timeout)) {
+			writeJSON(w, map[string]any{"ok": false, "steps": steps})
+			return
+		}
+	case wsOn:
+		add("检查 WebSocket", nil, fmt.Sprintf("已是开启状态（超时 %d 秒），跳过写入，不触发站点级重新部署", wsTimeout))
+	default:
+		if !add("开启 WebSocket", c.EnableWebSocket(zoneID, timeout), fmt.Sprintf("空闲超时 %d 秒。注意：这是站点级配置，本操作会让该站点下所有域名重新部署一次", timeout)) {
+			writeJSON(w, map[string]any{"ok": false, "steps": steps})
+			return
+		}
 	}
 
 	// DNS 解析检查：接入做完了但解析没生效，仍然不能开开关。

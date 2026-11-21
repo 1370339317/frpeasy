@@ -749,16 +749,12 @@ export function CdnCard() {
           {domainsState === 'ready' && !creating && domains.length > 0 && (
             <>
               <div className="mb-1.5 flex flex-wrap items-center gap-2">
-                <span className="text-[12px] text-dim">点一行选中；回源端口不对时会有提示</span>
-                <span className="flex-1" />
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setCreating(true)}
-                  disabled={busy !== null}
-                >
+                <Button size="sm" onClick={() => setCreating(true)} disabled={busy !== null}>
                   新建域名
                 </Button>
+                <span className="text-[11.5px] text-dim">
+                  多数情况直接新建；下面这些是站点里已有的，点一行可复用（不会改动它们）
+                </span>
               </div>
               <div className="grid gap-1.5">
                 {domains.map((d) => {
@@ -907,6 +903,13 @@ export function CdnCard() {
               <span className="text-[11.5px] text-dim">
                 幂等：重复点不会产生重复的域名或解析
               </span>
+            </div>
+          )}
+
+          {!showToggle && (
+            <div className="mt-2 text-[11.5px] leading-[1.6] text-warn-fg">
+              说明：WebSocket 是<strong>站点级</strong>设置。若该站点当前没开，接入时会写一次，
+              腾讯云会把该站点下<strong>所有</strong>加速域名重新部署一遍；已开启则跳过、不产生任何变更。
             </div>
           )}
 

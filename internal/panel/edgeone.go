@@ -359,3 +359,28 @@ func (e *edgeOne) ListAccelDomains(zoneID string) ([]AccelDomain, error) {
 	}
 	return out.AccelerationDomains, nil
 }
+
+// WebSocketState 读站点当前的 WebSocket 配置。
+//
+// 必须先读再决定要不要写：ModifyL7AccSetting 改的是**站点级**配置，腾讯云文档明确
+// "该参数中的配置会对站点下的所有域名生效" —— 每调用一次，这个站点下所有加速域名
+// 都会被重新部署一遍。对已经有生产域名的站点来说，无脑写一次就是一次全站抖动。
+func (e *edgeOne) WebSocketState(zoneID string) (bool, int, error) {
+	raw, err := e.call("DescribeL7AccSetting", map[string]any{"ZoneId": zoneID})
+	if err != nil {
+		return false, 0, err
+	}
+	var out struct {
+		ZoneConfig struct {
+			WebSocket struct {
+				Switch  string `json:"Switch"`
+				Timeout int    `json:"Timeout"`
+			} `json:"WebSocket"`
+		} `json:"ZoneConfig"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return false, 0, fmt.Errorf("解析站点加速配置失败：%w", err)
+	}
+	ws := out.ZoneConfig.WebSocket
+	return strings.EqualFold(ws.Switch, "on"), ws.Timeout, nil
+}
