@@ -354,16 +354,30 @@ func (e *edgeOne) EnsureWebSocket(zoneID string, timeoutSec int) (bool, error) {
 // EdgeOne 与 DNSPod 都走这一条，避免两份几乎相同的代码各自漂移
 // （比如一处加了错误透出、另一处忘了）。
 func tc3Call(client *http.Client, base, service, version, region, action, secretID, secretKey string, payload any) (json.RawMessage, error) {
+	started := time.Now()
+	entry := AuditEntry{At: started, Service: service, Action: action, Write: writeActions[action]}
+	raw, reqID, err := tc3CallInner(client, base, service, version, region, action, secretID, secretKey, payload)
+	entry.Ms = time.Since(started).Milliseconds()
+	entry.OK = err == nil
+	entry.RequestID = reqID
+	if err != nil {
+		entry.Detail = err.Error()
+	}
+	recordAudit(entry)
+	return raw, err
+}
+
+func tc3CallInner(client *http.Client, base, service, version, region, action, secretID, secretKey string, payload any) (json.RawMessage, string, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	ts := time.Now().Unix()
 	host := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://"), "/")
 
 	req, err := http.NewRequest(http.MethodPost, base, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("Host", host)
@@ -377,22 +391,22 @@ func tc3Call(client *http.Client, base, service, version, region, action, secret
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("请求 %s 失败：%w", service, err)
+		return nil, "", fmt.Errorf("请求 %s 失败：%w", service, err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	var wrap struct {
 		Response json.RawMessage `json:"Response"`
 	}
 	if err := json.Unmarshal(raw, &wrap); err != nil {
-		return nil, fmt.Errorf("%s 返回的不是 JSON（HTTP %d）：%s", service, resp.StatusCode, snippet(raw))
+		return nil, "", fmt.Errorf("%s 返回的不是 JSON（HTTP %d）：%s", service, resp.StatusCode, snippet(raw))
 	}
 	if len(wrap.Response) == 0 {
-		return nil, fmt.Errorf("%s 返回缺少 Response 字段（HTTP %d）：%s", service, resp.StatusCode, snippet(raw))
+		return nil, "", fmt.Errorf("%s 返回缺少 Response 字段（HTTP %d）：%s", service, resp.StatusCode, snippet(raw))
 	}
 	var meta struct {
 		Error *struct {
@@ -403,10 +417,10 @@ func tc3Call(client *http.Client, base, service, version, region, action, secret
 	}
 	_ = json.Unmarshal(wrap.Response, &meta)
 	if meta.Error != nil {
-		return nil, fmt.Errorf("%s 错误 %s：%s（RequestId %s）", service, meta.Error.Code, meta.Error.Message, meta.RequestID)
+		return nil, meta.RequestID, fmt.Errorf("%s 错误 %s：%s（RequestId %s）", service, meta.Error.Code, meta.Error.Message, meta.RequestID)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("%s HTTP %d：%s", service, resp.StatusCode, snippet(raw))
+		return nil, meta.RequestID, fmt.Errorf("%s HTTP %d：%s", service, resp.StatusCode, snippet(raw))
 	}
-	return wrap.Response, nil
+	return wrap.Response, meta.RequestID, nil
 }

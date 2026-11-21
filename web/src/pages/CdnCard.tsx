@@ -10,6 +10,7 @@ import type {
   CdnDomainsResult,
   CdnProvisionResult,
   CdnVerifyResult,
+  CdnAuditEntry,
   CdnZone,
   CdnZoneProbe,
   LinkQualityApplied,
@@ -301,9 +302,21 @@ export function CdnCard() {
     }
   }, [])
 
+  const [audit, setAudit] = useState<CdnAuditEntry[] | null>(null)
+  // 追溯用：把面板对腾讯云/阿里云的每次调用都列出来，写操作高亮。
+  const loadAudit = useCallback(async () => {
+    try {
+      const r = await api<{ entries: CdnAuditEntry[] | null }>('GET', '/api/cdn/audit?limit=40')
+      setAudit(r.entries ?? [])
+    } catch {
+      setAudit([])
+    }
+  }, [])
+
   useEffect(() => {
     void reload()
-  }, [reload])
+    void loadAudit()
+  }, [reload, loadAudit])
 
   // 卸载清理：让在飞的轮询代号失效并清掉待触发的定时器。
   useEffect(() => () => stopPolling(), [stopPolling])
@@ -470,6 +483,7 @@ export function CdnCard() {
       )
       setWsNote({ ok: r.enabled, text: r.note })
       await reload()
+      await loadAudit()
     } catch (e) {
       const be = readErr(e)
       setWsNote({ ok: false, text: be.text })
@@ -1094,6 +1108,45 @@ export function CdnCard() {
               )}
             </div>
           )}
+        </div>
+      )}
+      {audit && audit.length > 0 && (
+        <div className="mt-3 border-t border-border2 pt-3">
+          <div className="mb-1.5 flex flex-wrap items-center gap-2">
+            <b className="text-[12.5px] text-fg">最近调用记录</b>
+            <span className="text-[11.5px] text-dim">
+              面板对腾讯云发起的每一次请求；标记「写」的会改变云上资源
+            </span>
+            <span className="flex-1" />
+            <Button variant="ghost" size="sm" onClick={() => void loadAudit()}>
+              刷新
+            </Button>
+          </div>
+          <div className="grid gap-1">
+            {audit.slice().reverse().map((e, i) => (
+              <div
+                key={`${e.at}-${i}`}
+                className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 rounded-[8px] bg-chip px-2 py-1.5 text-[11.5px]"
+              >
+                <span className="shrink-0 font-mono text-dim">
+                  {new Date(e.at).toLocaleTimeString('zh-CN', { hour12: false })}
+                </span>
+                <span className={cx('shrink-0 font-mono', e.ok ? 'text-fg' : 'text-bad-fg')}>
+                  {e.action}
+                </span>
+                {e.write && <Badge tone="warn">写</Badge>}
+                <span className={cx('shrink-0', e.ok ? 'text-ok-fg' : 'text-bad-fg')}>
+                  {e.ok ? '✓' : '✗'}
+                </span>
+                <span className="shrink-0 text-dim">{e.ms}ms</span>
+                {e.detail && (
+                  <span className="min-w-0 flex-1 truncate text-bad-fg" title={e.detail}>
+                    {e.detail}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </Card>

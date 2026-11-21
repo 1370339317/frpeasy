@@ -825,3 +825,16 @@ export interface CdnDomainCreateResult {
   cname: string
   domain: string
 }
+
+/** 一次云厂商调用的审计记录（GET /api/cdn/audit）。 */
+export interface CdnAuditEntry {
+  at: string
+  service: string
+  action: string
+  ok: boolean
+  ms: number
+  detail?: string
+  request_id?: string
+  /** true = 会改变云上资源的动作 */
+  write: boolean
+}

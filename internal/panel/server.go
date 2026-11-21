@@ -103,6 +103,8 @@ type Panel struct {
 
 // NewPanel 构造面板：初始化数据库、管理员、frps 管理器，并确定 agent 二进制目录。
 func NewPanel(dataDir, listen, version string) (*Panel, error) {
+	// 云侧调用的审计文件：任何会改变云上资源的动作都要留痕，见 audit.go。
+	setupAudit(dataDir)
 	db, err := NewDB(filepath.Join(dataDir, "frpeasy.db"))
 	if err != nil {
 		return nil, err
@@ -247,6 +249,7 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("POST /api/cdn/domains", p.requireAuth(p.cdnDomainsHandler))
 	mux.HandleFunc("POST /api/cdn/domain-create", p.requireAuth(p.cdnDomainCreateHandler))
 	mux.HandleFunc("POST /api/cdn/ws-enable", p.requireAuth(p.cdnWSEnableHandler))
+	mux.HandleFunc("GET /api/cdn/audit", p.requireAuth(p.cdnAuditHandler))
 	mux.HandleFunc("GET /api/frps", p.requireAuth(p.frpsControlHandler))
 	mux.HandleFunc("POST /api/frps", p.requireAuth(p.frpsControlHandler))
 	mux.HandleFunc("GET /api/system/network", p.requireAuth(p.systemNetworkHandler))

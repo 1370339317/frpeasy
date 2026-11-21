@@ -293,15 +293,17 @@ func (p *Panel) cdnProvisionHandler(w http.ResponseWriter, r *http.Request) {
 		cname = existing.Cname
 	}
 
-	// WebSocket 是**站点级**配置：调用 ModifyL7AccSetting 会让该站点下所有加速域名
-	// 重新部署一次。所以这里做三件事：先读；确实没开才写一次；写之前看冷却，
-	// 避免"写了没生效 → 下次再写 → 又全站重部署"的死循环（2026-11-21 踩过）。
-	if on, note, err := p.ensureWebSocket(c, zoneID, 0, false); err != nil {
-		add("开启 WebSocket", err, note)
-	} else if on {
+	// WebSocket 只读检查。
+	//
+	// 2026-11-21 实测两次：该站点 Status 一直是 pending，ModifyL7AccSetting 返回成功
+	// 但回读仍是 off —— 站点级配置在这个站点上根本落不了地，而每次写入都会让
+	// 站点下所有域名重新部署一次。既然写了也白写，还制造全站抖动，就不再自动写。
+	// 需要开的时候由用户在界面上显式点「尝试开启 WebSocket」（会被审计记录）。
+	if on, note, err := p.ensureWebSocket(c, zoneID, 0, false); err == nil {
 		add("检查 WebSocket", nil, note)
+		_ = on
 	} else {
-		add("检查 WebSocket", nil, note)
+		add("检查 WebSocket", err, "")
 	}
 
 	// DNS 检查 + 自动补记录。
@@ -626,4 +628,15 @@ func (p *Panel) zoneNameOf(c *edgeOne, zoneID string) string {
 		}
 	}
 	return ""
+}
+
+// cdnAuditHandler GET /api/cdn/audit?limit=50 —— 回放最近的云调用，用于追溯。
+func (p *Panel) cdnAuditHandler(w http.ResponseWriter, r *http.Request) {
+	n := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if x, err := strconv.Atoi(v); err == nil && x > 0 && x <= 500 {
+			n = x
+		}
+	}
+	writeJSON(w, map[string]any{"entries": readAudit(n)})
 }
