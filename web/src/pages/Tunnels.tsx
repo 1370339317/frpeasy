@@ -4,7 +4,7 @@ import { useApp, type TunnelDraft } from '../store'
 import { api } from '../lib/api'
 import { copyWithHint, fmtBytes } from '../lib/format'
 import { Badge, Button, Card, Empty, Table, Td, Led, cx } from '../components/ui'
-import type { Tunnel, TunnelProbeResult } from '../types'
+import type { Tunnel, TunnelProbeResult, CdnTunnelStatus } from '../types'
 import { TunnelModal } from './TunnelModal'
 import { CdnExposeModal } from './CdnExposeModal'
 
@@ -40,6 +40,30 @@ export function Tunnels() {
   const [prefill, setPrefill] = useState<TunnelDraft | null>(null)
   // 「接入 CDN」的目标隧道。非 null = 弹窗打开。
   const [cdnTarget, setCdnTarget] = useState<Tunnel | null>(null)
+  // http 隧道的真实可用性：隧道在线 ≠ 域名可用（EdgeOne 可能还在部署、证书还没下发）。
+  // 30 秒一轮：TLS 探测在后端有 30 秒缓存，没必要更频繁。
+  const [httpStatus, setHttpStatus] = useState<Record<number, CdnTunnelStatus>>({})
+  useEffect(() => {
+    let alive = true
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tick = async () => {
+      try {
+        const r = await api<{ items: CdnTunnelStatus[] | null }>('GET', '/api/cdn/tunnels-status')
+        if (!alive) return
+        const m: Record<number, CdnTunnelStatus> = {}
+        for (const it of r.items ?? []) m[it.tunnel_id] = it
+        setHttpStatus(m)
+      } catch {
+        /* 状态拿不到就不显示，不影响列表本身 */
+      }
+      if (alive) timer = setTimeout(tick, 30000)
+    }
+    void tick()
+    return () => {
+      alive = false
+      if (timer) clearTimeout(timer)
+    }
+  }, [])
   // 每条隧道的实测结果（按 id 记，互不影响）。'loading' 表示正在测。
   //
   // 结果只留在本页内存里、不进库：它是一个"此刻这条链路能跑多快"的快照，
@@ -201,11 +225,30 @@ export function Tunnels() {
                       <span className="text-dim">
                         {/* http 隧道不占公网端口，靠域名访问；这里显示域名本身，
                             否则会一直停在"等待分配端口"，看起来像卡住了 */}
-                        {t.protocol === 'http'
-                          ? t.domain || '等待绑定域名'
-                          : t.agent_id
-                            ? '等待分配端口'
-                            : '部署后可访问'}
+                        {t.protocol === 'http' ? (
+                          <span className="inline-flex flex-wrap items-center gap-1.5">
+                            <span>{t.domain || '等待绑定域名'}</span>
+                            {(() => {
+                              const st = httpStatus[t.id]
+                              if (!st) return null
+                              if (st.ready) return <Badge tone="ok">可用</Badge>
+                              if (st.domain_status !== 'online')
+                                return <Badge tone="gray">域名部署中</Badge>
+                              return (
+                                <span
+                                  className="text-warn-fg"
+                                  title={st.cert_detail || '证书尚未下发，暂时只能走 HTTP'}
+                                >
+                                  证书未就绪（暂仅 HTTP）
+                                </span>
+                              )
+                            })()}
+                          </span>
+                        ) : t.agent_id ? (
+                          '等待分配端口'
+                        ) : (
+                          '部署后可访问'
+                        )}
                       </span>
                     )}
                   </Td>

@@ -880,3 +880,13 @@ export interface CdnAuditEntry {
   /** true = 会改变云上资源的动作 */
   write: boolean
 }
+
+/** http 隧道的真实可用性（GET /api/cdn/tunnels-status）。 */
+export interface CdnTunnelStatus {
+  tunnel_id: number
+  domain: string
+  domain_status: string
+  cert_ok: boolean
+  cert_detail?: string
+  ready: boolean
+}

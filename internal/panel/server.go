@@ -252,6 +252,8 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("POST /api/cdn/expose", p.requireAuth(p.cdnExposeHandler))
 	mux.HandleFunc("POST /api/cdn/ws-enable", p.requireAuth(p.cdnWSEnableHandler))
 	mux.HandleFunc("GET /api/cdn/audit", p.requireAuth(p.cdnAuditHandler))
+	// http 隧道的真实可用性（域名部署状态 + 证书状态）
+	mux.HandleFunc("GET /api/cdn/tunnels-status", p.requireAuth(p.cdnTunnelStatusHandler))
 	mux.HandleFunc("GET /api/frps", p.requireAuth(p.frpsControlHandler))
 	mux.HandleFunc("POST /api/frps", p.requireAuth(p.frpsControlHandler))
 	mux.HandleFunc("GET /api/system/network", p.requireAuth(p.systemNetworkHandler))
