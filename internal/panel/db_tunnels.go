@@ -353,9 +353,9 @@ func (db *DB) GetTunnel(id int64) (*shared.Tunnel, error) {
 	var created sql.NullTime
 	var agentID sql.NullString
 	err := db.QueryRow(
-		"SELECT id,name,local_addr,public_port,protocol,token,agent_id,created_at FROM tunnels WHERE id=?",
+		"SELECT id,name,local_addr,public_port,protocol,token,agent_id,created_at,domain FROM tunnels WHERE id=?",
 		id,
-	).Scan(&t.ID, &t.Name, &t.LocalAddr, &t.PublicPort, &t.Protocol, &t.Token, &agentID, &created)
+	).Scan(&t.ID, &t.Name, &t.LocalAddr, &t.PublicPort, &t.Protocol, &t.Token, &agentID, &created, &t.Domain)
 	if err != nil {
 		return nil, err
 	}
@@ -385,7 +385,7 @@ func (db *DB) ListTunnelsForAgent(agentID string) ([]shared.Tunnel, error) {
 
 func (db *DB) queryTunnels(where string, args ...any) ([]shared.Tunnel, error) {
 	rows, err := db.Query(
-		"SELECT id,name,local_addr,public_port,protocol,token,agent_id,created_at FROM tunnels "+where, args...,
+		"SELECT id,name,local_addr,public_port,protocol,token,agent_id,created_at,domain FROM tunnels "+where, args...,
 	)
 	if err != nil {
 		return nil, err
@@ -397,7 +397,7 @@ func (db *DB) queryTunnels(where string, args ...any) ([]shared.Tunnel, error) {
 		t := shared.Tunnel{}
 		var created sql.NullTime
 		var agentID sql.NullString
-		if err := rows.Scan(&t.ID, &t.Name, &t.LocalAddr, &t.PublicPort, &t.Protocol, &t.Token, &agentID, &created); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.LocalAddr, &t.PublicPort, &t.Protocol, &t.Token, &agentID, &created, &t.Domain); err != nil {
 			return nil, err
 		}
 		// agent_id 可能是 NULL（历史数据或手工改库），用 NullString 兜底，
