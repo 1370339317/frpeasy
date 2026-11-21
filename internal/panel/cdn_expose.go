@@ -137,6 +137,13 @@ func (p *Panel) cdnExposeHandler(w http.ResponseWriter, r *http.Request) {
 		add("创建加速域名", nil, "已存在，复用（CNAME "+cname+"）")
 	} else {
 		cname, err = c.CreateAccelDomain(zoneID, domain, originHost, vhost, "HTTP")
+		// CreateAccelerationDomain 的响应里**不含 CNAME**，必须回查一次
+		// （腾讯云分配的 CNAME 要等域名初始化后才有值）。
+		if err == nil && cname == "" {
+			if d, gerr := c.GetAccelDomain(zoneID, domain); gerr == nil && d != nil {
+				cname = d.Cname
+			}
+		}
 		if !add("创建加速域名", err, fmt.Sprintf("回源 %s:%d，CNAME %s", originHost, vhost, cname)) {
 			write()
 			return
