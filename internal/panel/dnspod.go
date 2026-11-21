@@ -58,11 +58,8 @@ func (d *dnspod) EnsureCNAME(rootDomain, subdomain, target string, ttl int) (boo
 		"RecordType": "CNAME",
 		"Limit":      100,
 	})
-	// "查不到记录"是正常情况（还没建），腾讯云却以错误码返回。
-	// 这里必须容错，否则第一次添加永远走不到 CreateRecord。
-	if err != nil && !isNoRecord(err) {
-		return false, "", err
-	}
+	// "查不到记录"是正常情况（还没建），腾讯云却以错误码返回，且此时 raw 为空。
+	// 必须容错并且跳过反序列化，否则第一次添加永远走不到 CreateRecord。
 	var out struct {
 		RecordList []struct {
 			Name  string `json:"Name"`
@@ -70,8 +67,12 @@ func (d *dnspod) EnsureCNAME(rootDomain, subdomain, target string, ttl int) (boo
 			Line  string `json:"Line"`
 		} `json:"RecordList"`
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return false, "", fmt.Errorf("解析 DNS 记录失败：%w", err)
+	if err != nil {
+		if !isNoRecord(err) {
+			return false, "", err
+		}
+	} else if uerr := json.Unmarshal(raw, &out); uerr != nil {
+		return false, "", fmt.Errorf("解析 DNS 记录失败：%w", uerr)
 	}
 	for _, rec := range out.RecordList {
 		if !strings.EqualFold(rec.Name, subdomain) {
