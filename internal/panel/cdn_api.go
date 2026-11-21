@@ -304,11 +304,41 @@ func (p *Panel) cdnProvisionHandler(w http.ResponseWriter, r *http.Request) {
 		add("检查 WebSocket", nil, note)
 	}
 
-	// DNS 解析检查：接入做完了但解析没生效，仍然不能开开关。
-	if err := hostResolves(domain); err != nil {
-		add("检查 DNS 解析", fmt.Errorf("域名 %s 目前解析不到：%v。请等 EdgeOne 的 CNAME 生效后再启用加速", domain, err), "")
-	} else {
+	// DNS 检查 + 自动补记录。
+	//
+	// EdgeOne 在 dnsPodAccess 模式下会替**控制台添加**的域名自动写解析，但通过 API
+	// 创建的加速域名不会被补（2026-11-21 实测：同站点 car.dvvb.cn 能解析、
+	// API 建的 ecsfrp.dvvb.cn 一直 NXDOMAIN）。所以这里用同一套腾讯云密钥直接调
+	// DNSPod 的 CreateRecord，只写这一条 CNAME。
+	if err := hostResolves(domain); err == nil {
 		add("检查 DNS 解析", nil, domain+" 已可解析")
+	} else {
+		root := p.zoneNameOf(c, zoneID)
+		sub := ""
+		if root != "" && strings.HasSuffix(domain, "."+root) {
+			sub = strings.TrimSuffix(domain, "."+root)
+		}
+		switch {
+		case root == "" || sub == "":
+			add("检查 DNS 解析", fmt.Errorf("解析不到，且无法从站点名推导主域名（domain=%s，zone=%s）", domain, root),
+				"请手工添加 CNAME → "+cname)
+		case cname == "":
+			add("检查 DNS 解析", fmt.Errorf("解析不到，腾讯云也没有返回 CNAME 值，无法自动添加"), "")
+		default:
+			created, note, derr := newDNSPod(c.secretID, c.secretKey).EnsureCNAME(root, sub, cname, 600)
+			if derr != nil {
+				add("添加 DNS 解析", derr, "需要给这个子账号加 QcloudDNSPodFullAccess 策略")
+			} else {
+				_ = created
+				add("添加 DNS 解析（DNSPod）", nil, note)
+				time.Sleep(1500 * time.Millisecond)
+				if err2 := hostResolves(domain); err2 == nil {
+					add("检查 DNS 解析", nil, domain+" 已可解析")
+				} else {
+					add("检查 DNS 解析", nil, "记录已写入，DNS 生效通常需要 1~2 分钟，稍后刷新页面即可")
+				}
+			}
+		}
 	}
 
 	// 阿里云 DNS：可选。没配就打一行提示并返回成功，不阻断整体流程。
@@ -580,4 +610,20 @@ func (p *Panel) cdnWSEnableHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "enabled": on, "note": note})
+}
+
+// zoneNameOf 取站点的主域名（站点名就是根域名，如 dvvb.cn）。
+//
+// 从 API 查而不是从本地设置取：面板只存了 ZoneId，而拼 CNAME 的记录名必须有根域名。
+func (p *Panel) zoneNameOf(c *edgeOne, zoneID string) string {
+	zl, err := c.ListZones()
+	if err != nil {
+		return ""
+	}
+	for _, z := range zl.Zones {
+		if z.ZoneID == zoneID {
+			return z.ZoneName
+		}
+	}
+	return ""
 }

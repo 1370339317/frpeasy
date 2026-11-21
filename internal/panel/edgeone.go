@@ -67,8 +67,13 @@ func newEdgeOne(secretID, secretKey, region, base string) *edgeOne {
 //	SecretSigning = HMAC-SHA256(SecretService, "tc3_request")
 //	Signature     = HEX(HMAC-SHA256(SecretSigning, StringToSign))
 func tc3Signature(ts int64, body []byte, secretID, secretKey, host string) string {
+	return tc3Auth("teo", ts, body, secretID, secretKey, host)
+}
+
+// tc3Auth 与 tc3Signature 相同，但 service 可变：EdgeOne 用 "teo"，DNSPod 用 "dnspod"。
+// 两套 API 的签名规则完全一致，只差 CredentialScope 里的服务名。
+func tc3Auth(service string, ts int64, body []byte, secretID, secretKey, host string) string {
 	const (
-		service     = "teo"
 		contentType = "application/json; charset=utf-8"
 		signedKeys  = "content-type;host"
 	)
@@ -108,67 +113,7 @@ func hmacSHA256(key []byte, msg string) []byte {
 // 失败时把腾讯云的 Code/Message 原样带回上层：一套没有联调过的云 API 客户端，
 // 报错原文比任何自定义文案都有用（InvalidParameter.XXX 能直接指向出错字段）。
 func (e *edgeOne) call(action string, payload any) (json.RawMessage, error) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-	ts := time.Now().Unix()
-	host := strings.TrimPrefix(strings.TrimPrefix(e.base, "https://"), "http://")
-	host = strings.TrimSuffix(host, "/")
-
-	req, err := http.NewRequest(http.MethodPost, e.base, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set("Host", host)
-	req.Header.Set("X-TC-Action", action)
-	req.Header.Set("X-TC-Version", edgeOneVersion)
-	req.Header.Set("X-TC-Timestamp", fmt.Sprintf("%d", ts))
-	// Region 为空就不发：teo 的 Region 是可选参数，硬填一个值可能在部分账号上
-	// 被当作资源过滤条件，表现为"站点列表为空"而签名完全正常。
-	if e.region != "" {
-		req.Header.Set("X-TC-Region", e.region)
-	}
-	req.Header.Set("Authorization", tc3Signature(ts, body, e.secretID, e.secretKey, host))
-
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("请求 EdgeOne 失败：%w", err)
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return nil, err
-	}
-
-	var wrap struct {
-		Response json.RawMessage `json:"Response"`
-	}
-	if err := json.Unmarshal(raw, &wrap); err != nil {
-		return nil, fmt.Errorf("EdgeOne 返回的不是 JSON（HTTP %d）：%s", resp.StatusCode, snippet(raw))
-	}
-	if len(wrap.Response) == 0 {
-		return nil, fmt.Errorf("EdgeOne 返回缺少 Response 字段（HTTP %d）：%s", resp.StatusCode, snippet(raw))
-	}
-	var meta struct {
-		Error *struct {
-			Code    string `json:"Code"`
-			Message string `json:"Message"`
-		} `json:"Error"`
-		RequestID string `json:"RequestId"`
-	}
-	_ = json.Unmarshal(wrap.Response, &meta)
-	if meta.Error != nil {
-		return nil, fmt.Errorf("EdgeOne 错误 %s：%s（RequestId %s）",
-			meta.Error.Code, meta.Error.Message, meta.RequestID)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("EdgeOne HTTP %d：%s", resp.StatusCode, snippet(raw))
-	}
-	// 只返回 Response 内部的对象：上层各接口直接按业务字段解，
-	// 不需要每处都再拆一层外壳（拆漏一处就是一个静默的空结果）。
-	return wrap.Response, nil
+	return tc3Call(e.client, e.base, "teo", edgeOneVersion, e.region, action, e.secretID, e.secretKey, payload)
 }
 
 func snippet(b []byte) string {
@@ -402,4 +347,66 @@ func (e *edgeOne) EnsureWebSocket(zoneID string, timeoutSec int) (bool, error) {
 		return on, nil
 	}
 	return false, nil
+}
+
+// tc3Call 是腾讯云 API 3.0 的通用 POST 调用：签名 → 发请求 → 剥掉 Response 外壳 → 原样返回业务字段。
+//
+// EdgeOne 与 DNSPod 都走这一条，避免两份几乎相同的代码各自漂移
+// （比如一处加了错误透出、另一处忘了）。
+func tc3Call(client *http.Client, base, service, version, region, action, secretID, secretKey string, payload any) (json.RawMessage, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	ts := time.Now().Unix()
+	host := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://"), "/")
+
+	req, err := http.NewRequest(http.MethodPost, base, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Host", host)
+	req.Header.Set("X-TC-Action", action)
+	req.Header.Set("X-TC-Version", version)
+	req.Header.Set("X-TC-Timestamp", fmt.Sprintf("%d", ts))
+	if region != "" {
+		req.Header.Set("X-TC-Region", region)
+	}
+	req.Header.Set("Authorization", tc3Auth(service, ts, body, secretID, secretKey, host))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求 %s 失败：%w", service, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, err
+	}
+
+	var wrap struct {
+		Response json.RawMessage `json:"Response"`
+	}
+	if err := json.Unmarshal(raw, &wrap); err != nil {
+		return nil, fmt.Errorf("%s 返回的不是 JSON（HTTP %d）：%s", service, resp.StatusCode, snippet(raw))
+	}
+	if len(wrap.Response) == 0 {
+		return nil, fmt.Errorf("%s 返回缺少 Response 字段（HTTP %d）：%s", service, resp.StatusCode, snippet(raw))
+	}
+	var meta struct {
+		Error *struct {
+			Code    string `json:"Code"`
+			Message string `json:"Message"`
+		} `json:"Error"`
+		RequestID string `json:"RequestId"`
+	}
+	_ = json.Unmarshal(wrap.Response, &meta)
+	if meta.Error != nil {
+		return nil, fmt.Errorf("%s 错误 %s：%s（RequestId %s）", service, meta.Error.Code, meta.Error.Message, meta.RequestID)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("%s HTTP %d：%s", service, resp.StatusCode, snippet(raw))
+	}
+	return wrap.Response, nil
 }
