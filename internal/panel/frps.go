@@ -353,6 +353,13 @@ func (m *FrpsManager) generateConfig() (string, error) {
 	// 客户端侧见 FrpcManager.GenerateConfig —— 那一条链路断了就会
 	// 「服务端关 mux、客户端还开着」，握手后被直接断开。
 	tcpMux := m.db.GetSetting(settingTunnelTCPMux) != "0"
+	// vhostHTTPPort：http 类型隧道（域名访问）的入口。所有 http 隧道共用这一个
+	// 端口，frps 按 Host 头路由 —— 这也是 CDN 能接住用户侧流量的前提。
+	vhostPort, _ := strconv.Atoi(m.db.GetSetting(settingFRPSVhostPort))
+	vhostLine := ""
+	if vhostPort > 0 {
+		vhostLine = fmt.Sprintf("vhostHTTPPort = %d\n", vhostPort)
+	}
 	// frp >= 0.52 的 toml 用顶层驼峰键；旧版 INI 的 [common]/bind_port 写法在 .toml 中不合法。
 	cfg := fmt.Sprintf(`# 由 frpeasy 自动生成，请勿手改
 bindPort = %d
@@ -362,11 +369,11 @@ auth.token = %q
 
 transport.tcpMux = %t
 
-webServer.addr = "127.0.0.1"
+%swebServer.addr = "127.0.0.1"
 webServer.port = %d
 webServer.user = %q
 webServer.password = %q
-`, bindPort, token, tcpMux, dashPort, dashUser, dashPass)
+`, bindPort, token, tcpMux, vhostLine, dashPort, dashUser, dashPass)
 	out := filepath.Join(m.cfgDir, "frps.toml")
 	if err := os.WriteFile(out, []byte(cfg), 0o644); err != nil {
 		return "", err

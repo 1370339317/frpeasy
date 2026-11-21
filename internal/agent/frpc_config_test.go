@@ -9,20 +9,20 @@ import (
 	"frpeasy/internal/shared"
 )
 
-// 非 tcp 的隧道绝不能被写进 frpc.toml。
-//
-// 这条不是"扩展性考虑"，而是真实事故：创建一条 http 类型的隧道后，
-// frpc 因为 http 不接受 remotePort 解析失败直接退出，那台客户端上
-// 所有隧道一起掉线，而面板只显示"全离线"。
-func TestGenerateConfigSkipsNonTCP(t *testing.T) {
+// tcp 与 http 都要生成，但两者的必填字段不同：
+//   tcp  → remotePort
+//   http → customDomains（绝不能带 remotePort，frpc 会解析失败直接退出）
+// 未知类型必须跳过 —— 一条坏记录就能把这台机器上所有隧道一起拖下线。
+func TestGenerateConfigTCPAndHTTP(t *testing.T) {
 	m := NewFrpcManager(t.TempDir())
 	cfg := shared.AgentConfig{
 		FRPSAddr:  "1.2.3.4:7000",
 		FRPSToken: "tok",
 		Tunnels: []shared.Tunnel{
 			{ID: 1, Protocol: "tcp", LocalAddr: "127.0.0.1:8080", PublicPort: 21000},
-			{ID: 2, Protocol: "http", LocalAddr: "127.0.0.1:8080", PublicPort: 21001},
-			{ID: 3, Protocol: "", LocalAddr: "127.0.0.1:9090", PublicPort: 21002}, // 空 = tcp
+			{ID: 2, Protocol: "http", LocalAddr: "127.0.0.1:8081", Domain: "wb.example.com"},
+			{ID: 3, Protocol: "", LocalAddr: "127.0.0.1:9090", PublicPort: 21002},
+			{ID: 4, Protocol: "udp", LocalAddr: "127.0.0.1:9091", PublicPort: 21003},
 		},
 	}
 	path, _, err := m.GenerateConfig(cfg)
@@ -31,40 +31,29 @@ func TestGenerateConfigSkipsNonTCP(t *testing.T) {
 	}
 	content := readFileString(t, path)
 
-	if strings.Contains(content, `type = "http"`) {
-		t.Fatalf("http 类型的隧道不能写进配置，否则 frpc 起不来:\n%s", content)
+	if strings.Count(content, "[[proxies]]") != 3 {
+		t.Fatalf("应有 3 条代理（tcp/http/tcp），实际 %s", content)
 	}
-	if strings.Count(content, "[[proxies]]") != 2 {
-		t.Fatalf("应当只有 2 条 tcp 代理，实际:\n%s", content)
+	if strings.Contains(content, "t4") {
+		t.Fatalf("未知协议必须跳过 %s", content)
 	}
-	for _, want := range []string{"t1", "t3", "remotePort = 21000", "remotePort = 21002"} {
-		if !strings.Contains(content, want) {
-			t.Fatalf("配置缺少 %q:\n%s", want, content)
+	if !strings.Contains(content, `type = "http"`) || !strings.Contains(content, `customDomains = ["wb.example.com"]`) {
+		t.Fatalf("http 隧道应带 customDomains %s", content)
+	}
+	// http 的 proxy 块里不能出现 remotePort
+	blocks := strings.Split(content, "[[proxies]]")
+	for _, b := range blocks {
+		if strings.Contains(b, `type = "http"`) && strings.Contains(b, "remotePort") {
+			t.Fatalf("http 代理不能带 remotePort（frpc 会解析失败） %s", b)
 		}
 	}
-	if strings.Contains(content, "t2") {
-		t.Fatalf("被跳过的隧道不应出现在配置里:\n%s", content)
+	for _, want := range []string{"remotePort = 21000", "remotePort = 21002"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("缺少 %s %s", want, content)
+		}
 	}
 }
 
-func readFileString(t *testing.T, path string) string {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
-}
-
-// 每条 proxy 都要开压缩。
-//
-// 背景（2026-10-28 实测）：服务器在境外，面板直连下载 17MB 只有 ~58KB/s，
-// 而隧道吞吐 30~37KB/s —— 瓶颈是链路带宽，不是 frp、也不是代码。
-// 这种链路上 frp 的协议开销占比很高，对 HTTP 响应体（HTML/JS/CSS/JSON）
-// 压缩通常能换回数倍有效吞吐，是软件侧唯一能显著改善的一项。
-//
-// 这条断言是防止以后有人"清理冗余配置"时把它顺手删掉：删了不会报任何错，
-// 只会让所有隧道悄悄慢回去，而且没有任何迹象。
 func TestGenerateConfigEnablesCompression(t *testing.T) {
 	m := NewFrpcManager(t.TempDir())
 	cfg := shared.AgentConfig{
@@ -230,4 +219,14 @@ func TestGenerateConfigDefaultsWhenPanelSilent(t *testing.T) {
 	if !strings.Contains(content, "transport.useCompression = true") {
 		t.Fatalf("压缩的历史默认是开启:\n%s", content)
 	}
+}
+
+// readFileString 读文件内容用于断言（被替换段落里原有此函数，重写时补回）。
+func readFileString(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取 %s 失败: %v", path, err)
+	}
+	return string(b)
 }

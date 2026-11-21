@@ -529,10 +529,13 @@ func (m *FrpcManager) GenerateConfig(cfg shared.AgentConfig) (string, string, er
 	}
 	// 压缩是 per-proxy 的，放在下面的 [[proxies]] 里（见下）。
 	for _, t := range cfg.Tunnels {
-		// 只生成 tcp。历史脏数据（http/udp）在这里必须跳过，否则 frpc 会因为
-		// "http 类型不接受 remotePort" 解析失败直接退出 —— 一条坏记录
-		// 就把这台机器上所有隧道一起拖下线，而界面上只看得到"全都离线"。
-		if svc := strings.ToLower(strings.TrimSpace(t.Protocol)); svc != "" && svc != "tcp" {
+		// tcp 与 http 两种都要生成；udp 等未知类型必须跳过 —— frpc 解析不了会直接
+		// 退出，一条坏记录就把这台机器上所有隧道一起拖下线。
+		svc := strings.ToLower(strings.TrimSpace(t.Protocol))
+		if svc == "" {
+			svc = "tcp"
+		}
+		if svc != "tcp" && svc != "http" {
 			continue
 		}
 		host, port := splitHostPort(t.LocalAddr)
@@ -548,8 +551,14 @@ func (m *FrpcManager) GenerateConfig(cfg shared.AgentConfig) (string, string, er
 		if cfg.Compression != nil {
 			compress = *cfg.Compression
 		}
-		fmt.Fprintf(&b, "\n[[proxies]]\nname = %q\ntype = %q\nlocalIP = %q\nlocalPort = %d\nremotePort = %d\n",
-			fmt.Sprintf("t%d", t.ID), "tcp", host, port, t.PublicPort)
+		if svc == "http" {
+			// http 不能带 remotePort：frpc 解析失败会直接退出，把整机隧道拖下线。
+			fmt.Fprintf(&b, "\n[[proxies]]\nname = %q\ntype = %q\nlocalIP = %q\nlocalPort = %d\ncustomDomains = [%q]\n",
+				fmt.Sprintf("t%d", t.ID), "http", host, port, t.Domain)
+		} else {
+			fmt.Fprintf(&b, "\n[[proxies]]\nname = %q\ntype = %q\nlocalIP = %q\nlocalPort = %d\nremotePort = %d\n",
+				fmt.Sprintf("t%d", t.ID), "tcp", host, port, t.PublicPort)
+		}
 		if compress {
 			b.WriteString("transport.useCompression = true\n")
 		}

@@ -6,6 +6,7 @@ import { copyWithHint, fmtBytes } from '../lib/format'
 import { Badge, Button, Card, Empty, Table, Td, Led, cx } from '../components/ui'
 import type { Tunnel, TunnelProbeResult } from '../types'
 import { TunnelModal } from './TunnelModal'
+import { CdnExposeModal } from './CdnExposeModal'
 
 function StateBadge({ t }: { t: Tunnel }) {
   switch (t.proxy_state) {
@@ -37,6 +38,8 @@ export function Tunnels() {
   // 从「客户端」页带过来的建隧道草稿（哪台机器 + 哪个服务）。
   // 只在交接那一刻消费一次，消费后清空 —— 否则轮询重渲染会把弹窗反复打开。
   const [prefill, setPrefill] = useState<TunnelDraft | null>(null)
+  // 「接入 CDN」的目标隧道。非 null = 弹窗打开。
+  const [cdnTarget, setCdnTarget] = useState<Tunnel | null>(null)
   // 每条隧道的实测结果（按 id 记，互不影响）。'loading' 表示正在测。
   //
   // 结果只留在本页内存里、不进库：它是一个"此刻这条链路能跑多快"的快照，
@@ -314,6 +317,21 @@ export function Tunnels() {
                     >
                       体检
                     </Button>{' '}
+                    {/* 只给 tcp 隧道：http 隧道本身就是域名入口，再「接入 CDN」
+                        会得到一条指回自己的隧道。未绑定机器时也无从新建。 */}
+                    {t.protocol === 'tcp' && t.agent_id !== '' && (
+                      <>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="whitespace-nowrap"
+                          title="把这个本地服务另建一条 http 隧道，自动建加速域名 + DNS + 证书，得到一个 https 域名入口（原 tcp 隧道保留）"
+                          onClick={() => setCdnTarget(t)}
+                        >
+                          接入 CDN
+                        </Button>{' '}
+                      </>
+                    )}
                     {/* 用 primary 而不是 ghost：三个 ghost 按钮并排时，"测速"在
                         视觉上跟"编辑 / 删除"完全同级，用户扫一眼根本注意不到。
                         它是这一页唯一能给出"这条隧道到底多快"的动作，值得突出。 */}
@@ -370,6 +388,17 @@ export function Tunnels() {
         }}
         onSaved={() => {
           setModalOpen(false)
+          void loadTunnels()
+        }}
+      />
+
+      {/* 接入成功后后端会新建一条 http 隧道，所以关闭时重拉一次列表：
+          新隧道要立刻出现在这张表里，否则用户会以为没生效。 */}
+      <CdnExposeModal
+        open={cdnTarget !== null}
+        tunnel={cdnTarget}
+        onClose={() => {
+          setCdnTarget(null)
           void loadTunnels()
         }}
       />

@@ -826,6 +826,46 @@ export interface CdnDomainCreateResult {
   domain: string
 }
 
+/* ---------- 一键把 tcp 隧道暴露成域名并接入 CDN ---------- */
+
+/** POST /api/cdn/expose 里的一步。失败时 ok=false，detail 是云厂商原文。 */
+export interface CdnExposeStep {
+  step: string
+  ok: boolean
+  detail: string
+}
+
+/**
+ * 把某条 tcp 隧道背后的本地服务**另建一条 http 隧道**并接到 EdgeOne。
+ *
+ * 原 tcp 隧道保留不动，所以两条入口并存 —— 界面必须把这一点说清楚，
+ * 否则用户会以为「接入 CDN」把原来的端口入口改掉了。
+ */
+export interface CdnExposeResult {
+  url?: string
+  domain?: string
+  /** EdgeOne 分配的 CNAME */
+  cname?: string
+  /** 新建（或复用）的 http 隧道 id */
+  tunnel_id?: number
+  /** 后端一定会回传（Go 侧非 omitempty），但空数组也可能序列化成 null */
+  steps: CdnExposeStep[] | null
+  warnings?: string[] | null
+  /** 需要放行的 vhost 端口（安全组入方向 TCP） */
+  need_firewall_port?: number
+}
+
+/**
+ * POST /api/cdn/expose 的响应。
+ *
+ * 业务失败仍是 HTTP 200 且 ok=false，所以调用方必须逐条看 steps[].ok，
+ * 不能只信顶层 ok；参数/前置条件不满足时才会是 4xx 纯文本（走 ApiError）。
+ */
+export interface CdnExposeResponse {
+  ok: boolean
+  result?: CdnExposeResult | null
+}
+
 /** 一次云厂商调用的审计记录（GET /api/cdn/audit）。 */
 export interface CdnAuditEntry {
   at: string

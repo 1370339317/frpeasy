@@ -110,6 +110,8 @@ func (db *DB) migrate() error {
 	// （实测同一台机器单流下行 9.5MB/s、上行 3.9KB/s~841KB/s）。
 	// 只报一个"吞吐"会让用户以为那条宽带是对称的。
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN up_kbps INTEGER NOT NULL DEFAULT 0`)
+	// http 隧道（域名访问）承载的域名；tcp 隧道该列为空。
+	_, _ = db.Exec(`ALTER TABLE tunnels ADD COLUMN domain TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN speed_at TEXT NOT NULL DEFAULT ''`)
 	// 一次性的"立刻测速"请求 ID（下发后等客户端回执，再清掉）。
 	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN speed_request TEXT NOT NULL DEFAULT ''`)

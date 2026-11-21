@@ -248,6 +248,8 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("POST /api/cdn/provision", p.requireAuth(p.cdnProvisionHandler))
 	mux.HandleFunc("POST /api/cdn/domains", p.requireAuth(p.cdnDomainsHandler))
 	mux.HandleFunc("POST /api/cdn/domain-create", p.requireAuth(p.cdnDomainCreateHandler))
+	// 一键把某条隧道暴露成 https://前缀.站点域名 并接入 CDN（用户侧加速）
+	mux.HandleFunc("POST /api/cdn/expose", p.requireAuth(p.cdnExposeHandler))
 	mux.HandleFunc("POST /api/cdn/ws-enable", p.requireAuth(p.cdnWSEnableHandler))
 	mux.HandleFunc("GET /api/cdn/audit", p.requireAuth(p.cdnAuditHandler))
 	mux.HandleFunc("GET /api/frps", p.requireAuth(p.frpsControlHandler))

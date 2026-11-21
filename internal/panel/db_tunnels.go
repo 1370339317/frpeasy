@@ -154,8 +154,11 @@ func (db *DB) NextFreePort(protocol string) (int, error) {
 		}
 		used[p] = true
 	}
+	// vhost 端口被 http 隧道长期占用，绝不能再分给 tcp 隧道：
+	// 一旦分出去，frps 会因为端口冲突起不来，表现为"全部隧道掉线"。
+	vhost, _ := strconv.Atoi(db.GetSetting(settingFRPSVhostPort))
 	for p := start; p <= end; p++ {
-		if used[p] {
+		if used[p] || (vhost > 0 && p == vhost) {
 			continue
 		}
 		if !portBindable(protocol, p) {
@@ -220,9 +223,13 @@ func (db *DB) CreateTunnel(name, localAddr, protocol string, manualPort int, age
 	// frpc 的 [[proxies]] 里 http 类型不接受 remotePort，生成出来的配置
 	// frpc 解析失败会直接退出 —— 于是同一客户端上所有隧道一起掉线，
 	// 而界面上只看到"全都离线"，完全没有指向那条非法隧道。
-	if protocol != "tcp" {
-		return nil, fmt.Errorf("当前只支持 TCP 隧道（收到 %q）：HTTP 需要域名与 frps 的 vhost 配置，"+
-			"UDP 还没有端口池与防火墙支持", protocol)
+	// http 隧道走 frps 的 vhostHTTPPort，不占公网端口，改为按域名路由。
+	// UDP 仍未支持（缺端口池与防火墙）。
+	if protocol != "tcp" && protocol != "http" {
+		return nil, fmt.Errorf("只支持 TCP / HTTP 隧道（收到 %q）：UDP 还没有端口池与防火墙支持", protocol)
+	}
+	if protocol == "http" {
+		return nil, fmt.Errorf("HTTP 隧道请走 CreateHTTPTunnel（需要域名）")
 	}
 	if localAddr == "" {
 		return nil, fmt.Errorf("本地服务地址不能为空（可由调用方按 Agent 探测结果自动填充）")
@@ -491,3 +498,70 @@ func (db *DB) DeleteTunnel(id int64) error {
 
 // ErrTunnelNotFound 隧道不存在（用于把 404 与「删成功」区分开）。
 var ErrTunnelNotFound = errors.New("隧道不存在")
+
+// CreateHTTPTunnel 新建一条 http 类型隧道（域名访问，可被 CDN 加速）。
+//
+// 与 tcp 隧道的区别只有两点：不分配公网端口、必须绑定域名。
+// frps 按请求的 Host 头把流量路由到对应客户端，因此多条 http 隧道共用
+// 一个 vhostHTTPPort，也就共用一次 CDN 接入。
+func (db *DB) CreateHTTPTunnel(name, localAddr, domain, agentID string) (*shared.Tunnel, error) {
+	name, err := normalizeTunnelName(name)
+	if err != nil {
+		return nil, err
+	}
+	if localAddr == "" {
+		return nil, fmt.Errorf("本地服务地址不能为空")
+	}
+	localAddr, err = normalizeLocalAddr(localAddr)
+	if err != nil {
+		return nil, err
+	}
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" || !strings.Contains(domain, ".") {
+		return nil, fmt.Errorf("HTTP 隧道必须绑定一个完整域名，例如 wb.example.com")
+	}
+	var cnt int
+	if err := db.QueryRow("SELECT COUNT(*) FROM tunnels WHERE domain=?", domain).Scan(&cnt); err != nil {
+		return nil, err
+	}
+	if cnt > 0 {
+		return nil, fmt.Errorf("域名 %s 已经被另一条隧道占用", domain)
+	}
+	token := shared.NewToken(24)
+	res, err := db.Exec(
+		"INSERT INTO tunnels(name,local_addr,public_port,protocol,token,agent_id,domain) VALUES(?,?,?,?,?,?,?)",
+		name, localAddr, 0, "http", token, agentID, domain,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return db.GetTunnel(id)
+}
+
+// GetTunnelByDomain 按域名取 http 隧道（幂等判断用）。
+func (db *DB) GetTunnelByDomain(domain string) (*shared.Tunnel, error) {
+	var id int64
+	err := db.QueryRow("SELECT id FROM tunnels WHERE domain=?", domain).Scan(&id)
+	if err != nil {
+		return nil, err
+	}
+	return db.GetTunnel(id)
+}
+
+// QueryAllPublicPorts 返回所有已占用的公网端口（用于挑一个空闲端口）。
+func (db *DB) QueryAllPublicPorts() ([]int, error) {
+	rows, err := db.Query("SELECT public_port FROM tunnels WHERE public_port > 0")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int
+	for rows.Next() {
+		var p int
+		if err := rows.Scan(&p); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}

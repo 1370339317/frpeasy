@@ -35,6 +35,15 @@ const (
 	settingTunnelTCPMux      = "tunnel_tcp_mux"
 	settingTunnelPoolCount   = "tunnel_pool_count"
 	settingTunnelCompression = "tunnel_compression"
+	// settingFRPSVhostPort http 类型隧道（域名访问）的入口端口。
+	// 0 / 空 = 未启用；启用后所有 http 隧道共用它，frps 按 Host 路由。
+	settingFRPSVhostPort = "frps_vhost_http_port"
+	// defaultVhostHTTPPort 默认 vhost 端口。
+	//
+	// 选 21009 而不是 21080/80/443：用户的安全组只放行了 21000-21009、27900、28080，
+	// 21080 会被挡在门外，表现为"CDN 回源失败"而看不出原因。用已放行区间内的端口，
+	// 用户不需要去改安全组。若该端口被隧道占用，expose 会自动往前找。
+	defaultVhostHTTPPort = 21009
 
 	// maxPoolCount 连接池上限。再大只会让服务端连接数暴涨而收益趋零。
 	maxPoolCount = 32

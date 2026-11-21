@@ -21,7 +21,9 @@ type Tunnel struct {
 	Name       string    `json:"name"`
 	LocalAddr  string    `json:"local_addr"` // 用户本机服务地址，如 192.168.1.10:80
 	PublicPort int       `json:"public_port"`
-	Protocol   string    `json:"protocol"` // tcp（端口访问模式默认值）
+	Protocol   string    `json:"protocol"` // tcp（端口访问）/ http（域名访问，可接 CDN）
+	// Domain 仅 http 隧道使用：frps 按 Host 路由到该隧道，CDN 也以它作为加速域名。
+	Domain     string    `json:"domain,omitempty"`
 	Token      string    `json:"token"`    // 每隧道令牌（写入 frpc）
 	AgentID    string    `json:"agent_id"` // 承载该隧道的 Agent（预留多 Agent 扩展）
 	CreatedAt  time.Time `json:"created_at"`
