@@ -292,28 +292,22 @@ func (p *Panel) cdnProvisionHandler(w http.ResponseWriter, r *http.Request) {
 		cname = existing.Cname
 	}
 
-	timeout := 300
-	if n, e := strconv.Atoi(strings.TrimSpace(p.db.GetSetting(settingCDNWSTimeout))); e == nil && n > 0 {
-		timeout = n
-	}
-	// WebSocket 是**站点级**配置：一旦调用 ModifyL7AccSetting，该站点下所有加速域名
-	// 都会被重新部署。所以先读后写，已经开着就绝不再碰 —— 否则用户每点一次"接入"，
-	// 站内其他正在服务的域名就要跟着抖一次。
+	// WebSocket 是**站点级**配置：调用 ModifyL7AccSetting 会让该站点下所有加速域名
+	// 重新部署一次。这里只读、不写。
+	//
+	// 2026-11-21 事故：面板反复写入 → 站点一直停在 pending → 读回来仍是 off →
+	// 下次接入又写 → 再触发全站重新部署，形成死循环，用户所有域名的状态在
+	// "部署中" 里出不来。站点级配置的写入代价太大，不该由一次"接入"顺手做掉，
+	// 交给用户在 EdgeOne 控制台显式开启。
 	wsOn, wsTimeout, werr := c.WebSocketState(zoneID)
 	switch {
 	case werr != nil:
-		// 读不到就当没开，继续走写入；读失败不该阻断接入。
-		if !add("开启 WebSocket", c.EnableWebSocket(zoneID, timeout), fmt.Sprintf("空闲超时 %d 秒（站点级配置）", timeout)) {
-			writeJSON(w, map[string]any{"ok": false, "steps": steps})
-			return
-		}
+		add("检查 WebSocket", nil, "读取当前状态失败，未做任何写入："+werr.Error())
 	case wsOn:
-		add("检查 WebSocket", nil, fmt.Sprintf("已是开启状态（超时 %d 秒），跳过写入，不触发站点级重新部署", wsTimeout))
+		add("检查 WebSocket", nil, fmt.Sprintf("已开启（空闲超时 %d 秒）", wsTimeout))
 	default:
-		if !add("开启 WebSocket", c.EnableWebSocket(zoneID, timeout), fmt.Sprintf("空闲超时 %d 秒。注意：这是站点级配置，本操作会让该站点下所有域名重新部署一次", timeout)) {
-			writeJSON(w, map[string]any{"ok": false, "steps": steps})
-			return
-		}
+		add("检查 WebSocket", nil, "当前未开启。面板不会代你写入（这是站点级配置，会重部署该站点下所有域名）——"+
+			"请到 EdgeOne 控制台「站点加速 → 网络优化 → WebSocket」打开，然后回来重试")
 	}
 
 	// DNS 解析检查：接入做完了但解析没生效，仍然不能开开关。
