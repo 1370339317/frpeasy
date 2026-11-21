@@ -44,10 +44,11 @@ func (m *FrpsManager) RefreshProxies() {
 	}
 
 	user, pass := m.dashCredentials()
-	// 隧道都是 tcp 类型；udp/http 类型保留扩展位。
+	// tcp / udp / http 都要拉：http 隧道没有公网端口，只存在于 /api/proxy/http，
+	// 不查它会导致"域名隧道永远显示离线"（frpc 明明已经 start proxy success）。
 	out := map[string]ProxyStats{}
 	var lastErr string
-	for _, typ := range []string{"tcp", "udp"} {
+	for _, typ := range []string{"tcp", "udp", "http"} {
 		u := fmt.Sprintf("http://127.0.0.1:%d/api/proxy/%s", port, typ)
 		req, err := http.NewRequest(http.MethodGet, u, nil)
 		if err != nil {

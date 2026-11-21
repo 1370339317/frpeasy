@@ -79,6 +79,8 @@ export interface Tunnel {
   local_addr: string
   public_port: number
   protocol: string
+  /** 仅 http 隧道：frps 按该域名路由，也是 CDN 的加速域名 */
+  domain?: string
   agent_id: string
   created_at: string
   online: boolean

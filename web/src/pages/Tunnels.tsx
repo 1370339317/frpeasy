@@ -199,7 +199,13 @@ export function Tunnels() {
                       </span>
                     ) : (
                       <span className="text-dim">
-                        {t.agent_id ? '等待分配端口' : '部署后可访问'}
+                        {/* http 隧道不占公网端口，靠域名访问；这里显示域名本身，
+                            否则会一直停在"等待分配端口"，看起来像卡住了 */}
+                        {t.protocol === 'http'
+                          ? t.domain || '等待绑定域名'
+                          : t.agent_id
+                            ? '等待分配端口'
+                            : '部署后可访问'}
                       </span>
                     )}
                   </Td>
