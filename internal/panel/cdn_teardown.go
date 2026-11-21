@@ -32,7 +32,13 @@ func (p *Panel) teardownDomain(domain string, add func(string, error, string) bo
 	// ① EdgeOne 加速域名
 	if zoneID != "" {
 		if err := c.DeleteAccelDomains(zoneID, []string{domain}); err != nil {
-			add("拆除加速域名", err, domain)
+			// 云上已经不存在 = 目标状态已达成，不是失败。
+			// 否则"已经清理干净"的状态会显示红叉，反而让人以为还要去控制台处理。
+			if strings.Contains(err.Error(), "DomainNotFound") || strings.Contains(err.Error(), "ResourceUnavailable") {
+				add("拆除加速域名", nil, domain+" 在 EdgeOne 中已不存在，无需删除")
+			} else {
+				add("拆除加速域名", err, domain)
+			}
 		} else {
 			add("拆除加速域名", nil, domain+" 已从 EdgeOne 删除")
 		}
