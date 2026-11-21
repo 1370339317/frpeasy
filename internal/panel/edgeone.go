@@ -438,3 +438,16 @@ func tc3CallInner(client *http.Client, base, service, version, region, action, s
 	}
 	return wrap.Response, meta.RequestID, nil
 }
+
+// RequestFreeCert 为该加速域名申请并部署 EdgeOne 免费证书。
+//
+// 前置条件（官方文档）：CNAME 已生效。所以调用顺序必须是"先写 DNS、再等解析、
+// 最后申请证书"。免费证书由 TrustAsia/Let's Encrypt 签发，通常几分钟内下发。
+func (e *edgeOne) RequestFreeCert(zoneID, domain string) error {
+	_, err := e.call("ModifyHostsCertificate", map[string]any{
+		"ZoneId": zoneID,
+		"Hosts":  []string{domain},
+		"Mode":   "eofreecert",
+	})
+	return err
+}

@@ -2,6 +2,7 @@ package panel
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -147,6 +148,15 @@ func (p *Panel) cdnConfigHandler(w http.ResponseWriter, r *http.Request) {
 		prospectiveDomain = p.db.GetSetting(settingCDNDomain)
 	}
 	if prospectiveEnabled == "1" && prospectiveDomain != "" {
+		// 证书没就绪时开开关 = 全部客户端连不上（wss 握手失败）。
+		// 这比 DNS 更隐蔽：解析是通的，报错却是 TLS 错误。
+		if err := hostTLSOK(prospectiveDomain); err != nil {
+			http.Error(w, fmt.Sprintf(
+				"域名 %s 的 HTTPS 证书还不可用（%v），现在开启会导致全部隧道掉线，已拒绝保存。"+
+					"请等「检查 HTTPS 证书」这一步显示证书有效后再打开。", prospectiveDomain, err),
+				http.StatusBadRequest)
+			return
+		}
 		if err := hostResolves(prospectiveDomain); err != nil {
 			http.Error(w, fmt.Sprintf(
 				"域名 %s 现在解析不到（%v），启用后会立刻导致全部隧道掉线，已拒绝保存。"+
@@ -341,6 +351,16 @@ func (p *Panel) cdnProvisionHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	// HTTPS 证书：wss 必须走 TLS，没有匹配该域名的证书，客户端必然握手失败。
+	// 这里检查一次；没有就自动申请免费证书（需 CNAME 已生效，上一步刚做完）。
+	if err := hostTLSOK(domain); err == nil {
+		add("检查 HTTPS 证书", nil, domain+" 证书有效")
+	} else if certErr := c.RequestFreeCert(zoneID, domain); certErr != nil {
+		add("检查 HTTPS 证书", certErr, "可在 EdgeOne 控制台「域名管理 → HTTPS」手动配置免费证书")
+	} else {
+		add("检查 HTTPS 证书", nil, "已提交免费证书申请（首次签发通常几分钟），下发完成前不要打开加速开关")
 	}
 
 	ok := true
@@ -624,4 +644,17 @@ func (p *Panel) cdnAuditHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]any{"entries": readAudit(n)})
+}
+
+// hostTLSOK 用默认校验策略（含主机名校验与有效期）握手一次。
+//
+// 只有完整校验通过才算"证书可用"：wss 客户端不会接受自签/错名/过期证书，
+// 用 InsecureSkipVerify 去探测等于自欺欺人。
+func hostTLSOK(host string) error {
+	d := &net.Dialer{Timeout: 6 * time.Second}
+	conn, err := tls.DialWithDialer(d, "tcp", host+":443", &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
