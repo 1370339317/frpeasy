@@ -50,12 +50,13 @@ func (d *dnspod) EnsureCNAME(rootDomain, subdomain, target string, ttl int) (boo
 	if ttl <= 0 {
 		ttl = 600
 	}
+	// 只传文档里确实存在的参数：多传一个未识别的字段，腾讯云会整单拒绝
+	// （实测 RecordStatus 会报 UnknownParameter），而不是忽略。
 	raw, err := d.call("DescribeRecordList", map[string]any{
-		"Domain":       rootDomain,
-		"Subdomain":    subdomain,
-		"RecordType":   "CNAME",
-		"RecordStatus": "",
-		"Limit":        100,
+		"Domain":     rootDomain,
+		"Subdomain":  subdomain,
+		"RecordType": "CNAME",
+		"Limit":      100,
 	})
 	if err != nil {
 		return false, "", err
@@ -83,15 +84,12 @@ func (d *dnspod) EnsureCNAME(rootDomain, subdomain, target string, ttl int) (boo
 	}
 
 	_, err = d.call("CreateRecord", map[string]any{
-		"Domain":      rootDomain,
-		"SubDomain":   subdomain,
-		"RecordType":  "CNAME",
-		"RecordLine":  "默认",
-		"Value":       target,
-		"TTL":         ttl,
-		"Status":      "ENABLE",
-		"Weight":      nil,
-		"RecordLineId": nil,
+		"Domain":     rootDomain,
+		"SubDomain":  subdomain,
+		"RecordType": "CNAME",
+		"RecordLine": "默认",
+		"Value":      target,
+		"TTL":        ttl,
 	})
 	if err != nil {
 		return false, "", err

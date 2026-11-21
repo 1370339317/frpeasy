@@ -343,21 +343,6 @@ func (p *Panel) cdnProvisionHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 阿里云 DNS：可选。没配就打一行提示并返回成功，不阻断整体流程。
-	akID := strings.TrimSpace(p.db.GetSetting(settingCDNAliyunID))
-	akSec := strings.TrimSpace(p.db.GetSetting(settingCDNAliyunKey))
-	root := strings.TrimSpace(p.db.GetSetting(settingCDNAliyunRoot))
-	rr := strings.TrimSpace(p.db.GetSetting(settingCDNDNSRR))
-	if akID == "" || akSec == "" || root == "" {
-		add("添加 DNS 解析", nil, "已跳过：未配置阿里云 AccessKey 或主域名，请手工把 CNAME 指到 "+cname)
-	} else {
-		if rr == "" {
-			rr = strings.TrimSuffix(domain, "."+root)
-		}
-		recID, derr := newAliyunDNS(akID, akSec).AddRecord(root, rr, "CNAME", cname, 600)
-		add("添加 DNS 解析", derr, fmt.Sprintf("%s.%s → %s（RecordId %s）", rr, root, cname, recID))
-	}
-
 	ok := true
 	for _, s := range steps {
 		if !s.OK {
