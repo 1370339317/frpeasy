@@ -31,7 +31,17 @@ func (p *Panel) teardownDomain(domain string, add func(string, error, string) bo
 
 	// ① EdgeOne 加速域名
 	if zoneID != "" {
-		if err := c.DeleteAccelDomains(zoneID, []string{domain}); err != nil {
+		delErr := c.DeleteAccelDomains(zoneID, []string{domain})
+		// 未停用的域名不允许删除：先停用再删。这一步是腾讯云强制的，
+		// 少了它删除永远失败（2026-11-21 用户删隧道后云上资源仍在，就是这个原因）。
+		if delErr != nil && strings.Contains(delErr.Error(), "StatusNotInOffline") {
+			if serr := c.SetAccelDomainStatus(zoneID, []string{domain}, "offline"); serr != nil {
+				delErr = fmt.Errorf("停用失败：%v（原始删除错误：%v）", serr, delErr)
+			} else {
+				delErr = c.DeleteAccelDomains(zoneID, []string{domain})
+			}
+		}
+		if err := delErr; err != nil {
 			// 云上已经不存在 = 目标状态已达成，不是失败。
 			// 否则"已经清理干净"的状态会显示红叉，反而让人以为还要去控制台处理。
 			if strings.Contains(err.Error(), "DomainNotFound") || strings.Contains(err.Error(), "ResourceUnavailable") {

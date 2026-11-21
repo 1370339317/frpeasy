@@ -466,3 +466,21 @@ func (e *edgeOne) DeleteAccelDomains(zoneID string, domains []string) error {
 	})
 	return err
 }
+
+// SetAccelDomainStatus 启用/停用一个加速域名。
+//
+// 删除前必须先停用（腾讯云强制）：直接删会返回
+// OperationDenied.AccelerationDomainStatusNotInOffline。
+func (e *edgeOne) SetAccelDomainStatus(zoneID string, domains []string, status string) error {
+	if len(domains) == 0 {
+		return nil
+	}
+	payload := map[string]any{"ZoneId": zoneID, "DomainNames": domains, "Status": status}
+	_, err := e.call("ModifyAccelerationDomainStatuses", payload)
+	// 接口名在文档里出现过单复数两种写法，仅在"动作不存在"时回退，
+	// 避免业务错误被重试成一次多余的写操作。
+	if err != nil && strings.Contains(err.Error(), "InvalidAction") {
+		_, err = e.call("ModifyAccelerationDomainStatus", payload)
+	}
+	return err
+}
