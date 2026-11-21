@@ -58,7 +58,9 @@ func (d *dnspod) EnsureCNAME(rootDomain, subdomain, target string, ttl int) (boo
 		"RecordType": "CNAME",
 		"Limit":      100,
 	})
-	if err != nil {
+	// "查不到记录"是正常情况（还没建），腾讯云却以错误码返回。
+	// 这里必须容错，否则第一次添加永远走不到 CreateRecord。
+	if err != nil && !isNoRecord(err) {
 		return false, "", err
 	}
 	var out struct {
@@ -95,4 +97,17 @@ func (d *dnspod) EnsureCNAME(rootDomain, subdomain, target string, ttl int) (boo
 		return false, "", err
 	}
 	return true, fmt.Sprintf("已创建 %s.%s → %s（TTL %d）", subdomain, rootDomain, target, ttl), nil
+}
+
+// isNoRecord 判断错误是否为"该查询没有记录"。
+//
+// 腾讯云对空结果返回 ResourceNotFound.NoDataOfRecord，属于业务上的正常态，
+// 不是故障。用字符串匹配而不用类型断言，是因为 call() 把错误统一成文本，
+// 引入自定义错误类型会让所有调用点都要改。
+func isNoRecord(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "NoDataOfRecord") || strings.Contains(msg, "ResourceNotFound")
 }
