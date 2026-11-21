@@ -47,6 +47,10 @@ export function Tunnels() {
     let alive = true
     let timer: ReturnType<typeof setTimeout> | null = null
     const tick = async () => {
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
       try {
         const r = await api<{ items: CdnTunnelStatus[] | null }>('GET', '/api/cdn/tunnels-status')
         if (!alive) return
@@ -56,12 +60,23 @@ export function Tunnels() {
       } catch {
         /* 状态拿不到就不显示，不影响列表本身 */
       }
-      if (alive) timer = setTimeout(tick, 30000)
+      if (alive) timer = setTimeout(() => void tick(), 10000)
     }
+    // 切回标签页立刻刷新一次。
+    // 浏览器对后台标签页的 setTimeout 有节流（可能压到 1 分钟一次甚至暂停），
+    // 而用户恰恰经常是"去腾讯云控制台看一眼，再切回来"——只靠定时器会看到旧状态，
+    // 让人以为要手动刷新才行。
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void tick()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
     void tick()
     return () => {
       alive = false
       if (timer) clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
     }
   }, [])
   // 每条隧道的实测结果（按 id 记，互不影响）。'loading' 表示正在测。
