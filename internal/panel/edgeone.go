@@ -315,18 +315,32 @@ func (e *edgeOne) WebSocketState(zoneID string) (bool, int, error) {
 	if err != nil {
 		return false, 0, err
 	}
+	// 真实返回是 {"ZoneSetting":{"ZoneConfig":{"WebSocket":{...}}}} —— 配置嵌在
+	// ZoneSetting 里，不在顶层。2026-11-21 因为按顶层解，一直读成 off，导致
+	// 每次接入都误判"未开启"并重复写入，把整个站点反复重部署。这段解析必须有
+	// 真实报文兜底（见 edgeone_test.go 的 fixture）。
 	var out struct {
-		ZoneConfig struct {
+		ZoneSetting struct {
+			ZoneConfig struct {
+				WebSocket struct {
+					Switch  string `json:"Switch"`
+					Timeout int    `json:"Timeout"`
+				} `json:"WebSocket"`
+			} `json:"ZoneConfig"`
+			// 兼容旧接口 DescribeZoneSetting 的扁平结构
 			WebSocket struct {
 				Switch  string `json:"Switch"`
 				Timeout int    `json:"Timeout"`
 			} `json:"WebSocket"`
-		} `json:"ZoneConfig"`
+		} `json:"ZoneSetting"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return false, 0, fmt.Errorf("解析站点加速配置失败：%w", err)
 	}
-	ws := out.ZoneConfig.WebSocket
+	ws := out.ZoneSetting.ZoneConfig.WebSocket
+	if ws.Switch == "" {
+		ws = out.ZoneSetting.WebSocket
+	}
 	return strings.EqualFold(ws.Switch, "on"), ws.Timeout, nil
 }
 

@@ -154,3 +154,40 @@ func TestCDNConfigMasksSecrets(t *testing.T) {
 		t.Fatal("掩码不应为空（空会让人以为没配）")
 	}
 }
+
+// 真实报文（2026-11-21 实测从 DescribeL7AccSetting 取回）。
+// 配置嵌在 ZoneSetting 里而不是顶层 —— 之前按顶层解析，一直读成 off，
+// 导致每次接入都误判"未开启"并重复写入，把整个站点反复重部署。
+func TestWebSocketStateParsesZoneSetting(t *testing.T) {
+	old := edgeOneBase
+	defer func() { edgeOneBase = old }()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"Response":{"RequestId":"r1","ZoneSetting":{"ZoneConfig":{"WebSocket":{"Switch":"on","Timeout":300}}}}}`))
+	}))
+	defer srv.Close()
+	edgeOneBase = srv.URL
+
+	on, timeout, err := newEdgeOne("AK", "SK", "", edgeOneBase).WebSocketState("zone-1")
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if !on || timeout != 300 {
+		t.Fatalf("应读出 on=true timeout=300，实际 on=%v timeout=%d", on, timeout)
+	}
+}
+
+// 旧接口的扁平结构也要能读，避免换接口后又出现同样的误判。
+func TestWebSocketStateLegacyFlat(t *testing.T) {
+	old := edgeOneBase
+	defer func() { edgeOneBase = old }()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"Response":{"ZoneSetting":{"WebSocket":{"Switch":"off","Timeout":30}}}}`))
+	}))
+	defer srv.Close()
+	edgeOneBase = srv.URL
+
+	on, timeout, err := newEdgeOne("AK", "SK", "", edgeOneBase).WebSocketState("zone-1")
+	if err != nil || on || timeout != 30 {
+		t.Fatalf("期望 off/30，实际 on=%v timeout=%d err=%v", on, timeout, err)
+	}
+}
