@@ -451,3 +451,18 @@ func (e *edgeOne) RequestFreeCert(zoneID, domain string) error {
 	})
 	return err
 }
+
+// DeleteAccelDomains 批量删除加速域名。
+//
+// 接口名是复数（DeleteAccelerationDomains）—— 单数版不存在，调用会返回
+// InvalidAction。参数是 DomainNames 数组，不是单个 DomainName。
+func (e *edgeOne) DeleteAccelDomains(zoneID string, domains []string) error {
+	if len(domains) == 0 {
+		return nil
+	}
+	_, err := e.call("DeleteAccelerationDomains", map[string]any{
+		"ZoneId":      zoneID,
+		"DomainNames": domains,
+	})
+	return err
+}

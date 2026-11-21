@@ -254,6 +254,8 @@ func (p *Panel) Run(listen string) error {
 	mux.HandleFunc("GET /api/cdn/audit", p.requireAuth(p.cdnAuditHandler))
 	// http 隧道的真实可用性（域名部署状态 + 证书状态）
 	mux.HandleFunc("GET /api/cdn/tunnels-status", p.requireAuth(p.cdnTunnelStatusHandler))
+	// 拆除一条域名入口：EdgeOne 加速域名 + DNSPod 解析（与"创建"成对）
+	mux.HandleFunc("POST /api/cdn/teardown", p.requireAuth(p.cdnTeardownHandler))
 	mux.HandleFunc("GET /api/frps", p.requireAuth(p.frpsControlHandler))
 	mux.HandleFunc("POST /api/frps", p.requireAuth(p.frpsControlHandler))
 	mux.HandleFunc("GET /api/system/network", p.requireAuth(p.systemNetworkHandler))

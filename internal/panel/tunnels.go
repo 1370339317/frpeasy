@@ -3,6 +3,7 @@ package panel
 import (
 	"encoding/json"
 	"errors"
+	"frpeasy/internal/shared"
 	"net"
 	"net/http"
 	"strconv"
@@ -211,6 +212,17 @@ func accessURL(host, agentID string, publicPort int) string {
 
 // deleteTunnelHandler DELETE /api/tunnels/{id}
 func (p *Panel) deleteTunnelHandler(w http.ResponseWriter, r *http.Request, id int64) {
+	// 先取出隧道快照：http 隧道的域名入口在云上还有加速域名与 DNS 记录，
+	// 删除隧道时必须一起拆掉，否则会留下"面板里没有、云上还在计费/占域名"的孤儿资源。
+	// （2026-11-21 用户实测发现：删了隧道，腾讯云里的配置纹丝不动。）
+	var snapshot *shared.Tunnel
+	if t, err := p.db.GetTunnel(id); err == nil {
+		snapshot = t
+	}
+	var teardown []cdnStep
+	if snapshot != nil && snapshot.Protocol == "http" {
+		teardown = p.tunnelTeardownForDelete(snapshot)
+	}
 	if err := p.db.DeleteTunnel(id); err != nil {
 		if errors.Is(err, ErrTunnelNotFound) {
 			http.Error(w, "隧道不存在（可能已被删除）", http.StatusNotFound)
@@ -220,7 +232,7 @@ func (p *Panel) deleteTunnelHandler(w http.ResponseWriter, r *http.Request, id i
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "teardown": teardown})
 }
 
 // 解析路由中的隧道 ID（Go 1.22 模式已匹配 /api/tunnels/{id}）。
