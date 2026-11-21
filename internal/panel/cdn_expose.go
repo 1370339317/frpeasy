@@ -3,9 +3,11 @@ package panel
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // cdnExposeHandler POST /api/cdn/expose
@@ -98,7 +100,22 @@ func (p *Panel) cdnExposeHandler(w http.ResponseWriter, r *http.Request) {
 			res.NeedFWL = vhost
 		}
 	}
-	add("准备 vhost 端口", nil, fmt.Sprintf("frps 在 %d 上按 Host 路由 http 隧道", vhost))
+	// 无论本次是否新分配，都要确认 frps 真的在监听：设置项只是期望值，
+	// 不重启 frps 就不会生成 vhostHTTPPort，CDN 回源会直接被拒绝连接
+	// （面板上一切正常，只看得到 550/回源失败）。
+	if !p.vhostListening(vhost) {
+		if err := p.frps.Restart(); err != nil {
+			add("准备 vhost 端口", err, "frps 重启失败，vhost 端口未生效")
+			write()
+			return
+		}
+		if !p.vhostListening(vhost) {
+			add("准备 vhost 端口", fmt.Errorf("frps 已重启但 %d 仍未监听", vhost), "请检查 frps 日志与端口占用")
+			write()
+			return
+		}
+	}
+	add("准备 vhost 端口", nil, fmt.Sprintf("frps 正在 %d 上按 Host 路由 http 隧道", vhost))
 
 	// ② 新建 http 隧道（保留原来的 tcp 隧道，互不影响）
 	tun, err := p.db.CreateHTTPTunnel(src.Name+"-cdn", src.LocalAddr, domain, src.AgentID)
@@ -198,4 +215,17 @@ func (p *Panel) pickVhostPort() int {
 // portInAllowedRange 判断端口是否落在「安全组通常已放行」的区间里。
 func (p *Panel) portInAllowedRange(port int) bool {
 	return (port >= 21000 && port <= 21009) || port == 27900 || port == 28080
+}
+
+// vhostListening 判断 frps 是否真的在监听 vhost 端口。
+//
+// 用"连一下"而不是读配置文件：文件存在不代表进程加载了它，
+// 而 CDN 回源只关心"这个端口能不能连上"。
+func (p *Panel) vhostListening(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 800*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
