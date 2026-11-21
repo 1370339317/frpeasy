@@ -384,3 +384,22 @@ func (e *edgeOne) WebSocketState(zoneID string) (bool, int, error) {
 	ws := out.ZoneConfig.WebSocket
 	return strings.EqualFold(ws.Switch, "on"), ws.Timeout, nil
 }
+
+// EnsureWebSocket 读 → 必要时写一次 → 再读一次，返回最终是否真的开启。
+//
+// 为什么要"写完再读"：ModifyL7AccSetting 返回成功只代表请求被受理，站点还要走一次
+// 配置下发；下发期间读回来的值可能仍是 off。只有回读才能回答"到底开没开"。
+func (e *edgeOne) EnsureWebSocket(zoneID string, timeoutSec int) (bool, error) {
+	if on, _, err := e.WebSocketState(zoneID); err == nil && on {
+		return true, nil
+	}
+	if err := e.EnableWebSocket(zoneID, timeoutSec); err != nil {
+		return false, err
+	}
+	// 给下发留一点时间再回读；读不到就当"已提交、未确认"，由上层如实展示。
+	time.Sleep(2 * time.Second)
+	if on, _, err := e.WebSocketState(zoneID); err == nil {
+		return on, nil
+	}
+	return false, nil
+}

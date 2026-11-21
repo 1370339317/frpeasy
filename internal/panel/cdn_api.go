@@ -35,6 +35,7 @@ const (
 	settingCDNAliyunKey    = "cdn_aliyun_ak_secret"
 	settingCDNAliyunRoot   = "cdn_aliyun_root_domain"
 	settingCDNDNSRR        = "cdn_dns_rr"
+	settingCDNWSAttemptAt  = "cdn_ws_attempt_at"
 )
 
 // cdnSecretKeys 需要遮蔽、且允许「留空表示不修改」的键。
@@ -293,21 +294,14 @@ func (p *Panel) cdnProvisionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// WebSocket 是**站点级**配置：调用 ModifyL7AccSetting 会让该站点下所有加速域名
-	// 重新部署一次。这里只读、不写。
-	//
-	// 2026-11-21 事故：面板反复写入 → 站点一直停在 pending → 读回来仍是 off →
-	// 下次接入又写 → 再触发全站重新部署，形成死循环，用户所有域名的状态在
-	// "部署中" 里出不来。站点级配置的写入代价太大，不该由一次"接入"顺手做掉，
-	// 交给用户在 EdgeOne 控制台显式开启。
-	wsOn, wsTimeout, werr := c.WebSocketState(zoneID)
-	switch {
-	case werr != nil:
-		add("检查 WebSocket", nil, "读取当前状态失败，未做任何写入："+werr.Error())
-	case wsOn:
-		add("检查 WebSocket", nil, fmt.Sprintf("已开启（空闲超时 %d 秒）", wsTimeout))
-	default:
-		add("检查 WebSocket", nil, "当前未开启。面板不会代你写入（这是站点级配置，会重部署该站点下所有域名）——"+
-			"请到 EdgeOne 控制台「站点加速 → 网络优化 → WebSocket」打开，然后回来重试")
+	// 重新部署一次。所以这里做三件事：先读；确实没开才写一次；写之前看冷却，
+	// 避免"写了没生效 → 下次再写 → 又全站重部署"的死循环（2026-11-21 踩过）。
+	if on, note, err := p.ensureWebSocket(c, zoneID, 0, false); err != nil {
+		add("开启 WebSocket", err, note)
+	} else if on {
+		add("检查 WebSocket", nil, note)
+	} else {
+		add("检查 WebSocket", nil, note)
 	}
 
 	// DNS 解析检查：接入做完了但解析没生效，仍然不能开开关。
@@ -511,4 +505,79 @@ func hostResolves(host string) error {
 	defer cancel()
 	_, err := net.DefaultResolver.LookupHost(ctx, host)
 	return err
+}
+
+// wsCooldown 两次自动写入之间的最小间隔。
+//
+// 站点级配置下发要几十秒到几分钟；在此期间回读仍是 off。若不加冷却，下一次接入
+// 会认为"没开"再写一次，把正在进行的部署又打断，永远收敛不了。
+const wsCooldown = 15 * time.Minute
+
+// ensureWebSocket 确保站点开启 WebSocket，返回最终状态与一句可展示的说明。
+//
+// force=true 跳过冷却（用户在界面上显式点了"强制重开"）。
+func (p *Panel) ensureWebSocket(c *edgeOne, zoneID string, timeoutSec int, force bool) (bool, string, error) {
+	if timeoutSec <= 0 {
+		timeoutSec = 300
+		if n, e := strconv.Atoi(strings.TrimSpace(p.db.GetSetting(settingCDNWSTimeout))); e == nil && n > 0 {
+			timeoutSec = n
+		}
+	}
+	on, curTimeout, rerr := c.WebSocketState(zoneID)
+	if rerr == nil && on {
+		return true, fmt.Sprintf("已是开启状态（空闲超时 %d 秒）", curTimeout), nil
+	}
+	if rerr != nil {
+		// 读不到就不写：宁可不做，也别在看不见状态的情况下触发一次全站重部署。
+		return false, "读取当前状态失败，未做任何写入：" + rerr.Error(), nil
+	}
+
+	if !force {
+		if v := strings.TrimSpace(p.db.GetSetting(settingCDNWSAttemptAt)); v != "" {
+			if ts, err := time.Parse(time.RFC3339, v); err == nil {
+				if left := wsCooldown - time.Since(ts); left > 0 {
+					return false, fmt.Sprintf(
+						"%s 已自动开启过一次，但站点仍在部署中（配置尚未生效）。为避免反复触发全站重新部署，"+
+							"本次跳过；约 %d 分钟后再试，或点「强制重开」。",
+						ts.Local().Format("15:04"), int(left.Minutes())+1), nil
+				}
+			}
+		}
+	}
+
+	_ = p.db.SetSetting(settingCDNWSAttemptAt, time.Now().UTC().Format(time.RFC3339))
+	ok, err := c.EnsureWebSocket(zoneID, timeoutSec)
+	if err != nil {
+		return false, "", err
+	}
+	if ok {
+		return true, fmt.Sprintf("已开启（空闲超时 %d 秒），站点开始重新部署该站点下的域名", timeoutSec), nil
+	}
+	return false, "已提交开启请求，但回读仍是关闭：站点还在部署中，等它下发完成即可（不要重复点击）", nil
+}
+
+// cdnWSEnableHandler POST /api/cdn/ws-enable
+//
+// 显式开启站点 WebSocket。body {"force":true} 跳过冷却。
+func (p *Panel) cdnWSEnableHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Force bool `json:"force"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	c, err := p.cdnClient()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	zoneID := strings.TrimSpace(p.db.GetSetting(settingCDNTencentZone))
+	if zoneID == "" {
+		http.Error(w, "还没有选择站点", http.StatusBadRequest)
+		return
+	}
+	on, note, err := p.ensureWebSocket(c, zoneID, 0, body.Force)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "enabled": on, "note": note})
 }

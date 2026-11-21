@@ -55,7 +55,7 @@ const DEFAULT_FRPS_PORT = 27900
 const POLL_INTERVAL_MS = 2000
 const POLL_TIMEOUT_MS = 60_000
 
-type Busy = 'connect' | 'zone' | 'domain' | 'create' | 'provision' | 'toggle' | null
+type Busy = 'connect' | 'zone' | 'domain' | 'create' | 'provision' | 'toggle' | 'ws' | null
 
 type LoadState = 'idle' | 'loading' | 'ready' | 'error'
 
@@ -451,6 +451,28 @@ export function CdnCard() {
     } catch (e) {
       setDomainErr(readErr(e))
       toast('创建加速域名失败', 'bad')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // 显式开一次站点 WebSocket。冷却机制在不在都允许（force），由用户主动承担一次全站重部署。
+  const [wsNote, setWsNote] = useState<{ ok: boolean; text: string } | null>(null)
+  const forceWs = async () => {
+    if (busy !== null) return
+    setBusy('ws')
+    setWsNote(null)
+    try {
+      const r = await api<{ ok: boolean; enabled: boolean; note: string }>(
+        'POST',
+        '/api/cdn/ws-enable',
+        { force: true },
+      )
+      setWsNote({ ok: r.enabled, text: r.note })
+      await reload()
+    } catch (e) {
+      const be = readErr(e)
+      setWsNote({ ok: false, text: be.text })
     } finally {
       setBusy(null)
     }
@@ -900,6 +922,14 @@ export function CdnCard() {
               <Button disabled={busy !== null} onClick={() => void runProvision()}>
                 {busy === 'provision' ? '接入中…' : '开始接入'}
               </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy !== null}
+                onClick={() => void forceWs()}
+              >
+                {busy === 'ws' ? '开启中…' : '开启/重开 WebSocket'}
+              </Button>
               <span className="text-[11.5px] text-dim">
                 幂等：重复点不会产生重复的域名或解析
               </span>
@@ -910,6 +940,19 @@ export function CdnCard() {
             <div className="mt-2 text-[11.5px] leading-[1.6] text-warn-fg">
               说明：WebSocket 是<strong>站点级</strong>设置。若该站点当前没开，接入时会写一次，
               腾讯云会把该站点下<strong>所有</strong>加速域名重新部署一遍；已开启则跳过、不产生任何变更。
+            </div>
+          )}
+
+          {wsNote && (
+            <div
+              className={cx(
+                'mt-2 rounded-lg border px-3 py-2 text-[12px] leading-[1.65]',
+                wsNote.ok ? 'border-ok-fg/40 bg-ok-dim text-ok-fg' : 'border-warn-fg/40 bg-warn-dim text-warn-fg',
+              )}
+            >
+              <span className="break-all" title={wsNote.text}>
+                {wsNote.text}
+              </span>
             </div>
           )}
 
