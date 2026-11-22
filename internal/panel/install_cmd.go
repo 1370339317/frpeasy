@@ -297,10 +297,22 @@ func (p *Panel) gitAgentURLForVersion(osName, arch, version string) string {
 
 // installCommandFields 生成与安装命令有关的响应字段（两个接口共用一份，避免走偏）。
 func (p *Panel) installCommandFields(r *http.Request) map[string]any {
+	// 实例标识要让用户看得见：同一台机器装了两个面板时，他需要知道
+	// "这个面板对应哪个目录、哪个计划任务"，否则重装/卸载全靠猜。
+	key := instanceKey(p.resolvePanelBase(r))
+	dirName := "frpeasy-agent"
+	taskName := "frpeasy-agent"
+	if key != "default" {
+		dirName = "frpeasy-agent-" + key
+		taskName = dirName
+	}
 	return map[string]any{
 		"install_command":         p.buildInstallCommand(r),
 		"install_command_windows": p.buildInstallCommandWindows(r),
 		"install_command_android": p.buildInstallCommandAndroid(r),
+		"instance_key":            key,
+		"instance_dir":            "%ProgramData%\\" + dirName,
+		"instance_task":           taskName,
 	}
 }
 
