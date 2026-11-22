@@ -76,15 +76,17 @@ function Get-InstanceStateServer([string]$dirPath) {
 $legacyDir = Join-Path $pd "frpeasy-agent"
 $normServer = Get-NormPanel $Server
 
+# Upgrading an existing install ALWAYS wins over the id passed on the command
+# line: the panel now always sends -Instance, so an old install would otherwise
+# be treated as a brand new instance and the machine would end up with two
+# agents polling the same panel (duplicate registrations, duplicate traffic).
+if ($normServer -and (Test-Path (Join-Path $legacyDir "agent.state"))) {
+  $legacyServer = Get-InstanceStateServer $legacyDir
+  if ($legacyServer -and $legacyServer -eq $normServer) { $Instance = "default" }
+}
+
 if (-not $Instance) {
-  # Upgrading an existing install: if the legacy dir is already bound to this
-  # very panel, keep using it instead of creating a second instance that would
-  # fight over the same panel registration.
-  if ($normServer -and (Test-Path (Join-Path $legacyDir "agent.state"))) {
-    $legacyServer = Get-InstanceStateServer $legacyDir
-    if ($legacyServer -and $legacyServer -eq $normServer) { $Instance = "default" }
-  }
-  if (-not $Instance -and $normServer) {
+  if ($normServer) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
     $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($normServer))
     $Instance = (($hash[0..3] | ForEach-Object { $_.ToString("x2") }) -join '')
