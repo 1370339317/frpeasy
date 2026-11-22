@@ -1,6 +1,8 @@
 package panel
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"net/url"
@@ -67,8 +69,10 @@ func winFetchPS1(panelHTTP string) string {
 func (p *Panel) buildInstallCommandWindows(r *http.Request) string {
 	panelHTTP := p.resolvePanelBase(r)
 	token := p.db.GetSetting("install_token")
+	// -Instance 让同一台客户端可以装多份（各自连不同面板），互不覆盖。
 	return "powershell -ExecutionPolicy Bypass -Command \"" + winFetchPS1(panelHTTP) +
-		"& $env:TEMP\\frpeasy-install.ps1 -Server " + panelHTTP + " -Token " + token + "\""
+		"& $env:TEMP\\frpeasy-install.ps1 -Server " + panelHTTP + " -Token " + token +
+		" -Instance " + instanceKey(panelHTTP) + "\""
 }
 
 // buildInstallCommandAndroid 生成 Android（adb shell）一键安装命令。
@@ -133,7 +137,7 @@ func (p *Panel) buildUninstallCommand(r *http.Request) string {
 func (p *Panel) buildUninstallCommandWindows(r *http.Request) string {
 	panelHTTP := p.resolvePanelBase(r)
 	return "powershell -ExecutionPolicy Bypass -Command \"" + winFetchPS1(panelHTTP) +
-		"& $env:TEMP\\frpeasy-install.ps1 -Uninstall\""
+		"& $env:TEMP\\frpeasy-install.ps1 -Uninstall -Instance " + instanceKey(panelHTTP) + "\""
 }
 
 // buildUninstallCommandAndroid 生成 Android（adb shell）卸载命令。
@@ -298,4 +302,27 @@ func (p *Panel) installCommandFields(r *http.Request) map[string]any {
 		"install_command_windows": p.buildInstallCommandWindows(r),
 		"install_command_android": p.buildInstallCommandAndroid(r),
 	}
+}
+
+// instanceKey 把一个面板地址折叠成实例标识（sha256 前 8 位）。
+//
+// 为什么不用 IP：IP 会变、可能走域名或 NAT、同一 IP 不同端口也可能是两台面板。
+// 归一化时去掉 scheme 与默认端口，这样 http://h:80 与 https://h 视作同一实例。
+func instanceKey(base string) string {
+	n := normalizePanelBase(base)
+	if n == "" {
+		return "default"
+	}
+	sum := sha256.Sum256([]byte(n))
+	return hex.EncodeToString(sum[:4])
+}
+
+func normalizePanelBase(b string) string {
+	s := strings.ToLower(strings.TrimSpace(b))
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimRight(s, "/")
+	s = strings.TrimSuffix(s, ":80")
+	s = strings.TrimSuffix(s, ":443")
+	return s
 }

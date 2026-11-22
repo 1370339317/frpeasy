@@ -20,6 +20,10 @@ param(
   # (Settings -> Binary download) and pushed down every heartbeat.
   [string]$Source = "",
   [string]$GitBase = "",
+  # Instance id. Empty = derive from -Server, or "default" for the legacy
+  # single-install layout. Two panels on different servers get different ids,
+  # so their files, scheduled tasks and processes never collide.
+  [string]$Instance = "",
   [switch]$Uninstall,
   [switch]$Foreground
 )
@@ -31,7 +35,6 @@ if ($Source -or $GitBase) {
   Write-Host "           configure source order in panel -> Settings -> Binary download."
 }
 $srcArgs = @()
-$TaskName = "frpeasy-agent"
 # $env:ProgramData is normally always present, but when it is missing Join-Path
 # dies with "Cannot bind argument to parameter 'Path' because it is null" -
 # before the admin check, before any download, with no hint about the cause.
@@ -46,7 +49,64 @@ if (-not (Test-Path $pd)) {
   Write-Host "[frpeasy] ERROR: cannot find ProgramData (env:ProgramData is empty and $pd does not exist)." -ForegroundColor Red
   exit 1
 }
-$dir = Join-Path $pd "frpeasy-agent"
+# --- instance isolation ---------------------------------------------------
+# One machine may run several agents, each bound to a different panel. Every
+# value that used to be a global singleton (data dir, task name, process match)
+# is derived per instance so two installs never touch each other.
+function Get-NormPanel([string]$u) {
+  if (-not $u) { return "" }
+  $s = $u.Trim().ToLower()
+  $s = $s -replace '^https?://', ''
+  $s = $s.TrimEnd('/')
+  $s = $s -replace ':80$', ''
+  $s = $s -replace ':443$', ''
+  return $s
+}
+
+function Get-InstanceStateServer([string]$dirPath) {
+  $f = Join-Path $dirPath "agent.state"
+  if (-not (Test-Path $f)) { return "" }
+  try {
+    $j = Get-Content -Raw -Path $f | ConvertFrom-Json
+    if ($j.server) { return (Get-NormPanel ([string]$j.server)) }
+  } catch {}
+  return ""
+}
+
+$legacyDir = Join-Path $pd "frpeasy-agent"
+$normServer = Get-NormPanel $Server
+
+if (-not $Instance) {
+  # Upgrading an existing install: if the legacy dir is already bound to this
+  # very panel, keep using it instead of creating a second instance that would
+  # fight over the same panel registration.
+  if ($normServer -and (Test-Path (Join-Path $legacyDir "agent.state"))) {
+    $legacyServer = Get-InstanceStateServer $legacyDir
+    if ($legacyServer -and $legacyServer -eq $normServer) { $Instance = "default" }
+  }
+  if (-not $Instance -and $normServer) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($normServer))
+    $Instance = (($hash[0..3] | ForEach-Object { $_.ToString("x2") }) -join '')
+  }
+  if (-not $Instance) { $Instance = "default" }
+}
+
+if ($Instance -eq "default") {
+  $dirName = "frpeasy-agent"
+} else {
+  $dirName = "frpeasy-agent-" + $Instance
+}
+# Uninstalling an install created before instance ids existed: the keyed dir
+# does not exist, but the legacy one does. Fall back so cleanup still works.
+if ($Uninstall -and $Instance -ne "default") {
+  if ((-not (Test-Path (Join-Path $pd $dirName))) -and (Test-Path $legacyDir)) {
+    $Instance = "default"
+    $dirName = "frpeasy-agent"
+  }
+}
+$TaskName = $dirName
+$dir = Join-Path $pd $dirName
 $exe = Join-Path $dir "frpeasy-agent.exe"
 $bak = Join-Path $dir "frpeasy-agent.exe.bak"
 
@@ -57,7 +117,30 @@ function Test-Admin {
 }
 
 function Get-AgentProcess {
-  return @(Get-Process -Name "frpeasy-agent" -ErrorAction SilentlyContinue)
+  # Match by the --data argument, NOT by process name: with several instances
+  # running, Get-Process -Name returns every one of them, and uninstalling one
+  # panel would kill the agents of the others.
+  $want = $dir.TrimEnd('')
+  $out = @()
+  $procs = Get-CimInstance Win32_Process -Filter "Name='frpeasy-agent.exe'" -ErrorAction SilentlyContinue
+  foreach ($p in $procs) {
+    $cl = $p.CommandLine
+    if (-not $cl) {
+      if ($p.ExecutablePath -and ((Split-Path -Parent $p.ExecutablePath).TrimEnd('') -ieq $want)) {
+        $out += Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
+      }
+      continue
+    }
+    $m = [regex]::Match($cl, '--data\s+"?([^"\s]+)"?')
+    if ($m.Success) {
+      if ($m.Groups[1].Value.TrimEnd('') -ieq $want) {
+        $out += Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
+      }
+    } elseif (($cl.ToLower()) -match [regex]::Escape($want.ToLower())) {
+      $out += Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
+    }
+  }
+  return $out
 }
 
 function Remove-AgentTask {
